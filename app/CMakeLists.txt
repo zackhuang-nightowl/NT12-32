@@ -100,12 +100,14 @@ if(NOT NVR_CROSS)
         ${CMAKE_CURRENT_SOURCE_DIR}/config ${NVR_ROOT}/common/include
         ${NVR_ROOT}/third_party/cJSON)
     target_link_libraries(test_nvr_chan_persist PRIVATE cjson)
+    target_compile_options(test_nvr_chan_persist PRIVATE -UNDEBUG)
     add_test(NAME test_nvr_chan_persist COMMAND test_nvr_chan_persist)
 
     # 通道状态 0-7 纯映射单测（主机可运行；纯 C，无重依赖）
     add_executable(test_nvr_chan_status
         channel/test_nvr_chan_status.c channel/nvr_chan_status.c)
     target_include_directories(test_nvr_chan_status PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/channel)
+    target_compile_options(test_nvr_chan_status PRIVATE -UNDEBUG)
     add_test(NAME test_nvr_chan_status COMMAND test_nvr_chan_status)
 
     # 预览布局/映射/悬浮块单测（主机可运行；mock mhal_vout + streaming）
@@ -116,6 +118,7 @@ if(NOT NVR_CROSS)
         ${CMAKE_CURRENT_SOURCE_DIR}/preview ${CMAKE_CURRENT_SOURCE_DIR}/preview/test
         ${NVR_ROOT}/platform/media_hal ${NVR_ROOT}/components/streaming/include
         ${NVR_ROOT}/common/include ${NVR_ROOT}/components/recorder/include)
+    target_compile_options(test_nvr_preview PRIVATE -UNDEBUG)
     add_test(NAME test_nvr_preview COMMAND test_nvr_preview)
 
     # 显示命令处理器单测（主机可运行；mock mhal_vout/streaming + mock_channel stub）
@@ -131,5 +134,6 @@ if(NOT NVR_CROSS)
         ${NVR_ROOT}/components/config/include ${NVR_ROOT}/components/storage/include
         ${NVR_ROOT}/components/recorder/include ${NVR_ROOT}/common/include ${NVR_ROOT}/third_party/cJSON)
     target_link_libraries(test_nvr_cmd_display PRIVATE cjson)
+    target_compile_options(test_nvr_cmd_display PRIVATE -UNDEBUG)
     add_test(NAME test_nvr_cmd_display COMMAND test_nvr_cmd_display)
 endif()

@@ -1,4 +1,5 @@
 #include "nvr_preview.h"
+#include "mhal_vout.h"
 #include "mock_mhal_vout.h"
 #include <assert.h>
 #include <stdio.h>

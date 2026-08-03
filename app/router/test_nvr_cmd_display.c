@@ -1,10 +1,12 @@
 #include "nvr_cmd_display.h"
 #include "nvr_preview.h"
 #include "nvr_chan_persist.h"
+#include "mhal_vout.h"
 #include "mock_mhal_vout.h"
 #include "cJSON.h"
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static cJSON* content_of(char *resp){ cJSON*j=cJSON_Parse(resp); cJSON*c=cJSON_Duplicate(cJSON_GetObjectItem(j,"content"),1); cJSON_Delete(j); return c; }
