@@ -1,0 +1,13 @@
+# /etc/udev/rules.d/99-nvr-rawdisk.rules — 防内核/桌面自动挂载录像裸盘
+#
+# 部署期投放到目标机 /etc/udev/rules.d/。裸盘无 FS，必须挡住自动挂载/探测/fsck，
+# 否则可能被误判外来盘弹"格式化"或误挂载破坏写指针。见 DESIGN_rawdisk.md §4。
+#
+# 说明：SATA 录像盘一般是 sd*；如需精确到具体盘，用 ID_SERIAL 匹配。
+
+# 对所有裸录像盘：禁止 udisks 自动挂载 + 清空 FS 类型探测
+SUBSYSTEM=="block", KERNEL=="sd[a-z]", ENV{UDISKS_IGNORE}="1"
+SUBSYSTEM=="block", KERNEL=="sd[a-z]", ENV{ID_FS_TYPE}=""
+
+# 可选：仅针对已知录像盘型号/序列（更安全，避免误伤系统盘/U盘）
+# SUBSYSTEM=="block", ENV{ID_SERIAL_SHORT}=="WD-XXXXXXXX", ENV{UDISKS_IGNORE}="1"

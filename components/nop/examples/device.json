@@ -1,0 +1,32 @@
+{
+  "device": {
+    "manufacturer": "NightOwl",
+    "model": "NOP-NVR-8CH",
+    "firmwareVersion": "2.3.1",
+    "serialNumber": "SN0A1B2C3D4E",
+    "hardwareId": "1.0",
+    "type": "videoRecorder",
+    "maxChannelCount": 8
+  },
+  "httpPort": 8089,
+  "capabilities": [
+    "device", "auth", "system", "stream", "ptz", "light",
+    "storage", "record", "audio", "ota", "network", "push", "ai"
+  ],
+  "detection": {
+    "supportedTypes": ["human", "vehicle", "animal", "package", "face"]
+  },
+  "ota": {
+    "company": "NightOwl",
+    "product": "NVR",
+    "model": "WNVR-BTWN8",
+    "urlBase": "https://kota.kalayservice.com/ota/GET/i",
+    "autoUpdate": true
+  },
+  "tutk": {
+    "enable": true,
+    "uid": "ABCD1234EFGH5678IJKL",
+    "authKey": "A1B2C3D4",
+    "licenseKey": "PUT-TUTK-LICENSE-HERE"
+  }
+}

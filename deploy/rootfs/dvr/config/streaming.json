@@ -1,0 +1,28 @@
+{
+  "_note": "③ 拉流出图默认参数，映射 nvr_stream_mgr_cfg_t / nvr_stream_chan_cfg_t 的缺省。通道级可在 channels.json 覆盖。",
+
+  "transport": {
+    "over_tcp": true,
+    "conn_timeout_s": 5,
+    "rx_timeout_s": 10
+  },
+
+  "reconnect": {
+    "enable": true,
+    "interval_s": 5,
+    "max_backoff_s": 30
+  },
+
+  "decode": {
+    "backend": "hardware",
+    "_note": "NA51090 hd_videodec 硬解；16 路不走 ffmpeg 软解，ffmpeg 仅个别相机兜底"
+  },
+
+  "preview": {
+    "single_view_stream": "main",
+    "multi_view_stream": "sub",
+    "_note": "单画面用主码流，多分屏用子码流省解码/带宽"
+  },
+
+  "buffer": { "jitter_ms": 200 }
+}

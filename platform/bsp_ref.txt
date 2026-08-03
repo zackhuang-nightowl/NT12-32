@@ -1,0 +1,12 @@
+# NA51090 / NT98633 BSP 引用（不纳入本工程，交叉编译时引用）
+# 原始路径：
+BSP_ROOT=/home/zack/NT12-32/NT98633/na51090_linux_sdk
+
+# 关键子路径：
+HDAL_INCLUDE=${BSP_ROOT}/code/hdal/include        # hd_videodec.h / hd_videoout.h / hd_videoenc.h ...
+HDAL_SAMPLES=${BSP_ROOT}/code/hdal/samples         # media_flow / dvr_demon / ai2 参考实现
+HDAL_OUTPUT=${BSP_ROOT}/code/hdal/output           # 预编译 hdal 库
+KERNEL=${BSP_ROOT}/BSP/linux-kernel                # Linux 4.19.148
+TOOLCHAIN=${BSP_ROOT}                              # aarch64 交叉工具链（见 Makefile/configs）
+
+# 体量参考（不复制原因）：BSP 全量 1.6G，其中 hdal 307M。

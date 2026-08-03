@@ -1,0 +1,4 @@
+/home/zack/NT12-32/NT12-SDK/recorder_sdk/examples/pic_demo.c: In function ‘main’:
+/home/zack/NT12-32/NT12-SDK/recorder_sdk/examples/pic_demo.c:29:9: warning: ignoring return value of ‘system’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+   29 |         system("ffmpeg -y -loglevel error -f lavfi -i testsrc2=size=320x240 -frames:v 1 /tmp/rsdk_snap.jpg");
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

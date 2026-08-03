@@ -1,0 +1,22 @@
+#!/bin/sh
+# S99nvr — 开机拉起 NVR 看护脚本（Buildroot/busybox init.d 约定）
+SUP=/dvr/bin/nvr_supervisor.sh
+PIDF=/var/run/nvr_supervisor.pid
+
+start() {
+    echo "Starting NVR supervisor..."
+    [ -x "$SUP" ] || { echo "missing $SUP"; exit 1; }
+    "$SUP" &
+    echo $! > "$PIDF"
+}
+stop() {
+    echo "Stopping NVR supervisor..."
+    [ -f "$PIDF" ] && kill -TERM "$(cat "$PIDF")" 2>/dev/null
+    rm -f "$PIDF"
+}
+case "$1" in
+    start) start ;;
+    stop)  stop ;;
+    restart) stop; sleep 2; start ;;
+    *) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

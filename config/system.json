@@ -1,0 +1,45 @@
+{
+  "device": {
+    "model": "NT12-32",
+    "soc": "NT98633",
+    "name": "NVR-01",
+    "sn": ""
+  },
+
+  "channels": {
+    "_note": "路数配置：capacity=总通道; poe_ports=内建PoE口数; ip_channels=数字通道数",
+    "capacity": 32,
+    "poe_ports": 16,
+    "ip_channels": 16
+  },
+
+  "video_out": {
+    "hdmi": { "enable": true, "resolution": "3840x2160", "refresh": 30 },
+    "cvbs": { "enable": false, "mode": "NTSC" },
+    "vga":  { "enable": false, "resolution": "1920x1080" },
+    "default_layout": 16,
+    "osd": { "channel_name": true, "datetime": true, "event_flag": true }
+  },
+
+  "time": {
+    "timezone": "America/New_York",
+    "ntp": "pool.ntp.org",
+    "format24h": true
+  },
+
+  "network": {
+    "eth0": {
+      "role": "mgmt",
+      "_note": "默认 DHCP；置 dhcp:false 并填 ip/mask/gw 则用静态",
+      "dhcp": true,
+      "ip": "192.168.9.114", "mask": "255.255.255.0", "gw": "192.168.9.1"
+    },
+    "eth1": {
+      "role": "poe_uplink",
+      "_note": "PoE 汇聚口：每 PoE 口一个 VLAN(2001..2016)；NVR 侧接口 198.18.<口>.1，内建 udhcpd 给 IPC 分 198.18.<口>.100+（绑定按第3段=口号入通道口-1）",
+      "mask": "255.255.255.0",
+      "vlan_base": 2000,
+      "dhcp_server": { "enable": true, "server_ip": "198.18.%d.1", "pool": "198.18.%d.100-199", "mask": "255.255.255.0" }
+    }
+  }
+}

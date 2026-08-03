@@ -1,0 +1,290 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="rtp\mpeg4_rtp_rx.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\rtp_tx.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_cfg.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_cln.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_http.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_media.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_parse.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_rcua.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_rsua.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_stream.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_srv.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="media\audio_capture.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\audio_decoder.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\audio_encoder.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\audio_play.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\media_util.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\screen_capture.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\video_capture.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\video_encoder.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="http\http_srv.cpp">
+      <Filter>http</Filter>
+    </ClCompile>
+    <ClCompile Include="media\file_demux.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\video_capture_win.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\screen_capture_win.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\h264_rtp_rx.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\h265_rtp_rx.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\rtp_rx.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\mpeg4.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\mjpeg_rtp_rx.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\mjpeg_tables.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\aac_rtp_rx.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\pcm_rtp_rx.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_util.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_srv_backchannel.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\rtcp.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_timer.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\h264_util.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\h265_util.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="http\http_mjpeg_cln.cpp">
+      <Filter>http</Filter>
+    </ClCompile>
+    <ClCompile Include="media\video_decoder.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="rtmp\rtmp_cln.cpp">
+      <Filter>rtmp</Filter>
+    </ClCompile>
+    <ClCompile Include="librtmp\amf.cpp">
+      <Filter>librtmp</Filter>
+    </ClCompile>
+    <ClCompile Include="librtmp\hashswf.cpp">
+      <Filter>librtmp</Filter>
+    </ClCompile>
+    <ClCompile Include="librtmp\log.cpp">
+      <Filter>librtmp</Filter>
+    </ClCompile>
+    <ClCompile Include="librtmp\parseurl.cpp">
+      <Filter>librtmp</Filter>
+    </ClCompile>
+    <ClCompile Include="librtmp\rtmp.cpp">
+      <Filter>librtmp</Filter>
+    </ClCompile>
+    <ClCompile Include="media\avcodec_mutex.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_mc.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="media\media_codec.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\media_parse.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\media_proxy.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\media_pusher.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\base64.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\hqueue.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\hxml.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\linked_list.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\ppstack.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\rfc_md5.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\sha1.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\sys_buf.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\sys_log.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\sys_os.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\util.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\word_analyse.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\xml_node.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="http\http_auth.cpp">
+      <Filter>http</Filter>
+    </ClCompile>
+    <ClCompile Include="http\http_cln.cpp">
+      <Filter>http</Filter>
+    </ClCompile>
+    <ClCompile Include="http\http_parse.cpp">
+      <Filter>http</Filter>
+    </ClCompile>
+    <ClCompile Include="http\http_test.cpp">
+      <Filter>http</Filter>
+    </ClCompile>
+    <ClCompile Include="getopt.cpp" />
+    <ClCompile Include="media\audio_capture_win.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\window_capture.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\window_capture_win.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\audio_play_win.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\ts_parser.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="srt\srt_cln.cpp">
+      <Filter>srt</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_srv_ws.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\sha256.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="media\win\win_os.cpp">
+      <Filter>media\win</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\net_util.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\ws.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="http\http_notify.cpp">
+      <Filter>http</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="rtp">
+      <UniqueIdentifier>{7137994b-0b43-4ff6-b629-0f3b967f3c4b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="rtsp">
+      <UniqueIdentifier>{3332ca0a-4ab4-49fb-98b7-cf6f19ef05a7}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="media">
+      <UniqueIdentifier>{579493ef-fb3c-4a0d-b611-8b08c1800c9e}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="bm">
+      <UniqueIdentifier>{88872e6c-bd72-4a3b-a866-73dac093f65a}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="http">
+      <UniqueIdentifier>{3ed59166-9084-4c5f-aaca-9653223c57ae}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="rtmp">
+      <UniqueIdentifier>{73ccf2b3-7b42-4cd7-8620-865a5c6cb013}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="librtmp">
+      <UniqueIdentifier>{837f6cd7-4e8e-4f33-8525-d940c108d0eb}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="srt">
+      <UniqueIdentifier>{24dfd4a6-f014-4c3d-b65d-b870c471502f}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="media\win">
+      <UniqueIdentifier>{52406cbc-17cf-42c6-b1b1-f7c77e9cba96}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="http\http.h">
+      <Filter>http</Filter>
+    </ClInclude>
+    <ClInclude Include="http\http_cln.h">
+      <Filter>http</Filter>
+    </ClInclude>
+    <ClInclude Include="http\http_srv.h">
+      <Filter>http</Filter>
+    </ClInclude>
+    <ClInclude Include="rtmp\rtmp_cln.h">
+      <Filter>rtmp</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,15 @@
+{
+  "_note": "④ TUTK P2P：UID/authkey 出厂写入或首次注册获取",
+
+  "enable": true,
+  "uid": "",
+  "auth_key": "",
+  "server": { "region": "auto" },
+  "av_port": 40633,
+  "max_sessions": 8,
+  "stream_source": {
+    "_note": "远程 App 拉流复用 streaming 的码流：预览用子码流省带宽，回放取录像",
+    "live_stream": "sub",
+    "playback_from": "recorder"
+  }
+}

@@ -1,0 +1,37 @@
+/* Copyright (C) 2025-2026, Nightowl DG. RSDK 录像写入(设计 §3/§7). */
+#ifndef RSDK_REC_H
+#define RSDK_REC_H
+#include "rsdk_types.h"
+#include "rsdk_storgedev.h"
+#include "rsdk_balance.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct rsdk_writer rsdk_writer_t;
+
+/* 打开一路录像写入器(单盘, 一段连续录像 = 一个 RecSegment) */
+RSDK_API rsdk_err_t rsdk_rec_open (rsdk_dev_t *d, int chn, int rectype, rsdk_writer_t **out);
+
+/* 打开盘组录像写入器: 每换新段时按负载均衡选盘(设计 §4), 把一路录像分散到多盘。
+ * 配合 rsdk_group_query/rsdk_group_play 做多盘写入+回放闭环。 */
+RSDK_API rsdk_err_t rsdk_rec_open_group(rsdk_group_t *g, int chn, int rectype, rsdk_writer_t **out);
+/* 写一帧(明文 Annex-B); 内部: 取/换chunk → 填帧头 → 按特性 AES-CTR 加密 → 顺序写 */
+RSDK_API rsdk_err_t rsdk_rec_write_frame(rsdk_writer_t *w, const rsdk_frame_t *f);
+/* 切换录像类型(常录↔事件), 会闭合当前段并开新段 */
+RSDK_API rsdk_err_t rsdk_rec_change_type(rsdk_writer_t *w, int rectype);
+/* 闭合段并写入索引 */
+RSDK_API rsdk_err_t rsdk_rec_close(rsdk_writer_t *w);
+/* 当前段 id / chunk(供元数据/抓拍 seg_ref 绑定) */
+RSDK_API uint32_t   rsdk_rec_seg_id(rsdk_writer_t *w);
+RSDK_API uint64_t   rsdk_rec_cur_chunk(rsdk_writer_t *w);
+
+/* 覆盖回收回调: overwrite 模式下某 chunk 被复用前触发(disk,chunk),
+ * 供上层清理绑定到该视频 chunk 的元数据/抓拍(retention 联动)。 */
+typedef void (*rsdk_reclaim_cb)(void *user, uint16_t disk, uint64_t chunk);
+RSDK_API void rsdk_rec_set_reclaim(rsdk_writer_t *w, rsdk_reclaim_cb cb, void *user);
+
+#ifdef __cplusplus
+}
+#endif
+#endif

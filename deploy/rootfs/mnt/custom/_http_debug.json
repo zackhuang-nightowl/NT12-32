@@ -1,0 +1,4 @@
+{
+    "httpClientConnectTo": "192.168.1.30:8089",
+    "httpServerListen": "192.168.1.30"
+}

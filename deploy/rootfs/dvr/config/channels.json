@@ -1,0 +1,70 @@
+{
+  "_model": "device(设备) → sources(视频源, 一对多) → channel(通道槽位). 详见 config/README.md",
+
+  "capacity": { "total_channels": 32, "poe_ports": 16, "ip_channels": 16 },
+
+  "defaults": {
+    "poe_channel_base": 0,
+    "poe_ip_pattern": "198.18.%d.100",
+    "poe_user": "admin",
+    "poe_pass": "",
+    "codec": "auto",
+    "record": true,
+    "record_stream": "main",
+    "preview_stream": "sub",
+    "over_tcp": true
+  },
+
+  "devices": [
+    {
+      "id": "poe-1", "type": "poe", "enable": true, "poe_port": 1,
+      "onvif": { "auto": true },
+      "sources": [
+        { "index": 0, "name": "Camera 1", "stream": "main", "channel": 0, "record": true },
+        { "index": 0, "stream": "sub", "channel": 0, "role": "preview" }
+      ]
+    },
+    {
+      "id": "poe-2", "type": "poe", "enable": true, "poe_port": 2,
+      "onvif": { "auto": true },
+      "sources": [ { "index": 0, "name": "Camera 2", "stream": "main", "channel": 1 } ]
+    },
+    {
+      "_note": "PoE 口 3..16 同构，按 defaults 规则自动展开（口 P → 通道 P-1, IP=198.18.P.100）。此处省略。",
+      "id": "poe-3..16", "type": "poe", "enable": true, "expand_ports": [3,4,5,6,7,8,9,10,11,12,13,14,15,16],
+      "onvif": { "auto": true }
+    },
+    {
+      "id": "poe-7-empty", "type": "poe", "enable": false, "poe_port": 7,
+      "_note": "示例：某 PoE 口空置/停用 → 不占用通道，写入自动跳过"
+    },
+
+    {
+      "id": "ip-front-gate", "type": "ip", "enable": true,
+      "_note": "数字通道：eth0/LAN 上的独立 IP 相机（非 PoE 口）",
+      "onvif": { "auto": false, "ip": "192.168.9.55", "port": 80, "user": "admin", "pass": "xxxx" },
+      "sources": [ { "index": 0, "name": "Front Gate", "stream": "main", "channel": 16, "record": true } ]
+    },
+
+    {
+      "id": "ip-lobby-fisheye", "type": "ip", "enable": true,
+      "_note": "单设备多视频源(一)：鱼眼/多目相机，一台设备 → 多个通道",
+      "onvif": { "auto": false, "ip": "192.168.9.60", "user": "admin", "pass": "xxxx" },
+      "sources": [
+        { "index": 0, "name": "Fisheye Raw",   "url": "rtsp://192.168.9.60:554/stream1", "channel": 17 },
+        { "index": 1, "name": "Dewarp View 1", "url": "rtsp://192.168.9.60:554/stream2", "channel": 18 },
+        { "index": 2, "name": "Dewarp View 2", "url": "rtsp://192.168.9.60:554/stream3", "channel": 19 }
+      ]
+    },
+
+    {
+      "id": "ip-multi-lane", "type": "ip", "enable": true,
+      "_note": "单设备多视频源(二)：一个 IP 直出多路 RTSP（无 ONVIF，直接给 url）",
+      "conn": { "user": "admin", "pass": "xxxx" },
+      "sources": [
+        { "index": 0, "name": "Lane A", "url": "rtsp://192.168.9.61:554/ch0/main", "channel": 20, "record": true },
+        { "index": 1, "name": "Lane B", "url": "rtsp://192.168.9.61:554/ch1/main", "channel": 21, "record": true }
+      ]
+    }
+  ]
+}

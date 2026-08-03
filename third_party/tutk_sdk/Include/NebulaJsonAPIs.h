@@ -1,0 +1,64 @@
+#ifndef _NEBULA_JSONAPIs_H_
+#define _NEBULA_JSONAPIs_H_
+
+#include "TUTKJsonAPIs.h"
+
+#define NebulaJsonType TUTKJsonType
+#define NebulaJsonObject TUTKJsonObject
+
+#define Nebula_Json_Obj_New_Empty_Obj TUTK_Json_Obj_New_Empty_Obj
+
+#define Nebula_Json_Obj_New_Bool TUTK_Json_Obj_New_Bool
+
+#define Nebula_Json_Obj_New_Double TUTK_Json_Obj_New_Double
+
+#define Nebula_Json_Obj_New_Int TUTK_Json_Obj_New_Int
+
+#define Nebula_Json_Obj_New_String TUTK_Json_Obj_New_String
+
+#define Nebula_Json_Obj_Obj_Add TUTK_Json_Obj_Obj_Add
+
+#define Nebula_Json_Obj_Obj_Remove TUTK_Json_Obj_Obj_Remove
+
+#define Nebula_Json_Obj_New_Empty_Array TUTK_Json_Obj_New_Empty_Array
+
+#define Nebula_Json_Obj_Array_Add TUTK_Json_Obj_Array_Add
+
+#define Nebula_Json_Obj_Array_Insert TUTK_Json_Obj_Array_Insert
+
+#define Nebula_Json_Obj_Array_Delete TUTK_Json_Obj_Array_Delete
+
+#define Nebula_Json_Obj_Create_From_String TUTK_Json_Obj_Create_From_String
+
+#define Nebula_Json_Obj_Release TUTK_Json_Obj_Release
+
+#define Nebula_Json_Obj_Get_length TUTK_Json_Obj_Get_length
+
+#define Nebula_Json_Obj_Get_Sub_Obj TUTK_Json_Obj_Get_Sub_Obj
+
+#define Nebula_Json_Obj_Get_Type TUTK_Json_Obj_Get_Type
+
+#define Nebula_Json_Obj_Get_Bool TUTK_Json_Obj_Get_Bool
+
+#define Nebula_Json_Obj_Get_Double TUTK_Json_Obj_Get_Double
+
+#define Nebula_Json_Obj_Get_Int TUTK_Json_Obj_Get_Int
+
+#define Nebula_Json_Obj_Get_String TUTK_Json_Obj_Get_String
+
+#define Nebula_Json_Obj_Get_Array_length TUTK_Json_Obj_Get_Array_length
+
+#define Nebula_Json_Obj_Get_Array_Element TUTK_Json_Obj_Get_Array_Element
+
+#define Nebula_Json_Obj_To_String TUTK_Json_Obj_To_String
+
+#define Nebula_Json_Obj_Get_Sub_Obj_Bool TUTK_Json_Obj_Get_Sub_Obj_Bool
+
+#define Nebula_Json_Obj_Get_Sub_Obj_Double TUTK_Json_Obj_Get_Sub_Obj_Double
+
+#define Nebula_Json_Obj_Get_Sub_Obj_Int TUTK_Json_Obj_Get_Sub_Obj_Int
+
+#define Nebula_Json_Obj_Get_Sub_Obj_String TUTK_Json_Obj_Get_Sub_Obj_String
+
+
+#endif /* _NEBULA_JSONAPIs_H_ */

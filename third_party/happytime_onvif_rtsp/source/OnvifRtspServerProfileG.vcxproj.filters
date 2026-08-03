@@ -1,0 +1,321 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="bm\base64.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\hqueue.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\hxml.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\linked_list.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\ppstack.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\rfc_md5.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\sha1.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\sys_buf.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\sys_log.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\sys_os.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\util.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\word_analyse.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\xml_node.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\soap.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\soap_parser.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_utils.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_timer.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_thermal.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_schedule.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_recording.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_receiver.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_ptz.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_probe.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_pkt.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_media2.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_media.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_image.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_event.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_doorcontrol.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_deviceio.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_device.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_credential.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_cm.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_cfg.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_analytics.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_accessrules.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="http\http_auth.cpp">
+      <Filter>http</Filter>
+    </ClCompile>
+    <ClCompile Include="http\http_cln.cpp">
+      <Filter>http</Filter>
+    </ClCompile>
+    <ClCompile Include="http\http_parse.cpp">
+      <Filter>http</Filter>
+    </ClCompile>
+    <ClCompile Include="http\httpd.cpp">
+      <Filter>http</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\aac_rtp_rx.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\h264_rtp_rx.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\h265_rtp_rx.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\mjpeg_rtp_rx.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\mjpeg_tables.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\mpeg4.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\mpeg4_rtp_rx.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\pcm_rtp_rx.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\rtcp.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\rtp_rx.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\rtp_tx.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_backchannel.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_cfg.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_cln.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_http.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_media.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_parse.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_rcua.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_rsua.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_srv.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_srv_backchannel.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_stream.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_timer.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_util.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="media\audio_capture.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\audio_decoder.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\audio_encoder.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\audio_play.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\file_demux.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\media_util.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\screen_capture.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\screen_capture_win.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\video_capture.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\video_capture_win.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\video_encoder.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="http\http_srv.cpp">
+      <Filter>http</Filter>
+    </ClCompile>
+    <ClCompile Include="media\video_decoder.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\h264_util.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="rtp\h265_util.cpp">
+      <Filter>rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="http\http_mjpeg_cln.cpp">
+      <Filter>http</Filter>
+    </ClCompile>
+    <ClCompile Include="media\avcodec_mutex.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="rtsp\rtsp_mc.cpp">
+      <Filter>rtsp</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_srv.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="media\media_codec.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\media_parse.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\media_proxy.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\media_pusher.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="http\http_test.cpp">
+      <Filter>http</Filter>
+    </ClCompile>
+    <ClCompile Include="getopt.cpp" />
+    <ClCompile Include="media\audio_capture_win.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\window_capture.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\window_capture_win.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="media\audio_play_win.cpp">
+      <Filter>media</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\sha256.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="media\win\win_os.cpp">
+      <Filter>media\win</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\net_util.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="http\http_notify.cpp">
+      <Filter>http</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="bm">
+      <UniqueIdentifier>{2fffd6fa-3be3-4159-8174-4965be7b4d4d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="onvif">
+      <UniqueIdentifier>{111650d1-ddb6-47cd-a3ad-276866b11d8b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="http">
+      <UniqueIdentifier>{e59f3b73-0236-4dc3-9f6e-f96e8dba5837}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="rtp">
+      <UniqueIdentifier>{88252af2-0385-46f7-9b14-769409a3b55e}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="rtsp">
+      <UniqueIdentifier>{5457df75-7fc8-4778-9c5c-cbc4fb61ad64}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="media">
+      <UniqueIdentifier>{cdf206ed-2cc4-4cb0-83f4-958218a0a98b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="media\win">
+      <UniqueIdentifier>{7a33583e-e046-4dc1-a1a2-dd5b82319fc0}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

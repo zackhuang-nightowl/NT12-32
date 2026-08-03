@@ -1,0 +1,31 @@
+{
+  "_note": "⑥ 文件存储(裸盘)：映射 nvr_storage_cfg_t + rsdk_format_opt。编译期特性另见 components/recorder/rsdk_features.conf",
+
+  "mode": "rawdisk",
+
+  "encryption": {
+    "enable": true,
+    "cipher": "aes-256-ctr",
+    "kek_source": "device_sn"
+  },
+
+  "hdd_full": "overwrite",
+
+  "metadata": { "enable": true, "ratio_pct": 0.5 },
+
+  "layout": { "chunk_mib": "auto", "slots_per_chunk": 4 },
+
+  "group": {
+    "auto_assemble": true,
+    "disks": ["auto"],
+    "_note": "auto=扫描所有 /dev/sd* 中本组 RSDK 盘按序装配；也可显式列 [\"/dev/sda\"]"
+  },
+
+  "guard": { "prevent_automount": true },
+
+  "health": {
+    "poll_s": 5,
+    "temp_warn_c": 55,
+    "reallocated_warn": 64
+  }
+}

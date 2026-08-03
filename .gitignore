@@ -1,0 +1,32 @@
+# ---- 构建输出（CMake 各 build 目录）----
+build/
+build_arm/
+build_host/
+build_onvif/
+build-*/
+build_*/
+*.o
+*.obj
+*.lo
+*.slo
+
+# ---- 编译期生成 ----
+rsdk_config.h
+
+# ---- 部署包里由 build_arm 复制来的可执行（可再生，避免提交陈旧二进制）----
+deploy/rootfs/dvr/bin/nvr_app
+
+# ---- vendored 源码压缩包（构建不需要，用系统/预编译库）----
+*.tar.gz
+
+# ---- ffmpeg 预编译库(备而未用)：整机不链接，解码走硬件 VPU、MP4 导出走自研 rsdk muxer。
+#      如需软解兜底再从 NT12-SDK/rtsp-server/source/ffmpeg 取回。----
+third_party/ffmpeg/
+
+# ---- 编辑器 / OS ----
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/

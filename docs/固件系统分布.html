@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NT12-32 NVR 固件 — 分区 / 系统分布 / 库</title>
+<style>
+  :root{--ink:#1a2233;--sub:#5b6b82;--line:#e2e8f0;--head:#f1f5f9;--accent:#2563eb;
+    --boot:#f59e0b;--rootfs:#16a34a;--cfg:#0891b2;--data:#7c3aed;--rec:#dc2626;--ovl:#64748b;}
+  *{box-sizing:border-box}
+  body{font-family:"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;color:var(--ink);
+    margin:0;padding:0 16px 72px;background:#f8fafc;line-height:1.6}
+  .wrap{max-width:1120px;margin:0 auto;background:#fff;padding:0 28px 40px;
+    box-shadow:0 1px 3px rgba(0,0,0,.08);border-radius:0 0 12px 12px}
+  header{padding:26px 0 14px;border-bottom:3px solid var(--accent);margin-bottom:6px}
+  h1{font-size:25px;margin:0 0 6px}
+  header .meta{color:var(--sub);font-size:13.5px}
+  h2{font-size:19px;margin:32px 0 12px;padding-left:11px;border-left:4px solid var(--accent)}
+  h3{font-size:15.5px;margin:18px 0 8px;color:#334155}
+  p{margin:8px 0}
+  code{background:#f1f5f9;padding:1px 6px;border-radius:4px;font-size:12.5px;
+    font-family:"Cascadia Code",Consolas,monospace}
+  .scroll{overflow-x:auto}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;margin:10px 0;min-width:560px}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:var(--head);font-weight:600}
+  tr:nth-child(even) td{background:#fafbfc}
+  /* 分区条 */
+  .bar{display:flex;height:46px;border-radius:6px;overflow:hidden;border:1px solid var(--line);margin:8px 0;font-size:11px}
+  .seg{display:flex;align-items:center;justify-content:center;color:#fff;text-align:center;
+    padding:2px;overflow:hidden;white-space:nowrap;border-right:1px solid rgba(255,255,255,.35)}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;margin:6px 0 2px;color:var(--sub)}
+  .legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+  /* 树 */
+  pre.tree{background:#0f172a;color:#cbd5e1;padding:16px 18px;border-radius:8px;overflow-x:auto;
+    font-family:"Cascadia Code",Consolas,monospace;font-size:12.5px;line-height:1.5}
+  .tag{display:inline-block;padding:0 7px;border-radius:10px;font-size:11.5px;font-weight:600}
+  .t-own{color:#166534;background:#dcfce7}.t-3rd{color:#9a3412;background:#ffedd5}
+  .t-so{color:#3730a3;background:#e0e7ff}.t-ro{color:#475569;background:#e2e8f0}
+  .note{background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:11px 14px;margin:12px 0;font-size:13.5px}
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:760px){.cols{grid-template-columns:1fr}}
+  footer{margin-top:36px;padding-top:12px;border-top:1px solid var(--line);color:var(--sub);font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>NT12-32 NVR 固件 — 分区 · Linux 系统分布 · 使用的库</h1>
+  <div class="meta">SoC：Novatek NT98633 / NA51090（4×Cortex-A53，aarch64，Linux 4.19，Buildroot）·
+    板载 SPI-NAND 128 MB + SATA HDD · 固件 <code>nvr_app</code>（12.8 MB, ELF aarch64）</div>
+</header>
+
+<h2>1. 板载 Flash 分区（SPI-NAND 128 MB，12 个 MTD，erase 128 KB）</h2>
+<div class="legend">
+  <span><i style="background:var(--boot)"></i>引导链</span>
+  <span><i style="background:var(--rootfs)"></i>内核/根文件系统(A/B 双备份)</span>
+  <span><i style="background:var(--cfg)"></i>可写配置</span>
+  <span><i style="background:var(--data)"></i>系统/用户数据</span>
+</div>
+<div class="bar">
+  <div class="seg" style="background:var(--boot);flex: .25" title="mtd0 loader 256KB">ldr</div>
+  <div class="seg" style="background:var(--boot);flex: .5" title="mtd1/2 fdt+备份 256KB×2">fdt×2</div>
+  <div class="seg" style="background:var(--boot);flex: .25" title="mtd3 atf 256KB">atf</div>
+  <div class="seg" style="background:var(--boot);flex: 3.5" title="mtd4 uboot 3.5MB">U-Boot 3.5M</div>
+  <div class="seg" style="background:var(--rootfs);flex: 5.5" title="mtd5 kernel 5.5MB">kernel 5.5M</div>
+  <div class="seg" style="background:var(--rootfs);flex: 40" title="mtd6 rootfs 40MB">rootfs A 40M</div>
+  <div class="seg" style="background:#15803d;flex: 40" title="mtd7 rootfs1 40MB">rootfs B 40M</div>
+  <div class="seg" style="background:var(--cfg);flex: 14" title="mtd8 flash 14MB">flash 14M</div>
+  <div class="seg" style="background:var(--data);flex: 12" title="mtd9 SYS 12MB">SYS 12M</div>
+  <div class="seg" style="background:#6d28d9;flex: 12" title="mtd10 User 12MB">User 12M</div>
+</div>
+<div class="scroll"><table>
+<tr><th>MTD</th><th>大小</th><th>内容</th><th>说明</th></tr>
+<tr><td>mtd0 loader</td><td>256 KB</td><td>Bootloader</td><td>一级引导</td></tr>
+<tr><td>mtd1 fdt / mtd2 fdt.restore</td><td>256 KB ×2</td><td>设备树 + 备份</td><td>DTB</td></tr>
+<tr><td>mtd3 atf</td><td>256 KB</td><td>ARM Trusted Firmware</td><td>安全引导</td></tr>
+<tr><td>mtd4 uboot</td><td>3.5 MB</td><td>U-Boot</td><td>二级引导</td></tr>
+<tr><td>mtd5 kernel</td><td>5.5 MB</td><td>Linux 4.19 内核</td><td></td></tr>
+<tr><td><b>mtd6 rootfs / mtd7 rootfs1</b></td><td>40 MB ×2</td><td><b>根文件系统 A/B 双备份</b></td><td>squashfs 只读，升级切换</td></tr>
+<tr><td>mtd8 flash</td><td>14 MB</td><td>可写配置区(ubi)</td><td>挂 <code>/flash</code>；rc.conf/hostname/resolv.conf 软链到此</td></tr>
+<tr><td>mtd9 SYS</td><td>12 MB</td><td>系统数据</td><td></td></tr>
+<tr><td>mtd10 User</td><td>12 MB</td><td>用户数据</td><td></td></tr>
+<tr><td>mtd11 all</td><td>128 MB</td><td>整片映射</td><td>整盘操作用</td></tr>
+</table></div>
+<div class="note"><b>工厂区(SN/MAC)</b>：设备身份存于 Flash 保留区（工厂区解码见 <code>身份与工厂区_SN_MAC.md</code>）。
+本固件 <code>system.sn</code> 取自此，用于激活密码 <code>P_act=UPPER(first16(MD5(NVR_sn+dev_sn)))</code> 与录像 AES 密钥派生。</div>
+
+<h2>2. Linux 文件系统挂载布局</h2>
+<div class="legend">
+  <span><i style="background:var(--rootfs)"></i>只读根</span>
+  <span><i style="background:var(--cfg)"></i>可写配置</span>
+  <span><i style="background:var(--ovl)"></i>overlay/tmpfs</span>
+  <span><i style="background:var(--rec)"></i>录像盘(SATA)</span>
+</div>
+<pre class="tree">
+/                      <span class="tag t-ro">squashfs 只读</span>  (/dev/romblock7 → /ROOTFS，assert=read-only)
+├── /flash             <span class="tag t-so">ubi (mtd8, 可写)</span>  rc.conf / hostname / resolv.conf / ini
+├── /dvr               主程序目录        ← 本固件二进制 + 配置(见 §3)
+│   └── tutk_cloud_agent  <span class="tag t-so">tmpfs</span>  TUTK 云代理
+├── /mnt
+│   ├── /mnt/custom    <span class="tag t-so">tmpfs/overlay</span>  ⭐ LVGL 界面配置(GUI_CONFIG.json / gui_cfg.ini / 字体)
+│   ├── /mnt/sda1..4   <span class="tag" style="color:#fff;background:var(--rec)">ext4 录像盘</span>  4×~116GB(见 §4)
+│   ├── /mnt/usb       U 盘(vfat)  导出/OTA .rom 暂存
+│   └── /mnt/disk /mnt/nfs …  预留挂载点
+├── /config            设置库/元数据    ← nvr_settings.db · meta.db (SQLite)
+├── /webroot           <span class="tag t-so">overlay</span>  Web 回放 (var/www/img01..04 → /mnt/sdaN)
+├── /etc/init.d/S99nvr 开机自启 → 看护脚本
+└── /tmp  /var/run     tmpfs           ← update.rom 下载暂存等
+</pre>
+<div class="note">根为 <b>squashfs 只读 + A/B 双 rootfs</b>：固件升级写另一个 rootfs 分区再切换（OTA <code>upgradeFirmware</code> 下载 .rom → 更新器烧写 → 重启切分区）。可写状态只在 <code>/flash</code>、<code>/config</code>、<code>/mnt/*</code>。</div>
+
+<h2>3. 本固件部署位置（deploy/rootfs/ → 合并进设备根）</h2>
+<pre class="tree">
+/dvr/bin/nvr_app                                <span class="tag t-own">本固件 (aarch64, 12.8M)</span>
+/dvr/bin/NO_xVR_GUI_V2-ca53-2.1.3_argb1555      LVGL 界面(独立进程)
+/dvr/bin/nvr_supervisor.sh                      看护脚本(起 NVR→等8089→起界面→崩溃重启)
+/dvr/config/*.json                              NVR 配置(首启种子 → nvr_settings.db)
+/config/nvr_settings.db  /config/meta.db        SQLite 运行期库(设置/事件/云存状态)
+/mnt/custom/*                                    界面配置(字体/GUI_CONFIG/http_debug)
+/etc/init.d/S99nvr                              开机自启
+</pre>
+<div class="note">交互：界面 ↔ NVR 经 <code>http://127.0.0.1:8089/APPJsonCmd</code>(NOP JSON)。NVR 命令路由：本地命令存/查 SQLite；面向通道命令按 <code>channel→真实设备IP</code>，NightOwl(NOP/nopOnvif) HTTP 透传、通用 ONVIF 走映射翻译成 SOAP。</div>
+
+<h2>4. SATA HDD 录像分区（NVR 格式化 → 4×ext4）</h2>
+<div class="bar">
+  <div class="seg" style="background:var(--rec);flex:1">sda1 /mnt/sda1 · img01</div>
+  <div class="seg" style="background:#b91c1c;flex:1">sda2 /mnt/sda2 · img02</div>
+  <div class="seg" style="background:var(--rec);flex:1">sda3 /mnt/sda3 · img03</div>
+  <div class="seg" style="background:#b91c1c;flex:1">sda4 /mnt/sda4 · img04</div>
+</div>
+<div class="scroll"><table>
+<tr><th>分区</th><th>大小</th><th>FS</th><th>挂载(录像)</th><th>Web 回放</th></tr>
+<tr><td>sda1</td><td>~115.8 GB</td><td>ext4</td><td>/mnt/sda1</td><td>/webroot/var/www/img01</td></tr>
+<tr><td>sda2</td><td>~115.8 GB</td><td>ext4</td><td>/mnt/sda2</td><td>/webroot/var/www/img02</td></tr>
+<tr><td>sda3</td><td>~115.8 GB</td><td>ext4</td><td>/mnt/sda3</td><td>/webroot/var/www/img03</td></tr>
+<tr><td>sda4</td><td>~115.8 GB</td><td>ext4</td><td>/mnt/sda4</td><td>/webroot/var/www/img04</td></tr>
+</table></div>
+<div class="note">挂载参数 <code>rw,noatime,nodiratime,commit=15,data=ordered</code>（持续写优化）。
+<b>注</b>：原厂用 ext4 明文；本固件 <code>recorder</code> 提供<b>裸盘直写方案</b>（AES-256-CTR 加密 + 10MB 环形块 + 索引），上真机可二选一。</div>
+
+<h2>5. 使用的库</h2>
+
+<h3>5.1 自研静态库（本工程编译，15 个）<span class="tag t-own">own</span></h3>
+<div class="scroll"><table>
+<tr><th>库</th><th>作用</th></tr>
+<tr><td>nvr_app_core</td><td>整机集成层(channel/preview/record_sched/event/router/ota/config)</td></tr>
+<tr><td>nopcore</td><td>NOP 协议核 + 能力网关 + <b>ONVIF 客户端(31cpp) + NOP↔ONVIF 映射(14c)</b></td></tr>
+<tr><td>rsdk</td><td>录像引擎(裸盘/环形/索引/AES/多盘/回放/导出/元数据/云存状态)</td></tr>
+<tr><td>nvr_streaming</td><td>拉流出图(CRtspClient→硬解+录像)</td></tr>
+<tr><td>nvr_onvif / nvr_dev_classify</td><td>ONVIF 取流 glue / 设备三分类</td></tr>
+<tr><td>nvr_storage</td><td>盘管理(发现/格式化/装配/热插拔/健康)</td></tr>
+<tr><td>nvr_settings</td><td>SQLite 可写配置库</td></tr>
+<tr><td>nvr_crypto</td><td>MD5/SHA/AES256 + 口令派生(增强/激活/8012)</td></tr>
+<tr><td>nvr_cloud_uploader</td><td>云存事件切片上传(TS→VSaaS)</td></tr>
+<tr><td>nvr_cloud_tutk</td><td>TUTK 设备端 P2P glue</td></tr>
+<tr><td>mhal</td><td>na51090 硬解/上屏封装(hd_videodec/videoout)</td></tr>
+</table></div>
+
+<h3>5.2 第三方（vendored / 预编译）<span class="tag t-3rd">3rd-party</span></h3>
+<div class="scroll"><table>
+<tr><th>库</th><th>版本</th><th>形态</th><th>用途</th></tr>
+<tr><td>cJSON</td><td>—</td><td>源码(工程内唯一副本)</td><td>JSON 解析</td></tr>
+<tr><td>SQLite</td><td>3.45.3</td><td>合并源(amalgamation)</td><td>设置库/元数据(自包含)</td></tr>
+<tr><td>Happytimesoft ONVIF/RTSP</td><td>—</td><td>源码交叉编 <code>libhappytime_rtsp.a</code> + nopcore 内 ONVIF 客户端</td><td>RTSP 拉流 + ONVIF 客户端</td></tr>
+<tr><td>OpenSSL(头)</td><td>1.1.1g</td><td>头(工程内) + 链目标 .so.3</td><td>TLS / 摘要</td></tr>
+<tr><td>libcurl(头)</td><td>8.5.0</td><td>头(工程内) + 链目标 .so.4</td><td>云存/OTA/设备转发 HTTP</td></tr>
+<tr><td>TUTK SDK</td><td>ArmCortexA53_NT98633_8.4.0</td><td>预编译 .so</td><td>P2P(IOTC/AVAPI)</td></tr>
+<tr><td>libsrt / libsrtp</td><td>arm64-v8a</td><td>预编译 .a</td><td>happytime 传递依赖</td></tr>
+<tr><td>ffmpeg</td><td>arm64-v8a</td><td>预编译(备用)</td><td>软解/转封装兜底(非主路径)</td></tr>
+<tr><td>na51090 BSP (hdal)</td><td>—</td><td>预编译 <code>libhdal.so</code></td><td>硬件解码/上屏</td></tr>
+</table></div>
+
+<h3>5.3 运行期动态依赖（设备 rootfs 需具备，原厂固件均带）<span class="tag t-so">runtime .so</span></h3>
+<div class="scroll"><table>
+<tr><th>库</th><th>来源</th></tr>
+<tr><td><code>libssl.so.3</code> <code>libcrypto.so.3</code></td><td>OpenSSL 3.x(设备/TUTK)</td></tr>
+<tr><td><code>libcurl.so.4</code></td><td>设备/TUTK</td></tr>
+<tr><td><code>libIOTCAPIs.so</code> <code>libAVAPIs.so</code></td><td>TUTK P2P</td></tr>
+<tr><td><code>libhdal.so</code></td><td>na51090 BSP</td></tr>
+<tr><td><code>libstdc++.so.6</code> <code>libgcc_s.so.1</code> <code>libpthread/libdl/libm/libc</code></td><td>标准 C/C++ 运行库</td></tr>
+</table></div>
+<div class="note"><b>头 1.1.1 vs 库 3.x</b>：OpenSSL 头是 1.1.1、设备库是 3.x —— 当前 EVP/digest 用法两版兼容；若真机报符号，换 openssl-3 头重编。</div>
+
+<h2>6. 运行进程与端口</h2>
+<div class="scroll"><table>
+<tr><th>进程/服务</th><th>端口/接口</th><th>说明</th></tr>
+<tr><td>nvr_app (本固件)</td><td>127.0.0.1:<b>8089</b> /APPJsonCmd</td><td>NOP 服务端(界面交互) + 命令路由</td></tr>
+<tr><td>NVR → 相机 ONVIF/RTSP</td><td>相机 :80(ONVIF) :<b>554</b>(RTSP)</td><td>GetStreamUri 取流 + SOAP 控制翻译</td></tr>
+<tr><td>NVR → 相机 8012</td><td>相机 :<b>8012</b></td><td>事件中心(AI 事件接收)</td></tr>
+<tr><td>NVR → NightOwl 从机相机</td><td>相机 :8089 /APPJsonCmd</td><td>NOP 命令透传</td></tr>
+<tr><td>TUTK P2P</td><td>IOTC/AVAPI</td><td>远程 App 直连/中转</td></tr>
+<tr><td>云存上传</td><td>VSaaS HTTPS :443</td><td>事件切片 TS 上传</td></tr>
+<tr><td>LVGL 界面(独立进程)</td><td>→ 127.0.0.1:8089</td><td>HDMI/LCD 显示，看护脚本守护</td></tr>
+</table></div>
+
+<footer>NT12-32 NVR 固件系统分布 · 配套：交付说明.html · 功能对照_nopdoc.md · BIND_IPC_FLOW.md · BUILD.md · deploy/README.md</footer>
+</div>
+</body>
+</html>
