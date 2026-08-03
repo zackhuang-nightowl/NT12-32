@@ -72,15 +72,9 @@ int mhal_vout_set_layout(mhal_layout_t layout)
     return 0;
 }
 
-int mhal_vout_bind(int win_idx, int decoder_chn)
+/* 下发窗口矩形（videoproc OUT + videoout IN_WIN_ATTR），供 grid 绑定与任意矩形绑定共用 */
+static void apply_window(struct mhal_vdec *d, int x, int y, int w, int h)
 {
-    if (!g_disp.inited || decoder_chn < 0 || decoder_chn >= MHAL_MAX_CH) return -1;
-    struct mhal_vdec *d = g_disp.ch[decoder_chn];
-    if (!d) return -1;
-
-    int x, y, w, h;
-    mhal_layout_rect(g_disp.layout, win_idx, g_disp.disp_w, g_disp.disp_h, &x, &y, &w, &h);
-
     /* videoproc 输出矩形（缩放到该窗口大小） */
     HD_VIDEOPROC_OUT po; memset(&po, 0, sizeof(po));
     po.rect.x = x; po.rect.y = y; po.rect.w = w; po.rect.h = h;
@@ -94,8 +88,46 @@ int mhal_vout_bind(int win_idx, int decoder_chn)
     win.rect.x = x; win.rect.y = y; win.rect.w = w; win.rect.h = h;
     win.visible = 1;
     hd_videoout_set(d->vout_path, HD_VIDEOOUT_PARAM_IN_WIN_ATTR, &win);
+}
+
+int mhal_vout_bind(int win_idx, int decoder_chn)
+{
+    if (!g_disp.inited || decoder_chn < 0 || decoder_chn >= MHAL_MAX_CH) return -1;
+    struct mhal_vdec *d = g_disp.ch[decoder_chn];
+    if (!d) return -1;
+
+    int x, y, w, h;
+    mhal_layout_rect(g_disp.layout, win_idx, g_disp.disp_w, g_disp.disp_h, &x, &y, &w, &h);
+
+    apply_window(d, x, y, w, h);
 
     d->vout_win = win_idx;
+    return 0;
+}
+
+int mhal_vout_bind_rect(int decoder_chn, int x, int y, int w, int h)
+{
+    if (!g_disp.inited || decoder_chn < 0 || decoder_chn >= MHAL_MAX_CH) return -1;
+    struct mhal_vdec *d = g_disp.ch[decoder_chn];
+    if (!d) return -1;
+
+    apply_window(d, x, y, w, h);
+
+    d->vout_win = -2; /* 自由矩形，非宫格窗口号 */
+    return 0;
+}
+
+int mhal_vout_unbind(int decoder_chn)
+{
+    if (!g_disp.inited || decoder_chn < 0 || decoder_chn >= MHAL_MAX_CH) return -1;
+    struct mhal_vdec *d = g_disp.ch[decoder_chn];
+    if (!d) return -1;
+
+    HD_VIDEOOUT_WIN_ATTR win; memset(&win, 0, sizeof(win));
+    win.visible = 0;
+    hd_videoout_set(d->vout_path, HD_VIDEOOUT_PARAM_IN_WIN_ATTR, &win);
+
+    d->vout_win = -1;
     return 0;
 }
 
