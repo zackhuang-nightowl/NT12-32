@@ -92,4 +92,13 @@ if(NOT NVR_CROSS)
     target_include_directories(test_mhal_budget PRIVATE ${NVR_ROOT}/platform/media_hal)
     target_link_libraries(test_mhal_budget PRIVATE pthread)
     add_test(NAME test_mhal_budget COMMAND test_mhal_budget)
+
+    # channels.json 原子持久化单测（主机可运行；纯 C + cjson）
+    add_executable(test_nvr_chan_persist
+        config/test_nvr_chan_persist.c config/nvr_chan_persist.c)
+    target_include_directories(test_nvr_chan_persist PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/config ${NVR_ROOT}/common/include
+        ${NVR_ROOT}/third_party/cJSON)
+    target_link_libraries(test_nvr_chan_persist PRIVATE cjson)
+    add_test(NAME test_nvr_chan_persist COMMAND test_nvr_chan_persist)
 endif()
