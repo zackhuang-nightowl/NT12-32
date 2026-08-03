@@ -28,10 +28,33 @@ typedef struct {
     nvr_stream_mgr_t *sm;         /* borrowed：缩放/全屏切主码流 */
     int  osd_name;                /* OSD 显示通道名 */
     int  osd_datetime;            /* OSD 显示时间 */
+    int  hdmi_w, hdmi_h;          /* HDMI 输出分辨率（悬浮块千分比换算基准） */
 } nvr_preview_cfg_t;
+
+/* 悬浮块（画中画/自由矩形）：chn0 为 0-based 通道号，x/y/w/h 为千分比(0..1000)，
+ * stream 为 NVR_STREAM_MAIN/NVR_STREAM_SUB。 */
+typedef struct {
+    int chn0;
+    int x, y, w, h;
+    int stream;
+} nvr_pv_ext_t;
 
 int  nvr_preview_init  (const nvr_preview_cfg_t *cfg, nvr_preview_t **out);
 void nvr_preview_deinit(nvr_preview_t *p);
+
+/* 布局模式（mode∈{0,1,4,9,16}；0=停止解码/隐藏所有窗）+ 分页（page 1-based）。 */
+int  nvr_preview_set_mode(nvr_preview_t *p, int display_mode, int display_page);
+/* 通道映射表（1-based 输入，内部转 0-based）；不持久化，仅本次调用生效并按当前 mode 重排。 */
+int  nvr_preview_set_mapping(nvr_preview_t *p, const int *map1based, int n);
+/* 悬浮块列表（覆盖式设置；n=0 清空所有悬浮块）。 */
+int  nvr_preview_set_ext(nvr_preview_t *p, const nvr_pv_ext_t *b, int n);
+
+int  nvr_preview_get_mode   (nvr_preview_t *p, int *mode, int *page);
+int  nvr_preview_get_mapping(nvr_preview_t *p, int *out1based, int cap);
+int  nvr_preview_get_ext    (nvr_preview_t *p, nvr_pv_ext_t *out, int cap);
+
+/* 千分比→像素：clamp((v*span+500)/1000, 0, span)。纯函数，便于单测。 */
+int  pv_thousandths_to_px(int v, int span);
 
 int  nvr_preview_set_layout(nvr_preview_t *p, pv_layout_t layout);
 int  nvr_preview_page      (nvr_preview_t *p, int page);        /* 翻页（下一组通道） */

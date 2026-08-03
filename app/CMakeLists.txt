@@ -107,4 +107,14 @@ if(NOT NVR_CROSS)
         channel/test_nvr_chan_status.c channel/nvr_chan_status.c)
     target_include_directories(test_nvr_chan_status PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/channel)
     add_test(NAME test_nvr_chan_status COMMAND test_nvr_chan_status)
+
+    # 预览布局/映射/悬浮块单测（主机可运行；mock mhal_vout + streaming）
+    add_executable(test_nvr_preview
+        preview/test_nvr_preview.c preview/nvr_preview.c
+        preview/test/mock_mhal_vout.c preview/test/mock_streaming.c)
+    target_include_directories(test_nvr_preview PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/preview ${CMAKE_CURRENT_SOURCE_DIR}/preview/test
+        ${NVR_ROOT}/platform/media_hal ${NVR_ROOT}/components/streaming/include
+        ${NVR_ROOT}/common/include ${NVR_ROOT}/components/recorder/include)
+    add_test(NAME test_nvr_preview COMMAND test_nvr_preview)
 endif()

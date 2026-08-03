@@ -21,6 +21,14 @@ struct nvr_preview {
     int         win2chn[PV_MAX_WIN];  /* 窗口→通道，-1=空 */
     unsigned    icons[PV_MAX_CH];     /* 每通道图标位 */
     char        name[PV_MAX_CH][40];  /* 通道名（OSD） */
+
+    /* --- 新 API：display_mode/page + 通道映射 + 悬浮块（计划 §Task4） --- */
+    int         disp_w, disp_h;         /* HDMI 输出分辨率 */
+    int         display_mode;           /* 0/1/4/9/16；0=未启用（已停解码） */
+    int         display_page;           /* 1-based */
+    int         map0[PV_MAX_CH];        /* 格序号(0-based) → 通道(0-based) */
+    int         ext_n;                  /* 当前悬浮块数量 */
+    nvr_pv_ext_t ext[PV_MAX_WIN];       /* 当前悬浮块列表 */
 };
 
 /* pv_layout → mhal_layout（6→9 网格, 12→16 网格，只绑 N 窗） */
@@ -46,6 +54,9 @@ int nvr_preview_init(const nvr_preview_cfg_t *cfg, nvr_preview_t **out)
     p->zoom_chn = -1;
     for (int i = 0; i < PV_MAX_WIN; i++) p->win2chn[i] = -1;
     p->layout = PV_L16; p->win_count = 16;
+    p->disp_w = cfg->hdmi_w; p->disp_h = cfg->hdmi_h;
+    for (int i = 0; i < PV_MAX_CH; i++) p->map0[i] = i;   /* 默认恒等映射 */
+    p->display_mode = 0; p->display_page = 1; p->ext_n = 0;
     *out = p;
     return 0;
 }
@@ -175,4 +186,115 @@ void nvr_preview_tick(nvr_preview_t *p)
     struct tm tmv; localtime_r(&t, &tmv);
     char ts[32]; strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmv);
     mhal_vout_osd(0, ts);
+}
+
+/* ============================================================================
+ * 新 API（计划 §Task4）：display_mode/page 切换、通道映射、悬浮块、千分比换算
+ * ==========================================================================*/
+
+int pv_thousandths_to_px(int v, int span)
+{
+    long r = ((long)v * span + 500) / 1000;
+    if (r < 0) r = 0;
+    if (r > span) r = span;
+    return (int)r;
+}
+
+static mhal_layout_t mode_to_mhal(int mode, int *win_count)
+{
+    switch (mode) {
+        case 1:  *win_count = 1;  return MHAL_LAYOUT_1;
+        case 4:  *win_count = 4;  return MHAL_LAYOUT_4;
+        case 9:  *win_count = 9;  return MHAL_LAYOUT_9;
+        default: *win_count = 16; return MHAL_LAYOUT_16;
+    }
+}
+
+int nvr_preview_set_mode(nvr_preview_t *p, int mode, int page)
+{
+    if (!p) return -1;
+
+    if (mode == 0) {
+        /* 停所有解码/隐藏所有窗 */
+        for (int c = 0; c < PV_MAX_CH; c++) mhal_vout_unbind(c);
+        for (int w = 0; w < PV_MAX_WIN; w++) p->win2chn[w] = -1;
+        p->display_mode = 0;
+        p->display_page = (page > 0 ? page : p->display_page);
+        return 0;
+    }
+
+    int wc = 0;
+    mhal_layout_t ml = mode_to_mhal(mode, &wc);
+    if (mhal_vout_set_layout(ml) != 0) return -1;
+
+    p->display_mode = mode;
+    p->display_page = (page > 0 ? page : 1);
+    p->win_count = wc;
+
+    int base = (p->display_page - 1) * wc;
+    for (int w = 0; w < PV_MAX_WIN; w++) p->win2chn[w] = -1;
+    for (int w = 0; w < wc; w++) {
+        int idx = base + w;
+        int chn = (idx >= 0 && idx < PV_MAX_CH) ? p->map0[idx] : -1;
+        p->win2chn[w] = chn;
+        if (chn >= 0) { mhal_vout_bind(w, chn); compose_osd(p, w); }
+    }
+
+    /* 单格全屏 → 主码流；多格 → 子码流 */
+    int st = (mode == 1) ? NVR_STREAM_MAIN : NVR_STREAM_SUB;
+    for (int w = 0; w < wc; w++)
+        if (p->win2chn[w] >= 0 && p->cfg.sm)
+            nvr_stream_switch_stream(p->cfg.sm, p->win2chn[w], st, NULL);
+
+    return 0;
+}
+
+int nvr_preview_set_mapping(nvr_preview_t *p, const int *map1based, int n)
+{
+    if (!p || !map1based) return -1;
+    for (int i = 0; i < n && i < PV_MAX_CH; i++) p->map0[i] = map1based[i] - 1; /* 1→0 based */
+    /* 若当前已启用某分屏模式，按新映射立即重排 */
+    if (p->display_mode > 0) return nvr_preview_set_mode(p, p->display_mode, p->display_page);
+    return 0;
+}
+
+int nvr_preview_set_ext(nvr_preview_t *p, const nvr_pv_ext_t *b, int n)
+{
+    if (!p) return -1;
+    for (int i = 0; i < p->ext_n; i++) mhal_vout_unbind(p->ext[i].chn0);  /* 清旧悬浮块 */
+    p->ext_n = 0;
+    for (int i = 0; i < n && i < PV_MAX_WIN; i++) {
+        int x = pv_thousandths_to_px(b[i].x, p->disp_w);
+        int y = pv_thousandths_to_px(b[i].y, p->disp_h);
+        int w = pv_thousandths_to_px(b[i].w, p->disp_w);
+        int h = pv_thousandths_to_px(b[i].h, p->disp_h);
+        mhal_vout_bind_rect(b[i].chn0, x, y, w, h);
+        if (p->cfg.sm) nvr_stream_switch_stream(p->cfg.sm, b[i].chn0, b[i].stream, NULL);
+        p->ext[p->ext_n++] = b[i];
+    }
+    return 0;
+}
+
+int nvr_preview_get_mode(nvr_preview_t *p, int *mode, int *page)
+{
+    if (!p) return -1;
+    if (mode) *mode = p->display_mode;
+    if (page) *page = p->display_page ? p->display_page : 1;
+    return 0;
+}
+
+int nvr_preview_get_mapping(nvr_preview_t *p, int *out1based, int cap)
+{
+    if (!p || !out1based) return 0;
+    int n = 0;
+    for (int i = 0; i < PV_MAX_CH && n < cap; i++) out1based[n++] = p->map0[i] + 1;
+    return n;
+}
+
+int nvr_preview_get_ext(nvr_preview_t *p, nvr_pv_ext_t *out, int cap)
+{
+    if (!p || !out) return 0;
+    int n = 0;
+    for (int i = 0; i < p->ext_n && n < cap; i++) out[n++] = p->ext[i];
+    return n;
 }
