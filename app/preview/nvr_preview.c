@@ -127,14 +127,35 @@ static int win_of_chn(nvr_preview_t *p, int chn)
     return -1;
 }
 
+/* display_mode>0（新 set_mode/set_mapping 已激活）时，通道应在的窗口由 map0 决定
+ * （格 k ← map0[(display_page-1)*win_count+k]），不再是旧 page*win_count+chn 公式
+ * ——两条路径共享 win2chn/win_count，一旦 set_mode 被接入 nvr_app，旧公式会在通道
+ * 上/下线时绑错窗/丢窗（Task4 遗留，Task7 收尾修复）。返回该通道在当前页应在的窗口，
+ * 未命中(不在当前页)返回 -1。 */
+static int win_of_chn_by_map(nvr_preview_t *p, int chn)
+{
+    int base = (p->display_page - 1) * p->win_count;
+    for (int k = 0; k < p->win_count && k < PV_MAX_WIN; k++) {
+        int idx = base + k;
+        if (idx >= 0 && idx < PV_MAX_CH && p->map0[idx] == chn) return k;
+    }
+    return -1;
+}
+
 int nvr_preview_on_channel_online(nvr_preview_t *p, int chn)
 {
     if (!p || chn < 0 || chn >= PV_MAX_CH) return -1;
     int w = win_of_chn(p, chn);
     if (w < 0) {
-        /* 若该通道属于当前页范围但未绑定，绑到其应在窗口 */
-        int win = chn - p->page * p->win_count;
-        if (win >= 0 && win < p->win_count) { p->win2chn[win] = chn; mhal_vout_bind(win, chn); w = win; }
+        if (p->display_mode > 0) {
+            /* 新 API 模式已激活：从 map0 重算该通道应在的窗口 */
+            int win = win_of_chn_by_map(p, chn);
+            if (win >= 0) { p->win2chn[win] = chn; mhal_vout_bind(win, chn); w = win; }
+        } else {
+            /* 旧 set_layout 路径：兼容旧 page*win_count+chn 公式 */
+            int win = chn - p->page * p->win_count;
+            if (win >= 0 && win < p->win_count) { p->win2chn[win] = chn; mhal_vout_bind(win, chn); w = win; }
+        }
     }
     if (w >= 0) compose_osd(p, w);
     return 0;
@@ -143,6 +164,7 @@ int nvr_preview_on_channel_online(nvr_preview_t *p, int chn)
 int nvr_preview_on_channel_offline(nvr_preview_t *p, int chn)
 {
     if (!p) return -1;
+    /* 只按当前 win2chn 实际绑定查窗（两条模式共用），不依赖 page 公式，天然与 display_mode 无关 */
     int w = win_of_chn(p, chn);
     if (w >= 0) mhal_vout_osd(w, "NO SIGNAL");
     return 0;

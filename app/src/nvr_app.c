@@ -26,6 +26,7 @@
 #include "nop_sdk/nop_app.h"
 #include "nop_sdk/nop_nvr_channels.h"
 #include "nvr_cmd_router.h"
+#include "nvr_chan_persist.h"
 
 /* ONVIF 映射后端（nop 内部实现，避免拉 nop 内部头，这里前向声明所需 4 个 API） */
 typedef struct nop_onvif_map_backend nop_onvif_map_backend_t;
@@ -53,6 +54,7 @@ struct nvr_app {
     nvr_cmd_router_t *router;       /* 127.0.0.1:8089 命令路由（本地存/查 + channel→设备转发）*/
     nvr_rec_sched_t  *rs;
     nvr_preview_t    *pv;
+    nvr_chan_persist_t *persist;    /* 通道映射/能力持久化(channels.json) */
     nvr_evt_hub_t    *eh;
     nvr_chan_mgr_t   *cm;
     nvr_cloud_uploader_t *up;       /* 云存上传器（有盘+meta+udid 时启动） */
@@ -294,9 +296,18 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
                                .hdd_full_policy = a->cfg.storage.hdd_full, .post_record_s = 10 };
     nvr_rec_sched_init(&rc, &a->rs);
 
-    nvr_preview_cfg_t pc = { .sm = a->sm, .osd_name = 1, .osd_datetime = 1 };
+    nvr_preview_cfg_t pc = { .sm = a->sm, .osd_name = 1, .osd_datetime = 1,
+                             .hdmi_w = a->cfg.sys.hdmi_w, .hdmi_h = a->cfg.sys.hdmi_h };
     nvr_preview_init(&pc, &a->pv);
     nvr_preview_set_layout(a->pv, pv_layout_of(a->cfg.sys.default_layout));
+
+    /* 通道映射/能力持久化：打开 channels.json，载入映射到 preview（断电重启后沿用上次映射） */
+    a->persist = nvr_chan_persist_open(config_dir);
+    if (a->persist) {
+        int map[NVR_PERSIST_MAX_CH];
+        int n = nvr_chan_persist_get_mapping(a->persist, map, NVR_PERSIST_MAX_CH);
+        if (n > 0) nvr_preview_set_mapping(a->pv, map, n);
+    }
 
     nvr_evt_cfg_t ec = { .nop_hub = a->nop_hub, .rs = a->rs, .user = a, .on_icon = on_evt_icon };
     nvr_evt_init(&ec, &a->eh);
@@ -346,7 +357,8 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
         nvr_cmd_router_cfg_t rc = { .settings = a->settings, .cm = a->cm,
                                     .stg = a->stg, .group = a->group, .meta = a->meta, .nop = a->nop,
                                     .port = nvr_settings_get_int(a->settings, "system.nop_port", 8089),
-                                    .dev_nop_port = 8089 };
+                                    .dev_nop_port = 8089,
+                                    .pv = a->pv, .persist = a->persist };
         if (nvr_cmd_router_start(&rc, &a->router) != 0)
             printf("[app] 警告: 命令路由(8089) 启动失败\n");
     }
@@ -409,6 +421,7 @@ void nvr_app_stop(nvr_app_t *app)
     if (app->cm) { nvr_chan_stop_all(app->cm); nvr_chan_mgr_deinit(app->cm); app->cm = NULL; }
     if (app->eh) { nvr_evt_deinit(app->eh); app->eh = NULL; }
     if (app->pv) { nvr_preview_deinit(app->pv); app->pv = NULL; }
+    if (app->persist) { nvr_chan_persist_close(app->persist); app->persist = NULL; }
     if (app->rs) { nvr_rec_sched_deinit(app->rs); app->rs = NULL; }
     if (app->nop_hub) { nop_event_hub_destroy(app->nop_hub); app->nop_hub = NULL; }
     if (app->router) { nvr_cmd_router_stop(app->router); app->router = NULL; }

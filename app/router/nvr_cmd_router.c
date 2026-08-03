@@ -4,6 +4,7 @@
 #include "nvr_cmd_router.h"
 #include "nvr_log.h"
 #include "nvr_ota.h"
+#include "nvr_cmd_display.h"
 #include "cJSON.h"
 
 #include <curl/curl.h>
@@ -114,6 +115,13 @@ static char *handle_local(nvr_cmd_router_t *r, const char *func, cJSON *args)
 {
     nvr_settings_t *s = r->cfg.settings;
     if (!func) return NULL;
+
+    /* ---- 出图：显示指令（displayMode/映射/悬浮块/通道状态/能力）优先分流 ---- */
+    {
+        nvr_display_ctx_t dctx = { .pv = r->cfg.pv, .persist = r->cfg.persist, .cm = r->cfg.cm };
+        char *dr = nvr_cmd_display_handle(func, args, &dctx);
+        if (dr) return dr;
+    }
 
     /* ---- 设备名 / 信息 ---- */
     if (!strcmp(func, "setName")) {

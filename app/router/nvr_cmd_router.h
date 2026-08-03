@@ -16,6 +16,8 @@
 #include "nvr_storage.h"     /* nvr_storage_t（存储命令接真实盘） */
 #include "rsdk.h"            /* rsdk_group_t（事件/回放查询） */
 #include "nop_sdk/nop_app.h"
+#include "nvr_preview.h"
+#include "nvr_chan_persist.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,6 +34,8 @@ typedef struct {
     nop_app_t      *nop;        /* 回落 */
     int             port;       /* 默认 8089 */
     int             dev_nop_port; /* 转发到设备的 NOP 端口，默认 8089 */
+    nvr_preview_t      *pv;        /* 出图：显示指令驱动 */
+    nvr_chan_persist_t *persist;   /* 通道映射/能力持久化 */
 } nvr_cmd_router_cfg_t;
 
 int  nvr_cmd_router_start(const nvr_cmd_router_cfg_t *cfg, nvr_cmd_router_t **out);

@@ -37,6 +37,7 @@ set(NVR_APP_INCLUDES
     ${NVR_ROOT}/components/cloud_uploader/include
     ${NVR_ROOT}/components/cloud_tutk/include
     ${NVR_ROOT}/platform/media_hal
+    ${NVR_ROOT}/third_party/cJSON
 )
 
 # --- app 模块静态库（主机可编译；静态库不需解析平台符号）---
@@ -48,6 +49,9 @@ add_library(nvr_app_core STATIC
     record_sched/nvr_record_sched.c
     event/nvr_event.c
     router/nvr_cmd_router.c
+    router/nvr_cmd_display.c
+    config/nvr_chan_persist.c
+    channel/nvr_chan_status.c
     ota/nvr_ota.c
     netime/nvr_netime.c
     ble/nvr_ble.c

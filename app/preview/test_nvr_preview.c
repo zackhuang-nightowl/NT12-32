@@ -26,6 +26,18 @@ int main(void){
     assert(mhalmock_rects[0].chn==2);   /* map[0]=3 → 0-based 2 */
     assert(mhalmock_rects[2].chn==0);   /* map[2]=1 → 0-based 0 */
 
+    /* ---- 承前项(Task4 遗留/Task7 收尾)：display_mode>0 时 on_channel_online 必须按
+     * map0 重算窗口，不能再用旧 page*win_count+chn 公式（否则绑错窗/丢窗）。
+     * 场景：窗0 因映射被指到通道2(非默认恒等映射)；通道2 断线重连(win2chn[0] 被 unmap 清空)
+     * 后 on_channel_online(2) 应重新命中窗0，而不是旧公式算出的窗2(=chn-page*win_count=2-0，
+     * 因为 p->page 恒为0)。 */
+    assert(nvr_preview_unmap(p,0)==0);          /* 模拟窗0(通道2)掉线：清绑定 */
+    mhalmock_reset();
+    assert(nvr_preview_on_channel_online(p,2)==0);
+    assert(mhalmock_nbind==1);                   /* 应重新 bind 一次 */
+    assert(mhalmock_rects[0].chn==2);
+    assert(mhalmock_bind_win[0]==0);             /* 命中 map0 对应的窗0，不是旧公式的窗2 */
+
     /* mode=0 → 停所有解码（unbind） */
     mhalmock_reset();
     assert(nvr_preview_set_mode(p,0,0)==0);

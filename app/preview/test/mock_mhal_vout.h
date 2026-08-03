@@ -3,6 +3,8 @@
 typedef struct { int chn,x,y,w,h; } mock_rect_t;
 extern mock_rect_t mhalmock_rects[64];
 extern int mhalmock_nbind;
+/* mhal_vout_bind(win,chn) 的窗口号（与 mhalmock_rects 按下标对应；bind_rect 无宫格 win，记 -1） */
+extern int mhalmock_bind_win[64];
 extern int mhalmock_layout;
 extern int mhalmock_unbind_chn[64];
 extern int mhalmock_nunbind;
