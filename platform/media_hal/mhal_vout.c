@@ -52,9 +52,28 @@ int mhal_vout_init(mhal_out_t out, int width, int height)
     g_disp.disp_w = width  > 0 ? width  : (int)g_disp.syscaps.input_dim.w;
     g_disp.disp_h = height > 0 ? height : (int)g_disp.syscaps.input_dim.h;
 
-    /* TODO(板级): 输出模式/时序（HDMI 3840x2160@30 / CVBS NTSC）经
-     * hd_videoout_set(ctrl_path, HD_VIDEOOUT_PARAM_DEVCONFIG/OUTPUT, ...) 配置；
-     * 具体结构随面板，见样例 display_with_change_mode.c。 */
+    /* 配置 HDMI 输出模式/时序：按 width/height 选 HD_VIDEOOUT_HDMI_ID，经
+     * hd_videoout_set(ctrl_path, HD_VIDEOOUT_PARAM_MODE, &mode) 下发。
+     * 字段/调用序列参照样例 display_with_change_mode.c / vcap_vi_scan.c：
+     *   mode.output_type      = HD_COMMON_VIDEO_OUT_HDMI;
+     *   mode.output_mode.hdmi = HD_VIDEOOUT_HDMI_xxx;
+     *   hd_videoout_set(ctrl_path, HD_VIDEOOUT_PARAM_MODE, &mode);
+     * (HD_VIDEOOUT_MODE 定义见 hd_videoout.h：output_type + input_dim + output_mode 联合体) */
+    {
+        HD_VIDEOOUT_MODE mode;
+        memset(&mode, 0, sizeof(mode));
+        mode.output_type = HD_COMMON_VIDEO_OUT_HDMI;
+        mode.input_dim    = HD_VIDEOOUT_IN_AUTO;
+        if (g_disp.disp_w == 1280 && g_disp.disp_h == 720)
+            mode.output_mode.hdmi = HD_VIDEOOUT_HDMI_1280X720P60;
+        else if (g_disp.disp_w == 1920 && g_disp.disp_h == 1080)
+            mode.output_mode.hdmi = HD_VIDEOOUT_HDMI_1920X1080P60;
+        else
+            mode.output_mode.hdmi = HD_VIDEOOUT_HDMI_1920X1080P60; /* 就近/默认兜底 */
+
+        if ((ret = hd_videoout_set(g_disp.ctrl_path, HD_VIDEOOUT_PARAM_MODE, &mode)) != HD_OK)
+            printf("videoout set mode fail %d (hdmi_id=%d)\n", ret, mode.output_mode.hdmi);
+    }
 
     g_disp.inited = 1;
     return 0;
