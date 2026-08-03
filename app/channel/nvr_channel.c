@@ -110,6 +110,7 @@ static int install_slot(nvr_chan_mgr_t *m, const nvr_channel_t *d)
     s->backoff_s = m->cfg.reconnect_base_s;
     s->next_retry = 0;
     s->notified_online = 0;
+    memset(&s->sub, 0, sizeof(s->sub));   /* 清掉复用 slot 号残留的上一占用者子状态 */
 
     if (d->enabled == 0) { s->status = NVR_CHAN_DISABLED; return 0; }
 
@@ -225,9 +226,15 @@ static void on_discovered(const nvr_onvif_cam_t *cam, void *user)
 
     nvr_dev_class_t cls; nvr_dev_classify(cam->scopes, &cls);
 
-    /* 已绑定同 IP → 只更新分类 */
+    /* 已绑定同 IP → 更新分类 + 重算待激活标志（周期性重发现是清零 inactive 的唯一路径） */
     int chn = chn_by_host(m, cam->host);
-    if (chn >= 0) { m->slots[chn].d.kind = (int)cls.kind; m->slots[chn].d.backend = (int)cls.backend; return; }
+    if (chn >= 0) {
+        slot_t *s = &m->slots[chn];
+        s->d.kind    = (int)cls.kind;
+        s->d.backend = (int)cls.backend;
+        s->sub.inactive = (cls.kind == NVR_DEV_KIND_NOPONVIF && !cls.active) ? 1 : 0;
+        return;
+    }
 
     /* 通道分配：198.18.<口>.100 → PoE 口 => 通道 口-1；否则数字通道空位 */
     int a, b, cc, dd;
