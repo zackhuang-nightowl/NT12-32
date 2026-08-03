@@ -322,24 +322,8 @@ static char *handle_local(nvr_cmd_router_t *r, const char *func, cJSON *args)
         return resp_content(c);
     }
 
-    /* ---- 设备能力聚合（device + 每通道） ---- */
-    if (!strcmp(func, "X_NightOwl_getDeviceCapabilities")) {
-        cJSON *c = cJSON_CreateObject();
-        cJSON *dev = cJSON_AddObjectToObject(c, "device");
-        cJSON *dcap = cJSON_AddArrayToObject(dev, "capabilities");
-        cJSON_AddItemToArray(dcap, cJSON_CreateString("multiStorage"));
-        cJSON_AddItemToArray(dcap, cJSON_CreateString("format"));
-        cJSON_AddItemToArray(dcap, cJSON_CreateString("cloudRecording"));
-        cJSON *chs = cJSON_AddArrayToObject(c, "channels");
-        if (r->cfg.cm) { nvr_channel_t list[32]; int n = nvr_chan_list(r->cfg.cm, list, 32);
-            for (int i = 0; i < n; i++) { cJSON *o = cJSON_CreateObject();
-                cJSON_AddNumberToObject(o, "channel", list[i].chn);
-                cJSON_AddStringToObject(o, "signal", "IPC");
-                cJSON *cc = cJSON_AddArrayToObject(o, "capabilities");
-                cJSON_AddItemToArray(cc, cJSON_CreateString("cloudRecording"));
-                cJSON_AddItemToArray(chs, o); } }
-        return resp_content(c);
-    }
+    /* ---- 设备能力聚合（device + 每通道）：已移交 nvr_cmd_display_handle
+     * （本函数顶部优先分流），此处不再重复实现，避免死代码与双份行为漂移。 ---- */
 
     /* ---- 重启 ---- */
     if (!strcmp(func, "reboot")) {

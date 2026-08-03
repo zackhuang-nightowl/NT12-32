@@ -94,6 +94,12 @@ char *nvr_cmd_display_handle(const char *func, cJSON *args, const nvr_display_ct
         cJSON *dc=cJSON_AddArrayToObject(dev,"capabilities");
         cJSON_AddItemToArray(dc,cJSON_CreateString("displayMode"));
         cJSON_AddItemToArray(dc,cJSON_CreateString("groupInPrimary"));
+        /* 合并旧路由分支(nvr_cmd_router.c)已删除的广播项：本命令现在是
+         * getDeviceCapabilities 的唯一实现，必须保持超集，否则真机上依赖
+         * 这些项判断"多盘位/格式化/云存录像"开关的客户端功能会回归。 */
+        cJSON_AddItemToArray(dc,cJSON_CreateString("multiStorage"));
+        cJSON_AddItemToArray(dc,cJSON_CreateString("format"));
+        cJSON_AddItemToArray(dc,cJSON_CreateString("cloudRecording"));
         cJSON *chs=cJSON_AddArrayToObject(c,"channels");
         int list_n=0; nvr_channel_t list[32];
         if(ctx->cm) list_n=nvr_chan_list(ctx->cm,list,32);
@@ -104,6 +110,13 @@ char *nvr_cmd_display_handle(const char *func, cJSON *args, const nvr_display_ct
             /* 确保有 channel/signal 字段 */
             if(!cJSON_GetObjectItem(o,"channel")) cJSON_AddNumberToObject(o,"channel",ch1);
             if(!cJSON_GetObjectItem(o,"signal"))  cJSON_AddStringToObject(o,"signal","IPC");
+            /* 无缓存(真机相机能力探测尚未写缓存前)时给安全默认值：至少含
+             * cloudRecording(NVR 侧恒为真，等同旧路由行为)，避免通道对象
+             * 缺 capabilities 必填字段。 */
+            if(!cJSON_GetObjectItem(o,"capabilities")){
+                cJSON *cc=cJSON_AddArrayToObject(o,"capabilities");
+                cJSON_AddItemToArray(cc,cJSON_CreateString("cloudRecording"));
+            }
             cJSON_AddItemToArray(chs,o);
         }
         return resp_ok_content(c);

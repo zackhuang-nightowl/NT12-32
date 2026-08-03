@@ -64,14 +64,50 @@ int main(void){
     assert((int)cJSON_GetNumberValue(cJSON_GetObjectItem(c,"status"))==4);
     free(r); cJSON_Delete(a); cJSON_Delete(c);
 
-    /* getDeviceCapabilities：缓存通道1 能力后应回读 */
+    /* getDeviceCapabilities：缓存通道1 能力后应回读；device.capabilities 必须是
+     * 旧路由分支(multiStorage/format/cloudRecording) ∪ 新分支(displayMode/
+     * groupInPrimary) 的超集（Critical 修复：不能再让 display 分支的返回
+     * 收窄，丢掉客户端判断多盘位/格式化/云存录像开关所需的字段）。 */
     { cJSON *caps=cJSON_CreateObject(); cJSON_AddStringToObject(caps,"signal","IPC");
       cJSON *cc=cJSON_AddArrayToObject(caps,"capabilities"); cJSON_AddItemToArray(cc,cJSON_CreateString("ptz"));
       nvr_chan_persist_set_caps(ps,1,caps); }
     a=cJSON_CreateObject();
     r=nvr_cmd_display_handle("X_NightOwl_getDeviceCapabilities",a,&ctx); c=content_of(r);
     assert(cJSON_GetObjectItem(c,"device"));
+    {
+        cJSON *dcap = cJSON_GetObjectItem(cJSON_GetObjectItem(c,"device"),"capabilities");
+        assert(cJSON_IsArray(dcap));
+        int has_display=0, has_multi=0, has_format=0, has_cloud=0;
+        for (int i=0;i<cJSON_GetArraySize(dcap);i++){
+            const char *s = cJSON_GetStringValue(cJSON_GetArrayItem(dcap,i));
+            if (s && !strcmp(s,"displayMode"))    has_display=1;
+            if (s && !strcmp(s,"multiStorage"))   has_multi=1;
+            if (s && !strcmp(s,"format"))         has_format=1;
+            if (s && !strcmp(s,"cloudRecording")) has_cloud=1;
+        }
+        assert(has_display && has_multi && has_format && has_cloud);
+    }
     cJSON *chs=cJSON_GetObjectItem(c,"channels"); assert(cJSON_IsArray(chs)&&cJSON_GetArraySize(chs)>=1);
+    /* mockchan_count=2 (设于上面 getChannelStatus 用例)：通道1(chn0=0) 有缓存(ptz)，
+     * 通道2(chn0=1) 无缓存 → 必须有安全默认 capabilities(含 cloudRecording)。 */
+    {
+        int found_ch2 = 0;
+        for (int i=0;i<cJSON_GetArraySize(chs);i++){
+            cJSON *o = cJSON_GetArrayItem(chs,i);
+            cJSON *cc = cJSON_GetObjectItem(o,"capabilities");
+            assert(cJSON_IsArray(cc) && cJSON_GetArraySize(cc)>=1);   /* 任何通道不缺 capabilities */
+            if ((int)cJSON_GetNumberValue(cJSON_GetObjectItem(o,"channel"))==2) {
+                found_ch2 = 1;
+                int has_cloud=0;
+                for (int j=0;j<cJSON_GetArraySize(cc);j++){
+                    const char *s = cJSON_GetStringValue(cJSON_GetArrayItem(cc,j));
+                    if (s && !strcmp(s,"cloudRecording")) has_cloud=1;
+                }
+                assert(has_cloud);
+            }
+        }
+        assert(found_ch2);
+    }
     free(r); cJSON_Delete(a); cJSON_Delete(c);
 
     /* ZoomPan 预留：回显 */
