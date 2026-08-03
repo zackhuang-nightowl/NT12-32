@@ -14,7 +14,7 @@ int main(void){
     nvr_preview_cfg_t pc; memset(&pc,0,sizeof(pc)); pc.hdmi_w=1920; pc.hdmi_h=1080; pc.sm=(nvr_stream_mgr_t*)1;
     nvr_preview_t *pv; nvr_preview_init(&pc,&pv);
     nvr_chan_persist_t *ps=nvr_chan_persist_open("/tmp/nvrtest_disp");
-    nvr_display_ctx_t ctx={ .pv=pv, .persist=ps, .cm=NULL };
+    nvr_display_ctx_t ctx={ .pv=pv, .persist=ps, .cm=(nvr_chan_mgr_t*)1 };
 
     /* setChannelMapping 持久化 */
     cJSON*a=cJSON_Parse("{\"ChannelMapping\":[3,2,1,4,5,6,7,8,9,10,11,12,13,14,15,16]}");
@@ -53,6 +53,30 @@ int main(void){
     a=cJSON_CreateObject();
     assert(nvr_cmd_display_handle("someOtherCmd",a,&ctx)==NULL);
     cJSON_Delete(a);
+
+    /* getChannelStatus：通道1(0-based 0) 置为 4(鉴权失败) */
+    extern int mockchan_count; extern int mockchan_status[32];
+    mockchan_count=2; mockchan_status[0]=4; mockchan_status[1]=1;
+    a=cJSON_Parse("{\"channel\":1}");
+    r=nvr_cmd_display_handle("X_NightOwl_getChannelStatus",a,&ctx); c=content_of(r);
+    assert((int)cJSON_GetNumberValue(cJSON_GetObjectItem(c,"status"))==4);
+    free(r); cJSON_Delete(a); cJSON_Delete(c);
+
+    /* getDeviceCapabilities：缓存通道1 能力后应回读 */
+    { cJSON *caps=cJSON_CreateObject(); cJSON_AddStringToObject(caps,"signal","IPC");
+      cJSON *cc=cJSON_AddArrayToObject(caps,"capabilities"); cJSON_AddItemToArray(cc,cJSON_CreateString("ptz"));
+      nvr_chan_persist_set_caps(ps,1,caps); }
+    a=cJSON_CreateObject();
+    r=nvr_cmd_display_handle("X_NightOwl_getDeviceCapabilities",a,&ctx); c=content_of(r);
+    assert(cJSON_GetObjectItem(c,"device"));
+    cJSON *chs=cJSON_GetObjectItem(c,"channels"); assert(cJSON_IsArray(chs)&&cJSON_GetArraySize(chs)>=1);
+    free(r); cJSON_Delete(a); cJSON_Delete(c);
+
+    /* ZoomPan 预留：回显 */
+    a=cJSON_Parse("{\"channel\":1,\"enable\":true,\"CenterPointX\":500,\"CenterPointY\":500,\"ZoomRatio\":120}");
+    r=nvr_cmd_display_handle("X_NightOwl_setChannelZoomPan",a,&ctx); c=content_of(r);
+    assert((int)cJSON_GetNumberValue(cJSON_GetObjectItem(c,"ZoomRatio"))==120);
+    free(r); cJSON_Delete(a); cJSON_Delete(c);
 
     nvr_chan_persist_close(ps); nvr_preview_deinit(pv);
     printf("test_nvr_cmd_display: ALL PASS\n");

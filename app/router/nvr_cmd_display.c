@@ -82,5 +82,47 @@ char *nvr_cmd_display_handle(const char *func, cJSON *args, const nvr_display_ct
         cJSON *c=cJSON_CreateObject(); cJSON_AddStringToObject(c,"fb","fb0");
         return resp_ok_content(c);  /* 分辨率固定 1080P，仅回 fb */
     }
-    return NULL;   /* Task 6 追加 getChannelStatus/getDeviceCapabilities/ZoomPan */
+    if(!strcmp(func,"X_NightOwl_getChannelStatus")){
+        int ch1=(int)cJSON_GetNumberValue(cJSON_GetObjectItem(args,"channel"));
+        int code = ctx->cm? nvr_chan_status_code_of(ctx->cm, ch1-1) : 0;
+        cJSON *c=cJSON_CreateObject(); cJSON_AddNumberToObject(c,"status",code);
+        return resp_ok_content(c);
+    }
+    if(!strcmp(func,"X_NightOwl_getDeviceCapabilities")){
+        cJSON *c=cJSON_CreateObject();
+        cJSON *dev=cJSON_AddObjectToObject(c,"device");
+        cJSON *dc=cJSON_AddArrayToObject(dev,"capabilities");
+        cJSON_AddItemToArray(dc,cJSON_CreateString("displayMode"));
+        cJSON_AddItemToArray(dc,cJSON_CreateString("groupInPrimary"));
+        cJSON *chs=cJSON_AddArrayToObject(c,"channels");
+        int list_n=0; nvr_channel_t list[32];
+        if(ctx->cm) list_n=nvr_chan_list(ctx->cm,list,32);
+        for(int i=0;i<list_n;i++){
+            int ch1=list[i].chn+1;
+            cJSON *cached = ctx->persist? nvr_chan_persist_get_caps(ctx->persist,ch1):NULL;
+            cJSON *o = cached? cJSON_Duplicate(cached,1) : cJSON_CreateObject();
+            /* 确保有 channel/signal 字段 */
+            if(!cJSON_GetObjectItem(o,"channel")) cJSON_AddNumberToObject(o,"channel",ch1);
+            if(!cJSON_GetObjectItem(o,"signal"))  cJSON_AddStringToObject(o,"signal","IPC");
+            cJSON_AddItemToArray(chs,o);
+        }
+        return resp_ok_content(c);
+    }
+    if(!strcmp(func,"X_NightOwl_setChannelZoomPan")){
+        /* 预留：回显生效值，不驱动实际裁剪 */
+        cJSON *c=cJSON_CreateObject();
+        cJSON_AddStringToObject(c,"result","OK");
+        cJSON_AddNumberToObject(c,"CenterPointX",(int)cJSON_GetNumberValue(cJSON_GetObjectItem(args,"CenterPointX")));
+        cJSON_AddNumberToObject(c,"CenterPointY",(int)cJSON_GetNumberValue(cJSON_GetObjectItem(args,"CenterPointY")));
+        cJSON_AddNumberToObject(c,"ZoomRatio",(int)cJSON_GetNumberValue(cJSON_GetObjectItem(args,"ZoomRatio")));
+        return resp_ok_content(c);
+    }
+    if(!strcmp(func,"X_NightOwl_getChannelZoomPan")){
+        cJSON *c=cJSON_CreateObject();
+        cJSON_AddBoolToObject(c,"enable",0);
+        cJSON_AddNumberToObject(c,"CenterPointX",500); cJSON_AddNumberToObject(c,"CenterPointY",500);
+        cJSON_AddNumberToObject(c,"ZoomRatio",100);
+        return resp_ok_content(c);
+    }
+    return NULL;
 }
