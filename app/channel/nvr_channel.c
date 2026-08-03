@@ -18,6 +18,7 @@ typedef struct {
     int               backoff_s;
     time_t            next_retry;
     int               notified_online;
+    nvr_chan_substate_t sub;      /* 鉴权失败/超预算/待激活/休眠/固件升级子状态（0-7 码用） */
 } slot_t;
 
 struct nvr_chan_mgr {
@@ -43,6 +44,33 @@ static slot_t *slot_of(nvr_chan_mgr_t *m, int chn)
 {
     if (chn < 0 || chn >= NVR_MAX_CH) return NULL;
     return &m->slots[chn];
+}
+
+/* app 通道 FSM → 状态码用的粗粒度连接态 */
+static nvr_conn_t conn_of(nvr_chan_status_t st)
+{
+    switch (st) {
+        case NVR_CHAN_ONLINE:   return NVR_CONN_ONLINE;
+        case NVR_CHAN_EMPTY:
+        case NVR_CHAN_DISABLED: return NVR_CONN_NOCAM;
+        default:                return NVR_CONN_CONNECTING;   /* BOUND/CONNECTING/NOSIGNAL/FAIL */
+    }
+}
+
+void nvr_chan_set_substate(nvr_chan_mgr_t *m, int chn, const nvr_chan_substate_t *sub)
+{
+    slot_t *s = slot_of(m, chn);
+    if (!s || !sub) return;   /* 越界/空指针忽略 */
+    s->sub = *sub;
+}
+
+int nvr_chan_status_code_of(nvr_chan_mgr_t *m, int chn)
+{
+    nvr_chan_status_t st = nvr_chan_status(m, chn);
+    slot_t *s = slot_of(m, chn);
+    nvr_chan_substate_t zero; memset(&zero, 0, sizeof(zero));
+    const nvr_chan_substate_t *sub = (s && s->in_use) ? &s->sub : &zero;
+    return nvr_chan_status_code(conn_of(st), sub);
 }
 
 int nvr_chan_mgr_init(const nvr_chan_mgr_cfg_t *cfg, nvr_chan_mgr_t **out)
@@ -164,6 +192,9 @@ int nvr_chan_apply_discovery(nvr_chan_mgr_t *m, int chn, const char *scopes)
     if (nvr_dev_classify(scopes, &c) != 0) return -1;
     s->d.kind    = (int)c.kind;
     s->d.backend = (int)c.backend;
+    /* NOPONVIF 设备需 ONVIF digest+激活；scopes 无 nopState/active → 待激活(码7)。
+     * 再次分类若已 active，则清零（重连/重发现成功清除标志）。 */
+    s->sub.inactive = (c.kind == NVR_DEV_KIND_NOPONVIF && !c.active) ? 1 : 0;
     NVR_LOGI("chan", "ch%d 分类=%s backend=%s%s%s", chn, nvr_dev_kind_name(c.kind),
              c.backend == NVR_BACKEND_NOP ? "NOP透传" : "ONVIF翻译",
              c.mac[0] ? " mac=" : "", c.mac);
@@ -218,7 +249,13 @@ static void on_discovered(const nvr_onvif_cam_t *cam, void *user)
     snprintf(d.name, sizeof(d.name), "Camera %d", chn + 1);
 
     NVR_LOGI("chan", "发现相机 %s (%s) → 绑定 ch%d", cam->host, nvr_dev_kind_name(cls.kind), chn);
-    if (nvr_chan_add(m, &d) >= 0) ctx->bound++;
+    if (nvr_chan_add(m, &d) >= 0) {
+        ctx->bound++;
+        /* NOPONVIF 待激活设备：绑定即置状态码7的待激活标志，见 nvr_chan_apply_discovery 同理逻辑 */
+        nvr_chan_substate_t sub; memset(&sub, 0, sizeof(sub));
+        sub.inactive = (cls.kind == NVR_DEV_KIND_NOPONVIF && !cls.active) ? 1 : 0;
+        nvr_chan_set_substate(m, chn, &sub);
+    }
 }
 
 int nvr_chan_run_discovery(nvr_chan_mgr_t *m, const char *local_ip, int seconds)
@@ -266,6 +303,8 @@ static void tick_slot(nvr_chan_mgr_t *m, slot_t *s, time_t now)
     }
 
     nvr_ch_state_t st = nvr_stream_state(m->cfg.sm, s->d.chn);
+    /* 解码预算准入：只录不显时 mhal 会拒绝该路解码，供状态码 5(超出解码能力)。 */
+    s->sub.out_of_res = nvr_stream_decode_denied(m->cfg.sm, s->d.chn) ? 1 : 0;
     switch (st) {
         case NVR_CH_PLAYING:
             s->status = NVR_CHAN_ONLINE;

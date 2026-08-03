@@ -101,4 +101,10 @@ if(NOT NVR_CROSS)
         ${NVR_ROOT}/third_party/cJSON)
     target_link_libraries(test_nvr_chan_persist PRIVATE cjson)
     add_test(NAME test_nvr_chan_persist COMMAND test_nvr_chan_persist)
+
+    # 通道状态 0-7 纯映射单测（主机可运行；纯 C，无重依赖）
+    add_executable(test_nvr_chan_status
+        channel/test_nvr_chan_status.c channel/nvr_chan_status.c)
+    target_include_directories(test_nvr_chan_status PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/channel)
+    add_test(NAME test_nvr_chan_status COMMAND test_nvr_chan_status)
 endif()

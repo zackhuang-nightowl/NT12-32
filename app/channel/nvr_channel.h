@@ -10,6 +10,7 @@
 
 #include "nvr_config.h"       /* nvr_channel_t / nvr_config_t */
 #include "nvr_streaming.h"    /* nvr_stream_mgr_t / nvr_ch_state_t */
+#include "nvr_chan_status.h"  /* nvr_conn_t / nvr_chan_substate_t / nvr_chan_status_code */
 
 #ifdef __cplusplus
 extern "C" {
@@ -66,6 +67,11 @@ int  nvr_chan_get   (nvr_chan_mgr_t *m, int chn, nvr_channel_t *out);
 int  nvr_chan_list  (nvr_chan_mgr_t *m, nvr_channel_t *out, int cap);
 nvr_chan_status_t nvr_chan_status(nvr_chan_mgr_t *m, int chn);
 const char *nvr_chan_status_name(nvr_chan_status_t s);
+
+/* 子状态（鉴权失败/超解码预算/待激活/休眠/固件升级）：由信号点置位，供 0-7 状态码合成。 */
+void nvr_chan_set_substate(nvr_chan_mgr_t *m, int chn, const nvr_chan_substate_t *sub);
+/* 取该通道 getChannelStatus 用的 0-7 码：FSM→conn 映射 + 子状态 → nvr_chan_status_code。 */
+int  nvr_chan_status_code_of(nvr_chan_mgr_t *m, int chn);
 
 #ifdef __cplusplus
 }
