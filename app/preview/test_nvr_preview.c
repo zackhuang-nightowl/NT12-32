@@ -43,6 +43,14 @@ int main(void){
     assert(nvr_preview_set_mode(p,0,0)==0);
     assert(mhalmock_nunbind>=4);
 
+    /* ---- Important2 修复验证：display_mode==0（已离开 LiveView）时 on_channel_online
+     * 不得落回旧公式绑回幽灵宫格窗。通道2 曾映射到格0(map[0]=3→0-based 2)，若走旧公式
+     * win=chn-page*win_count=2-0=2 会误绑窗2；正确行为是 display_mode==0 时什么都不做，
+     * 断言不产生任何 mhal_vout_bind。 */
+    mhalmock_reset();
+    assert(nvr_preview_on_channel_online(p,2)==0);
+    assert(mhalmock_nbind==0);          /* 不应绑回任何窗（保持隐藏） */
+
     /* 悬浮块：通道5 子码流 在 20%,25%,20%,20% */
     mhalmock_reset();
     nvr_pv_ext_t b={ .chn0=5,.x=200,.y=250,.w=200,.h=200,.stream=NVR_STREAM_SUB };

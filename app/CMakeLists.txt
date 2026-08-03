@@ -122,6 +122,7 @@ if(NOT NVR_CROSS)
         ${CMAKE_CURRENT_SOURCE_DIR}/preview ${CMAKE_CURRENT_SOURCE_DIR}/preview/test
         ${NVR_ROOT}/platform/media_hal ${NVR_ROOT}/components/streaming/include
         ${NVR_ROOT}/common/include ${NVR_ROOT}/components/recorder/include)
+    target_link_libraries(test_nvr_preview PRIVATE pthread)
     target_compile_options(test_nvr_preview PRIVATE -UNDEBUG)
     add_test(NAME test_nvr_preview COMMAND test_nvr_preview)
 
@@ -137,7 +138,7 @@ if(NOT NVR_CROSS)
         ${NVR_ROOT}/platform/media_hal ${NVR_ROOT}/components/streaming/include
         ${NVR_ROOT}/components/config/include ${NVR_ROOT}/components/storage/include
         ${NVR_ROOT}/components/recorder/include ${NVR_ROOT}/common/include ${NVR_ROOT}/third_party/cJSON)
-    target_link_libraries(test_nvr_cmd_display PRIVATE cjson)
+    target_link_libraries(test_nvr_cmd_display PRIVATE cjson pthread)
     target_compile_options(test_nvr_cmd_display PRIVATE -UNDEBUG)
     add_test(NAME test_nvr_cmd_display COMMAND test_nvr_cmd_display)
 endif()
