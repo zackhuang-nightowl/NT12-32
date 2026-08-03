@@ -1,82 +1,80 @@
-# NVR Firmware — NT12-32 (Novatek NT98633 / NA51090)
+# NT12-32 — NightOwl 16 路 PoE NVR 固件
 
-把实现这台 16 路 PoE NVR 固件所需的**全部代码**收拢到一个可维护工程里。
-按 **分层 + 六大功能模块** 组织；第三方库 intact 隔离在 `third_party/`，平台强相关（hdal/BSP）隔离在 `platform/`，本项目自研与集成代码在 `components/` 与 `app/`。
+> SoC：Novatek **NT98633 / NA51090**（4×Cortex-A53，aarch64，Linux 4.19，Buildroot）
+> 规格：**32 通道**（16× PoE + 16× 数字/IP）· SPI-NAND 128MB · SATA HDD · HDMI 输出
 
-> 设备：NightOwl **NT12-32**，SoC **Novatek NT98633 = NA51090**（4×Cortex-A53，Linux 4.19，aarch64/Buildroot）。
-> 本工程只做**抽取与架构定型**，业务集成层（`app/`）与文件存储（`components/storage/`）为**待补充**骨架。
-
----
-
-## 六大功能 → 模块映射
-
-| # | 功能 | 模块 | 实现来源 | 状态 |
-|---|------|------|----------|------|
-| ① | **NOP 协议** | [`components/nop/`](components/nop/) | 自研 `nop_sdk`（协议核+能力网关+业务 handler） | ✅ 可编译，已单测 |
-| ② | **ONVIF 协议** | [`components/onvif/`](components/onvif/) | glue（`nop_onvif_*` 客户端）+ `third_party/happytime_onvif_rtsp` | ✅ **glue 已实现**（取流钩子点亮 PoE 自动取流）|
-| ③ | **拉流出图** | [`components/streaming/`](components/streaming/) | glue：Happytime `CRtspClient` 拉流 → `platform/media_hal` 硬解 → 录像 | ✅ **glue 已实现**（对真实 CRtspClient 头编译通过）|
-| ④ | **TUTK P2P** | [`components/cloud_tutk/`](components/cloud_tutk/) | glue（设备端 IOTC+AV）+ `third_party/tutk_sdk`（NT98633 库） | ✅ **glue 已实现**（登录/监听/推流）|
-| ⑤ | **录像系统** | [`components/recorder/`](components/recorder/) | 自研 `recorder_sdk`（librsdk） | ✅ 8 example 全实测 PASS |
-| ⑥ | **文件存储** | [`components/storage/`](components/storage/) | 自研盘管理层（发现/识别/格式化编排/装配/健康/热插拔/防挂载），裸盘路线复用 recorder | ✅ **裸盘方案已定型**，骨架编译通过 |
+NVR 作为**服务端**：对接相机（拉流/控制/事件）、驱动视频输出、录像存储、远程访问；
+本机界面由独立 **LVGL** 进程经 NOP 接口（`127.0.0.1:8089 /APPJsonCmd`）驱动。
 
 ---
 
-## 目录结构
+## 支持的功能
+
+### 通道接入
+- **16 路 PoE 即插即用**：eth1 内建 VLAN + DHCP（按口分 `198.18.<口>.100`），ONVIF 自动发现→分类→绑定→出图
+- **16 路数字/LAN 通道**：独立 IP 相机（手动填 IP/URL 或 ONVIF 发现）
+- **单设备多视频源**：一台设备多路 profile → 占多通道（鱼眼展开 / 多目 / 多 URL）
+- **设备三分类**：NightOwl NOP · nopOnvif · 标准 ONVIF（按 scopes/MAC 自动识别）
+
+### 实时预览出图
+- RTSP 拉流 → **NA51090 硬件 VPU 硬解** → HDMI 输出（16 路硬解，不走软解）
+- 多宫格 **1 / 4 / 9 / 16** 分屏、翻页、**宫格↔通道映射**、**视频悬浮块 (PIP)**
+- 主/子码流自动切换（多宫格子码流、单画面全屏主码流）
+- 显示布局由 LVGL 经 `GUI_setDeviceDisplayMode` / `DisplayExt` / `ChannelMapping` 驱动
+
+### 录像
+- 连续录像；**裸盘直写 (no-FS)** + **AES-256-CTR 加密** + 10MB 环形块 + 索引
+- 多盘负载均衡、索引检索、跨盘回放
+- **导出标准 MP4**（自研 muxer：H.264 avc1 / H.265 hvc1，moov 在尾）、抓拍 JPEG
+
+### 存储管理
+- 多盘发现 / 格式化（按容量自动布局）/ 装配 / 健康监测 / 热插拔 / 满盘策略
+
+### 事件
+- AI 事件接入：**移动 · 人形 · 人脸 · 车辆 · 动物 · 包裹 · 越线 · 区域入侵 · 门铃**
+- 经 **longPolling** 状态位图（按类型 × 32 通道）主动上报 LVGL 界面；事件录像联动
+
+### 云存
+- 事件切片上传：取段 → MPEG-TS 封装 → VSaaS HTTPS 上传 → 回写状态
+
+### 远程访问 & 协议
+- **NOP 2.0** 服务端（8089 `/APPJsonCmd`，envelope → router → capability → handler）
+- **TUTK P2P** 远程访问（IOTC / AVAPI）
+- **ONVIF**：客户端（取流 / 发现 / PTZ 控制）+ 服务端（对 App 发流 RTSP）
+- **NOP↔ONVIF 映射** 9 域：PTZ · OSD · 隐私遮挡 · 媒体编码 · AI 越线/入侵/物体检测 · 移动侦测 · 固件 等（含坐标系转译）
+
+### 系统
+- 网络：eth0 管理 · eth1 PoE 汇聚；时间 / NTP；账户鉴权 / 锁定
+- OTA：A/B 双 rootfs（squashfs 只读，升级切分区）
+
+---
+
+## 目录
 
 ```
-nvr_firmware/
-├── app/                      整机集成层（相当于原厂 LocalHMI）—— 自研，骨架/待补充
-│   ├── channel/              通道管理：IPC 增删、绑定、在线状态机
-│   ├── preview/              预览分屏布局编排（1/4/9/16 分屏）
-│   ├── record_sched/         录像调度 + 满盘策略编排
-│   ├── event/                事件联动：AI → 录像/抓拍/推送
-│   └── config/               配置管理（INI/JSON）
-├── components/               六大功能模块（见上表）
-│   ├── nop/  onvif/  streaming/  cloud_tutk/  recorder/  storage/
-├── platform/                NA51090/NT98633 硬件适配层
-│   ├── media_hal/            hd_videodec / hd_videoout / hd_videoenc 薄封装
-│   └── bsp_ref.txt           → 指向 na51090_linux_sdk（BSP 1.6G 不复制）
-├── third_party/             第三方 intact 依赖（可整体替换/升级）
-│   ├── happytime_onvif_rtsp/ ONVIF+RTSP 全套（含 CRtspClient 拉流）
-│   ├── tutk_sdk/             TUTK Include + NT98633 库
-│   ├── ffmpeg/              arm64-v8a 预编译（软解/封装兜底）
-│   └── cJSON/
-├── config/                  各模块运行期配置（JSON）+ 通道模型
-│   ├── channels.json         ⭐ PoE + 数字通道 + 单设备多视频源 → 通道映射
-│   ├── system/streaming/onvif/nop/cloud_tutk/storage/recorder.json
-│   └── README.md             通道模型（device→source→channel）+ 加载顺序
-├── docs/
-│   ├── ARCHITECTURE.md       分层、数据流、依赖图
-│   └── SOURCE_MAP.md         每个文件/模块的来源追溯
-└── CMakeLists.txt            顶层聚合构建
+app/         整机集成层（通道 / 预览 / 录像调度 / 事件 / 配置 / 路由 / 网络时间）
+components/  六大功能：nop · onvif · streaming · cloud_tutk · recorder · storage（+ config/crypto/cloud_uploader）
+platform/    media_hal —— 封装 na51090 hdal（硬解 / 上屏）
+third_party/ vendored 依赖：happytime(ONVIF/RTSP) · tutk_sdk · cJSON · sqlite3
+config/      运行期 JSON（首启种子）；channels.json = 通道模型 + 显示映射
+docs/        架构 / 来源追溯 / 现状 / 接口对照 / spec 与实现计划
 ```
 
-## 分层（自顶向下）
+## 构建
 
+```bash
+# 主机（编库 + 自测）
+cmake -S . -B build && cmake --build build -j && ctest --test-dir build
+
+# 目标机（aarch64 整机固件 nvr_app）
+cmake -S . -B build_arm -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64-ca53.cmake \
+  -DNVR_WITH_ONBOARD=ON -DBSP_ROOT=<na51090_linux_sdk>
+cmake --build build_arm -j
 ```
-app/                 业务/整机集成（通道、预览、录像调度、事件、配置）
-  │  只调下层稳定接口
-components/           功能模块（NOP / ONVIF / 拉流 / TUTK / 录像 / 存储）
-  │  只依赖 platform 抽象，不直接触碰 hdal 私有 API
-platform/            硬件抽象（media_hal 封装 na51090 hdal）
-  │
-third_party/ + BSP   Happytime / TUTK / ffmpeg / na51090 BSP(kernel+hdal)
-```
+详见 [BUILD.md](BUILD.md)。部署见 [deploy/README.md](deploy/README.md)。
 
-依赖只允许**自上而下**；模块之间通过 `app/` 编排，不横向硬耦合。详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+## 文档
 
-## 构建（现状）
-
-- 各自研模块自带 CMake：`components/nop`、`components/recorder` 可独立 `cmake -S . -B build && cmake --build build`。
-- 顶层 `CMakeLists.txt` 为聚合骨架，`app/` 与 `storage/` 补齐后打通整机构建。
-- 目标机交叉编译用 `platform/bsp_ref.txt` 指向的 na51090 工具链。
-
-## 给 Review 的三条主线
-
-1. **拉流出图链路**（③）是整机唯一"跨了三个模块+平台"的关键路径：
-   `CRtspClient.video_cb → platform/media_hal(hd_videodec) → hd_videoout(HDMI预览) + recorder(录像)`。
-   见 [components/streaming/README.md](components/streaming/README.md)。
-2. **NOP 已内含 onvif/tutk 适配器**（`components/nop/src/onvif`、`src/media`、`cap_cloud`），
-   与 ②④ 模块是"协议入口↔具体实现"的关系，别重复造。见 [docs/SOURCE_MAP.md](docs/SOURCE_MAP.md)。
-3. **文件存储 ⑥** 待你定方向：走 recorder_sdk 的裸盘直写，还是标准 ext4 文件（原机方案）。
-   见 [components/storage/README.md](components/storage/README.md)。
+- 架构与数据流：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- 代码级现状（哪些真实接线 / 待接线）：[docs/实际进度_代码审计_2026-08-03.md](docs/实际进度_代码审计_2026-08-03.md)
+- 来源追溯：[docs/SOURCE_MAP.md](docs/SOURCE_MAP.md)
