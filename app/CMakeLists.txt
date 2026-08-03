@@ -117,4 +117,19 @@ if(NOT NVR_CROSS)
         ${NVR_ROOT}/platform/media_hal ${NVR_ROOT}/components/streaming/include
         ${NVR_ROOT}/common/include ${NVR_ROOT}/components/recorder/include)
     add_test(NAME test_nvr_preview COMMAND test_nvr_preview)
+
+    # 显示命令处理器单测（主机可运行；mock mhal_vout/streaming + mock_channel stub）
+    add_executable(test_nvr_cmd_display
+        router/test_nvr_cmd_display.c router/nvr_cmd_display.c
+        preview/nvr_preview.c preview/test/mock_mhal_vout.c preview/test/mock_streaming.c
+        config/nvr_chan_persist.c channel/nvr_chan_status.c router/test/mock_channel.c)
+    target_include_directories(test_nvr_cmd_display PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/router ${CMAKE_CURRENT_SOURCE_DIR}/preview
+        ${CMAKE_CURRENT_SOURCE_DIR}/preview/test ${CMAKE_CURRENT_SOURCE_DIR}/config
+        ${CMAKE_CURRENT_SOURCE_DIR}/channel
+        ${NVR_ROOT}/platform/media_hal ${NVR_ROOT}/components/streaming/include
+        ${NVR_ROOT}/components/config/include ${NVR_ROOT}/components/storage/include
+        ${NVR_ROOT}/components/recorder/include ${NVR_ROOT}/common/include ${NVR_ROOT}/third_party/cJSON)
+    target_link_libraries(test_nvr_cmd_display PRIVATE cjson)
+    add_test(NAME test_nvr_cmd_display COMMAND test_nvr_cmd_display)
 endif()
