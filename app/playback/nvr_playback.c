@@ -89,12 +89,20 @@ static void *pb_feeder(void *arg)
                 continue;
             }
             if(orc!=0 || !vdec){ vdec=NULL; NVR_LOGE("pb","chn%d 开解码失败 %d", chn0+1, orc); break; }
-            /* 视频区:playbackMode==0 → 全屏;否则从(0,0)占 0.8×W × 0.8×H(其余留给 GUI 时间轴/控件)。 */
+            /* 视频区:playbackMode==0 → 全屏(W×H);否则从(0,0)占 0.8W×0.8H(其余留 GUI 时间轴/控件)。
+             * 再按宫格数把视频区切成 side×side,当前回放通道占其在列表中的格位(单通道=首格)。 */
             int W = pb->cfg.hdmi_w>0 ? pb->cfg.hdmi_w : 1920;
             int H = pb->cfg.hdmi_h>0 ? pb->cfg.hdmi_h : 1080;
-            int vw = (pb->disp_mode==0) ? W : W*4/5;
-            int vh = (pb->disp_mode==0) ? H : H*4/5;
-            mhal_vout_bind_rect(chn0, 0, 0, vw, vh);
+            int rw = (pb->disp_mode==0) ? W : W*4/5;
+            int rh = (pb->disp_mode==0) ? H : H*4/5;
+            int side = 1; while(side*side < pb->disp_mode) side++;     /* 1/4/9/16/25 → 1/2/3/4/5 */
+            if(side<1) side=1;
+            int idx = 0;                                              /* 单通道回放=首格(多格待扩) */
+            for(int k=0;k<pb->ch_count;k++) if(pb->ch_list[k]-1==chn0){ idx=k; break; }
+            int cw = rw/side, chh = rh/side;
+            int cx = (idx%side)*cw, cy = (idx/side)*chh;
+            if(pb->disp_mode<=1){ cx=0; cy=0; cw=rw; chh=rh; }        /* 1宫格/全屏=整视频区 */
+            mhal_vout_bind_rect(chn0, cx, cy, cw, chh);
             opened=1; base_ms=now_ms(); base_pts=h.pts;
             NVR_LOGI("pb","chn%d ▶回放 win%d %s @%u", chn0+1, PB_WIN,
                      pb->want_stream==NVR_STREAM_SUB?"子":"主", start_wall);
@@ -115,16 +123,20 @@ static void *pb_feeder(void *arg)
 }
 
 /* 进入回放模式:接管全屏窗口并**黑屏**(关 live 解码 + 清黑),不显示 LiveView。须已持锁。 */
+#ifndef PB_MAX_CH
+#define PB_MAX_CH 32
+#endif
 static void pb_blackout_locked(nvr_playback_t *pb, int chn0)
 {
-    if(chn0<0) return;
     if(pb->cfg.pv && !pb->saved_valid){                           /* 首次接管:记住 live 布局供 stop 恢复 */
         if(nvr_preview_get_mode(pb->cfg.pv, &pb->saved_mode, &pb->saved_page)==0) pb->saved_valid=1;
     }
-    if(pb->cfg.pv) nvr_preview_fullscreen(pb->cfg.pv, chn0);       /* 单画面布局(切布局会清黑) */
-    if(pb->cfg.sm) nvr_stream_set_display(pb->cfg.sm, chn0, -1);   /* 关 live 解码,不再刷 live */
-    mhal_vout_clear_black();                                       /* 清黑,抹掉残留 live 帧 */
-    pb->chn0 = chn0;
+    /* 停**所有**通道的 live 解码 → 整屏让位给回放;清黑(默认先黑,play 才喂录像)。
+     * 回放不改 preview 布局(否则退回放难还原):回放帧由 feeder 用 mhal_vout_bind_rect 直接占
+     * 视频区(0.8×0.8,mode0 全屏)的宫格位。 */
+    if(pb->cfg.sm) for(int i=0;i<PB_MAX_CH;i++) nvr_stream_set_display(pb->cfg.sm, i, -1);
+    mhal_vout_clear_black();
+    if(chn0>=0) pb->chn0 = chn0;
 }
 
 /* 停当前回放线程 + 黑屏(留在回放模式的黑底,不回 live;回 live 由 GUI 切 live 布局触发)。须已持锁。 */
