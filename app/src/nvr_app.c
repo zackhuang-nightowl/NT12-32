@@ -395,8 +395,9 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
     nvr_preview_init(&pc, &a->pv);
     nvr_preview_set_layout(a->pv, pv_layout_of(a->cfg.sys.default_layout));
 
-    /* 通道映射/能力持久化：打开 channels.json，载入映射到 preview（断电重启后沿用上次映射） */
-    a->persist = nvr_chan_persist_open(config_dir);
+    /* 通道映射/名称/状态持久化:channels.json 落**持久分区** data_dir(/flash/nvrcfg),重启不丢
+     * (与两 .db 一致;此前落 config_dir=/tmp/nvrcfg 即 RAM,重启丢失通道名/映射)。 */
+    a->persist = nvr_chan_persist_open(data_dir);
     if (a->persist) {
         int map[NVR_PERSIST_MAX_CH];
         int n = nvr_chan_persist_get_mapping(a->persist, map, NVR_PERSIST_MAX_CH);
