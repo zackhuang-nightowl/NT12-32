@@ -133,8 +133,56 @@ char *cmd_X_NightOwl_queryRecordingInterval(cJSON *a, const nvr_cmd_ctx_t *c)
     return nvr_resp_content(o);
 }
 
+/* 事件月历:resolution=month → 该年有事件的月;=day → 该月有事件的日。
+ * 事件段在盘上以 RSDK_SLOT_EVENT 标记(见 queryEventList),故按 rectype=-1 查后过滤 EVENT 标志。 */
 char *cmd_X_NightOwl_queryEventCalendar(cJSON *a, const nvr_cmd_ctx_t *c)
 {
-    (void)a; (void)c;
-    return NULL;   /* TODO 待实现:事件月历聚合(接 rsdk 索引 + 事件类型);无业务→路由统一 501 */
+    const char *res = nvr_jstr(a, "resolution", "day");
+    int year = nvr_jint(a, "year", 0), month = nvr_jint(a, "month", 0);
+    int ch0 = first_chn0(a);
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "resolution", res);
+    cJSON *list = cJSON_AddArrayToObject(o, "list");
+    if (c->group && year > 0) {
+        uint32_t nowt = (uint32_t)time(NULL);
+        if (strcmp(res, "month") == 0) {
+            uint32_t y0 = local_ymd_epoch(year, 1, 1, 0, 0, 0);
+            uint32_t y1 = local_ymd_epoch(year, 12, 31, 23, 59, 59);
+            rsdk_index_slot_t *sl = (rsdk_index_slot_t *)malloc(sizeof(rsdk_index_slot_t) * 1024);
+            if (sl) {
+                int n = rsdk_group_query(c->group, y0, y1, ch0, -1, sl, 1024);
+                char mhit[13] = { 0 };
+                for (int i = 0; i < n; i++) {
+                    if (!(sl[i].flags & RSDK_SLOT_EVENT)) continue;   /* 只算事件段 */
+                    uint32_t s0 = sl[i].start_time;
+                    uint32_t s1 = (sl[i].end_time == 0xFFFFFFFFu) ? nowt : sl[i].end_time;
+                    for (int mo = 1; mo <= 12; mo++) {
+                        uint32_t m0 = local_ymd_epoch(year, mo, 1, 0, 0, 0);
+                        uint32_t m1 = local_ymd_epoch(year, mo, days_in_month(year, mo), 23, 59, 59);
+                        if (s0 <= m1 && s1 >= m0) mhit[mo] = 1;
+                    }
+                }
+                for (int mo = 1; mo <= 12; mo++) if (mhit[mo]) cJSON_AddItemToArray(list, cJSON_CreateNumber(mo));
+                free(sl);
+            }
+        } else if (month > 0) {
+            int dim = days_in_month(year, month);
+            uint32_t mt0 = local_ymd_epoch(year, month, 1, 0, 0, 0);
+            uint32_t mt1 = local_ymd_epoch(year, month, dim, 23, 59, 59);
+            rsdk_index_slot_t sl[256];
+            int n = rsdk_group_query(c->group, mt0, mt1, ch0, -1, sl, 256);
+            char dayhit[32] = { 0 };
+            for (int i = 0; i < n; i++) {
+                if (!(sl[i].flags & RSDK_SLOT_EVENT)) continue;   /* 只算事件段 */
+                uint32_t s0 = sl[i].start_time;
+                uint32_t s1 = (sl[i].end_time == 0xFFFFFFFFu) ? nowt : sl[i].end_time;
+                for (int d = 1; d <= dim; d++) {
+                    uint32_t d0 = local_ymd_epoch(year, month, d, 0, 0, 0), d1 = d0 + 86400;
+                    if (s0 < d1 && s1 >= d0) dayhit[d] = 1;
+                }
+            }
+            for (int d = 1; d <= dim; d++) if (dayhit[d]) cJSON_AddItemToArray(list, cJSON_CreateNumber(d));
+        }
+    }
+    return nvr_resp_content(o);
 }
