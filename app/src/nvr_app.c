@@ -20,6 +20,7 @@
 #include "nvr_playback.h"
 #include "nvr_record_sched.h"
 #include "nvr_event.h"
+#include "nvr_nop8012.h"
 #include "nvr_settings.h"
 #include "nvr_cloud_uploader.h"
 #include "nvr_tutk.h"
@@ -66,6 +67,7 @@ struct nvr_app {
     nvr_rec_sched_t  *rs;
     nvr_preview_t    *pv;
     struct nvr_playback *pb;        /* 本机回放引擎(GUI_playbackControl) */
+    struct nvr_nop8012  *n8012;     /* NOP 8012 事件中心客户端(逐相机) */
     nvr_chan_persist_t *persist;    /* 通道映射/能力持久化(channels.json) */
     nvr_evt_hub_t    *eh;
     nvr_chan_mgr_t   *cm;
@@ -460,6 +462,14 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
         }
     }
 
+    /* 8a1.5) NOP 设备事件:连各 NOP 相机的 8012 事件中心,收到告警(+JPEG 快照)归一化
+     *        publish 到同一 nop_hub → nvr_evt 订阅 → longPolling/录像触发(与 ONVIF 同桥)。 */
+    {
+        nvr_nop8012_cfg_t n8012 = { .cm = a->cm, .settings = a->settings, .hub = a->nop_hub, .port = 8012 };
+        if (nvr_nop8012_start(&n8012, &a->n8012) != 0) { a->n8012 = NULL; printf("[app] 警告: 8012 事件客户端启动失败\n"); }
+        else printf("[app] NOP 8012 事件中心客户端就绪(逐 NOP 相机连接)\n");
+    }
+
     /* 8a2) 本机回放引擎(rsdk_play → mhal_vdec 上屏);盘组/流管/预览就绪后创建 */
     {
         nvr_playback_cfg_t pbc = { .group = a->group, .sm = a->sm, .pv = a->pv,
@@ -599,6 +609,7 @@ void nvr_app_request_exit(nvr_app_t *app) { if (app) app->running = 0; }
 void nvr_app_stop(nvr_app_t *app)
 {
     if (!app) return;
+    if (app->n8012) { nvr_nop8012_stop(app->n8012); app->n8012 = NULL; }
     if (app->ble) { nvr_ble_destroy(app->ble); app->ble = NULL; }
     if (app->tutk_on) { nvr_tutk_stop(); nvr_tutk_deinit(); app->tutk_on = 0; }
     if (app->up) { nvr_cloud_uploader_stop(app->up); app->up = NULL; }

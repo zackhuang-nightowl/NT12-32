@@ -47,6 +47,8 @@ void nvr_evt_tick(nvr_evt_hub_t *h);
 
 /* nop_detect_type_t → RSDK_REC_*（供测试/复用）。返回 -1 表示不触发录像。 */
 int  nvr_evt_rectype_of(nop_detect_type_t type);
+/* 8012 事件中心数字 msgType → detect 类型;未知/0 → NOP_DETECT_TYPE_MAX。 */
+nop_detect_type_t nvr_evt_detect_from_msgtype(uint32_t msg8012);
 
 #ifdef __cplusplus
 }

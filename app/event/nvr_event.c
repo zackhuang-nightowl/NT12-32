@@ -24,6 +24,23 @@ struct nvr_evt_hub {
     struct { unsigned bits; time_t last; } icon[EVT_MAX_CH];
 };
 
+/* 8012 事件中心数字 msgType → detect 类型(NightOwl 私有编号)。未知/0 → NOP_DETECT_TYPE_MAX。 */
+nop_detect_type_t nvr_evt_detect_from_msgtype(uint32_t m)
+{
+    switch (m) {
+        case 1:     return NOP_DETECT_MOTION;
+        case 2:     return NOP_DETECT_HUMAN;
+        case 3:     return NOP_DETECT_FACE;
+        case 30305: return NOP_DETECT_VEHICLE;
+        case 30316: return NOP_DETECT_ANIMAL;
+        case 30317: return NOP_DETECT_PACKAGE;
+        case 30312: return NOP_DETECT_DOORBELL_RING;
+        case 30103: return NOP_DETECT_LINE_CROSS;
+        case 30104: return NOP_DETECT_FIELD_INTRUSION;
+        default:    return NOP_DETECT_TYPE_MAX;
+    }
+}
+
 int nvr_evt_rectype_of(nop_detect_type_t type)
 {
     switch (type) {

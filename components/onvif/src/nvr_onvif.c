@@ -105,8 +105,8 @@ int nvr_onvif_get_url(const char *ip, int port, const char *user, const char *pa
         f.service_url[0] ? f.service_url : "/onvif/device_service", 0);
     if (!dev) return -1;
     /* ONVIF 请求按 DB 账户密码鉴权:总带 WS-Security UsernameToken(用户名默认 admin,密码即使为空
-     * 也带,空密码 digest 对空密码相机成立)。相机 media2/analytics 需鉴权,不带 token 会 401→能力空。 */
-    nop_onvif_device_set_auth(dev, (user && user[0]) ? user : "admin", pass ? pass : "");
+     * 遇 401/NotAuthorized 时才需带 token。 */
+    if (pass && pass[0]) nop_onvif_device_set_auth(dev, (user && user[0]) ? user : "admin", pass);
 
     /* ③ GetServices 取全部 service 链接 */
     int svc = nop_onvif_get_services(dev);
@@ -145,8 +145,8 @@ int nvr_onvif_probe(const char *ip, int port, const char *user, const char *pass
         f.service_url[0] ? f.service_url : "/onvif/device_service", 0);
     if (!dev) return -1;
     /* ONVIF 请求按 DB 账户密码鉴权:总带 WS-Security UsernameToken(用户名默认 admin,密码即使为空
-     * 也带,空密码 digest 对空密码相机成立)。相机 media2/analytics 需鉴权,不带 token 会 401→能力空。 */
-    nop_onvif_device_set_auth(dev, (user && user[0]) ? user : "admin", pass ? pass : "");
+     * 遇 401/NotAuthorized 时才需带 token。 */
+    if (pass && pass[0]) nop_onvif_device_set_auth(dev, (user && user[0]) ? user : "admin", pass);
 
     nop_onvif_device_information_t di;
     if (nop_onvif_get_device_information(dev, &di) == 0) {
@@ -229,8 +229,8 @@ int nvr_onvif_set_time_now(const char *ip, int port, const char *user, const cha
         f.service_url[0] ? f.service_url : "/onvif/device_service", 0);
     if (!dev) return -1;
     /* ONVIF 请求按 DB 账户密码鉴权:总带 WS-Security UsernameToken(用户名默认 admin,密码即使为空
-     * 也带,空密码 digest 对空密码相机成立)。相机 media2/analytics 需鉴权,不带 token 会 401→能力空。 */
-    nop_onvif_device_set_auth(dev, (user && user[0]) ? user : "admin", pass ? pass : "");
+     * 遇 401/NotAuthorized 时才需带 token。 */
+    if (pass && pass[0]) nop_onvif_device_set_auth(dev, (user && user[0]) ? user : "admin", pass);
     int rc = nop_onvif_set_system_datetime_now(dev);
     nop_onvif_device_destroy(dev);
     return rc == 0 ? 0 : -1;

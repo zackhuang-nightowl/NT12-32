@@ -65,6 +65,8 @@ typedef struct {
     char              url_main[256]; /* 已解析的主码流取流 URL 缓存（切主/子码流免重新 ONVIF 解析→秒切） */
     char              url_sub[256];  /* 已解析的子码流取流 URL 缓存 */
     int               caps_probed; /* 首次上线已按设备探测并写 camera_capability(只探一次) */
+    int               poe_present;  /* PoE 口:ONVIF 广播发现到相机在场(替代写死 .1 的 ARP 门控) */
+    time_t            poe_disc_next;/* PoE 口下次允许 ONVIF 广播发现的时间(退避) */
 } slot_t;
 
 /* IPC 保护：多数 NightOwl IPC 连续鉴权失败 5 次即触发保护/重启。取流 URL 解析走 ONVIF
@@ -76,7 +78,16 @@ struct nvr_chan_mgr {
     nvr_chan_mgr_cfg_t cfg;
     slot_t slots[NVR_MAX_CH];
     unsigned notify_mask;   /* 状态变化位图(bit=chn)：上线/掉线置位,GUI_longPolling drain→ChannelStatusNotify */
+    int      poe_scan_cursor; /* PoE 发现轮询游标(公平轮扫所有未出图 PoE 口,避免只扫前几口) */
 };
+
+/* 取点分十进制 IPv4 的第 3 段(198.18.<seg>.x → seg);失败返回 -1。 */
+static int ip_seg3(const char *ip)
+{
+    int a, b, c, d;
+    if (ip && sscanf(ip, "%d.%d.%d.%d", &a, &b, &c, &d) == 4) return c;
+    return -1;
+}
 
 /* 读并清状态变化位图。供 GUI_longPolling 返回 ChannelStatusNotify（gui 据此重拉 getChannelStatus 出图）。 */
 unsigned nvr_chan_drain_notify(nvr_chan_mgr_t *m)
@@ -451,6 +462,34 @@ static void on_discovered(const nvr_onvif_cam_t *cam, void *user)
         return;
     }
 
+    /* ★ PoE 网段发现:相机在 198.18.<seg>.x(seg=第3段,VLAN 2001=NVR 保留,口 P→VLAN P+1→seg=P+1)。
+     * 按 seg 匹配到**同网段的预建 PoE 口通道**(其 onvif_ip 也是 198.18.<seg>.x),更新为相机真实 IP
+     * 并置在场+重解析。用 seg 匹配而非 octet-1,兼容任意配置映射(NVR 保留段偏移)。 */
+    {
+        int seg = ip_seg3(cam->host);
+        if (seg >= 0) {
+            for (int i = 0; i < NVR_POE_PORTS && i < NVR_MAX_CH; i++) {
+                slot_t *s = &m->slots[i];
+                if (!s->in_use || s->d.poe_port <= 0) continue;
+                if (ip_seg3(s->d.onvif_ip) != seg) continue;    /* 同网段的口通道 */
+                s->poe_present = 1;
+                if (strcmp(s->d.onvif_ip, cam->host) != 0 || !s->url_sub[0] || !s->url_main[0]) {
+                    snprintf(s->d.onvif_ip, sizeof(s->d.onvif_ip), "%s", cam->host);
+                    s->d.kind = (int)cls.kind; s->d.backend = (int)cls.backend;
+                    if (cls.mac[0]) snprintf(s->d.mac, sizeof(s->d.mac), "%s", cls.mac);
+                    s->d.onvif_port = cam->port > 0 ? cam->port : 80;
+                    s->d.url[0] = 0; s->url_main[0] = 0; s->url_sub[0] = 0;
+                    s->url_tries = 0; s->url_next = 0; s->sub.auth_fail = 0;
+                    s->status = NVR_CHAN_BOUND; s->notified_online = 0;
+                    persist_camera(m, &s->d);
+                    NVR_LOGI("chan", "PoE 段198.18.%d 发现相机 %s → ch%d(口%d)绑定/更新重解析",
+                             seg, cam->host, s->d.chn, s->d.poe_port);
+                }
+                return;
+            }
+        }
+    }
+
     /* 召回模式:只更新已知通道(上面 host/mac 命中即返回),不新增外部设备 → 直接结束。 */
     if (ctx->recall_only) return;
 
@@ -542,19 +581,17 @@ static void tick_slot(nvr_chan_mgr_t *m, slot_t *s, time_t now, int *resolve_bud
 {
     if (s->status == NVR_CHAN_DISABLED) return;
 
-    /* ★ PoE 即插即用 —— ARP 在场门控:相机经 NVR 自建 udhcpd 拿 198.18.<X>.1 时,NVR 内核 ARP
-     * 已有其条目 → "ARP 有该 IP" = 相机在场。仅对未连接(url 未解析)的 PoE 通道:
-     *   · 不在场:直接跳过本口(不解析、不占 1/tick 额度、不累计失败)——空口不再拖慢在场相机、
-     *     也不会 2 次失败后永久放弃;
-     *   · 在场且曾放弃(url_tries 满):重置 → 立刻重新解析连接(后插的相机 DHCP→ARP出现→即连出图)。
+    /* ★ PoE 即插即用 —— ONVIF 发现在场门控(与 LAN 统一走 Discovery):PoE 口通道只有经本网段
+     * ONVIF 广播发现到相机(on_discovered 置 poe_present + 填真实 IP)才解析:
+     *   · 未发现在场:跳过本口(不解析、不占额度)——空口不拖慢在场相机;
+     *   · 在场却曾放弃(url_tries 满):重置 → 立即重解析(后插相机被发现后即连出图)。
      * LAN 通道(显式添加)不门控,照常解析。 */
-    if ((!s->url_sub[0] || !s->url_main[0]) && s->d.onvif_auto && s->d.poe_port > 0 && s->d.onvif_ip[0]) {
-        char am[24];
-        if (arp_mac_of_ip(s->d.onvif_ip, am, sizeof(am)) != 0 || !am[0])
-            return;                                       /* 无相机在场:本口不解析 */
+    if ((!s->url_sub[0] || !s->url_main[0]) && s->d.onvif_auto && s->d.poe_port > 0) {
+        if (!s->poe_present || !s->d.onvif_ip[0])
+            return;                                       /* 未经 ONVIF 发现在场:本口不解析 */
         if (s->url_tries >= NVR_URL_MAX_TRIES) {          /* 相机(重新)在场却已放弃 → 重置重连 */
             s->url_tries = 0; s->url_next = 0; s->sub.auth_fail = 0;
-            NVR_LOGI("chan", "ch%d 相机在场(ARP),重置解析重连(即插即用)", s->d.chn);
+            NVR_LOGI("chan", "ch%d 相机在场(ONVIF发现),重置解析重连(即插即用)", s->d.chn);
         }
     }
 
@@ -788,10 +825,31 @@ void nvr_chan_tick(nvr_chan_mgr_t *m)
     for (int i = 0; i < NVR_MAX_CH; i++)
         if (m->slots[i].in_use) tick_slot(m, &m->slots[i], now, &resolve_budget);
 
+    /* ---- PoE 即插即用发现(与 LAN 统一走 ONVIF Discovery):对**未出图**的 PoE 口通道,在其
+     * 网段(源 198.18.<口>.100)做 ONVIF 广播发现,扫到相机(任意 IP)→ on_discovered 按 198.18.<口>
+     * 子网绑定/更新该口通道并置 poe_present。每口 10s 退避、每 tick 至多 1 口(2s 广播,budget 外单列)。 */
+    int poe_n = (NVR_POE_PORTS < NVR_MAX_CH) ? NVR_POE_PORTS : NVR_MAX_CH;
+    for (int k = 0; k < poe_n; k++) {
+        int i = (m->poe_scan_cursor + k) % poe_n;        /* 游标轮询:公平覆盖所有 PoE 口 */
+        slot_t *s = &m->slots[i];
+        if (!s->in_use || s->d.poe_port <= 0) continue;
+        if (s->url_sub[0] && s->url_main[0]) continue;   /* 已解析出图 → 不再发现 */
+        if (now < s->poe_disc_next) continue;
+        int seg = ip_seg3(s->d.onvif_ip);                /* 网段第3段(VLAN 2001=NVR,口 P→段 P+1) */
+        if (seg < 0) continue;
+        s->poe_disc_next = now + 10;
+        m->poe_scan_cursor = (i + 1) % poe_n;            /* 下轮从下一口起 */
+        char src[64];                                     /* 发现源=NVR 在该 VLAN 的 IP 198.18.<seg>.100 */
+        snprintf(src, sizeof(src), "%d.%d.%d.100", NVR_POE_NET_A, NVR_POE_NET_B, seg);
+        disc_ctx_t ctx = { m, 0, 0 };                    /* 非 recall:允许绑定/更新口通道 */
+        NVR_LOGI("chan", "PoE ch%d(口%d,段198.18.%d)ONVIF 发现广播 src=%s", s->d.chn, s->d.poe_port, seg, src);
+        nvr_onvif_discover(src, 2, on_discovered, &ctx);
+        break;                                            /* 每 tick 至多 1 口(2s 广播) */
+    }
+
     /* ---- LAN 找回:已添加(DB)的 LAN 设备(poe_port==0、有 mac)掉线 → 在 eth0 按 mac 重发现其
      * 当前 IP(DHCP 变更),recall_only 只更新不新增。开机不主动扫 LAN;仅"已添加连不上"才找回。
-     * 每路 30s 退避、每 tick 至多 1 路(2s 广播)。
-     * ★ PoE 不在此发现:PoE 固定 IP,即插即用由上面 tick_slot 的「ARP 在场门控解析」实现(无 2s 广播)。*/
+     * 每路 30s 退避、每 tick 至多 1 路(2s 广播)。 */
     for (int i = NVR_IP_CH_BASE; i < NVR_MAX_CH; i++) {
         slot_t *s = &m->slots[i];
         if (!s->in_use || s->d.poe_port > 0 || !s->d.mac[0]) continue;

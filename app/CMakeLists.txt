@@ -28,6 +28,7 @@ set(NVR_APP_INCLUDES
     ${CMAKE_CURRENT_SOURCE_DIR}/netime
     ${CMAKE_CURRENT_SOURCE_DIR}/ble
     ${CMAKE_CURRENT_SOURCE_DIR}/playback
+    ${CMAKE_CURRENT_SOURCE_DIR}/nop8012
     ${NVR_ROOT}/third_party/curl/include        # curl.h（转发到设备用；host 用系统头）
     ${NVR_ROOT}/components/streaming/include
     ${NVR_ROOT}/components/storage/include
@@ -51,6 +52,8 @@ add_library(nvr_app_core STATIC
     preview/nvr_preview.c
     record_sched/nvr_record_sched.c
     event/nvr_event.c
+    nop8012/nvr_nop8012.c
+    nop8012/nvr_nop8012_proto.c
     router/nvr_cmd_router.c
     router/nvr_cmd_util.c
     router/nvr_cmd_table.c
