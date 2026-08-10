@@ -2,6 +2,7 @@
  *  nvr_config.c — JSON 配置加载 + channels.json 扁平化（device→source→channel）
  ***************************************************************************************/
 #include "nvr_config.h"
+#include "nvr_defaults.h"   /* PoE IP 模板宏 NVR_POE_CAM_IP_PAT */
 #include "cJSON.h"
 
 #include <stdio.h>
@@ -72,18 +73,18 @@ static void load_system(nvr_config_t *c, cJSON *j)
 {
     nvr_sys_cfg_t *s = &c->sys;
     s->capacity = 32; s->poe_ports = 16; s->ip_channels = 16;
-    s->hdmi_w = 3840; s->hdmi_h = 2160; s->default_layout = 16;
+    s->hdmi_w = NVR_DEF_HDMI_W; s->hdmi_h = NVR_DEF_HDMI_H; s->default_layout = NVR_DEF_LAYOUT;  /* 默认 1080p(实际按屏,4K可切,失败回落) */
     if (!j) return;
 
     cJSON *dev = cJSON_GetObjectItem(j, "device");
     if (dev) {
-        snprintf(s->model, sizeof(s->model), "%s", jstr(dev, "model", "NT12-32"));
-        snprintf(s->name,  sizeof(s->name),  "%s", jstr(dev, "name",  "NVR"));
+        snprintf(s->model, sizeof(s->model), "%s", jstr(dev, "model", NVR_DEF_MODEL));
+        snprintf(s->name,  sizeof(s->name),  "%s", jstr(dev, "name",  NVR_DEF_NAME));
         snprintf(s->sn,    sizeof(s->sn),    "%s", jstr(dev, "sn",    ""));
     }
     cJSON *ch = cJSON_GetObjectItem(j, "channels");
     if (ch) {
-        s->capacity     = jint(ch, "capacity", 32);
+        s->capacity     = jint(ch, "capacity", NVR_DEF_CAPACITY);
         s->poe_ports    = jint(ch, "poe_ports", 16);
         s->ip_channels  = jint(ch, "ip_channels", 16);
     }
@@ -160,15 +161,21 @@ static void fill_poe_channel(nvr_config_t *c, const ch_defaults_t *d, int port, 
     int chn = d->ch_base + (port - 1);
     nvr_channel_t *e = emit(c, chn);
     if (!e) return;
+    e->enabled = 1;                  /* ★ 配置加载的通道即为启用 —— 否则 nvr_chan_load_config
+                                      * 见 enabled=0 会标 DISABLED、不做 ONVIF 解析(之前靠 DB
+                                      * overlay 补 enabled,清了 DB 就全失效、自动发现停摆)。 */
     snprintf(e->name, sizeof(e->name), "Camera %d", port);
     snprintf(e->user, sizeof(e->user), "%s", d->user);
     snprintf(e->pass, sizeof(e->pass), "%s", d->pass);
-    ipfmt(e->onvif_ip, sizeof(e->onvif_ip), d->ip_pattern, port);
+    /* ★ PoE 口→网段 +1:VLAN 2001 是 NVR↔PoE 管理口,16 个 PoE 口走 VLAN 2002..2017,
+     * 即物理口 P → VLAN 200(P+1) → 网段 (P+1)。故通道 P(chn=P-1)的相机在 198.18.(P+1).1。
+     * 例:口1→通道1→198.18.2.1→cell0;口5→通道5→198.18.6.1→cell4。 */
+    ipfmt(e->onvif_ip, sizeof(e->onvif_ip), d->ip_pattern, port + 1);
     e->onvif_port = 80;
     e->onvif_auto = onvif ? jbool(onvif, "auto", 1) : 1;   /* PoE 默认 ONVIF 自动取流 */
     e->codec  = d->codec;
     e->record = d->record;
-    e->stream = stream_of(d->rec_stream);
+    e->stream = stream_of(d->prev_stream);   /* 默认子码流(多宫格预览) */
     e->poe_port = port;
     e->url[0] = 0;   /* 待 ONVIF 填 */
 }
@@ -178,7 +185,7 @@ static void load_channels(nvr_config_t *c, cJSON *j)
     c->nch = 0;
     if (!j) return;
 
-    ch_defaults_t d = { "198.18.%d.100", "admin", "", "main", "sub", NVR_CODEC_AUTO, 1, 1, 0 };
+    ch_defaults_t d = { NVR_POE_CAM_IP_PAT, "admin", "", "main", "sub", NVR_CODEC_AUTO, 1, 1, 0 };  /* 原厂 PoE：相机 .1，NVR .100 */
     cJSON *df = cJSON_GetObjectItem(j, "defaults");
     if (df) {
         snprintf(d.ip_pattern, sizeof(d.ip_pattern), "%s", jstr(df, "poe_ip_pattern", d.ip_pattern));
@@ -199,6 +206,11 @@ static void load_channels(nvr_config_t *c, cJSON *j)
     cJSON_ArrayForEach(dev, devs) {
         if (!jbool(dev, "enable", 1)) continue;
         const char *type = jstr(dev, "type", "ip");
+        /* ★ 只从配置自动加载 PoE 口设备。LAN/IP(数字)相机一律**不**从配置预置自动连接
+         * —— 那会在 eth0 主网上对配置里写死的 IP 反复探测/连不存在的设备，扰乱局域网
+         * (影响 NFS 及网内其他设备)。业务规则:PoE 口即插即用自动出图;LAN 设备只能运行期
+         * 经 GUI_LanAddDevice 显式添加、且只连已添加的(见 nvr_cmd_lan.c / channel FSM)。 */
+        if (strcmp(type, "poe") != 0) continue;
         cJSON *onvif = cJSON_GetObjectItem(dev, "onvif");
         cJSON *conn  = cJSON_GetObjectItem(dev, "conn");
 
@@ -223,7 +235,7 @@ static void load_channels(nvr_config_t *c, cJSON *j)
 
         /* 设备连接信息（ip/user/pass）：onvif 优先，其次 conn，其次 PoE 默认 */
         const char *dev_ip   = onvif ? jstr(onvif, "ip", "") : "";
-        int         dev_port = onvif ? jint(onvif, "port", 80) : 80;
+        int         dev_port = onvif ? jint(onvif, "port", NVR_DEF_ONVIF_PORT) : NVR_DEF_ONVIF_PORT;
         const char *dev_user = onvif ? jstr(onvif, "user", NULL) : NULL;
         const char *dev_pass = onvif ? jstr(onvif, "pass", NULL) : NULL;
         if (!dev_user && conn) dev_user = jstr(conn, "user", NULL);
@@ -240,11 +252,20 @@ static void load_channels(nvr_config_t *c, cJSON *j)
 
             nvr_channel_t *e = emit(c, chn);
             if (!e) continue;
+            e->enabled = 1;          /* ★ 同 fill_poe_channel：配置加载的通道即启用 */
             snprintf(e->name, sizeof(e->name), "%s", jstr(src, "name", "Camera"));
             snprintf(e->url,  sizeof(e->url),  "%s", jstr(src, "url", ""));
             snprintf(e->user, sizeof(e->user), "%s", dev_user ? dev_user : d.user);
             snprintf(e->pass, sizeof(e->pass), "%s", dev_pass ? dev_pass : d.pass);
-            snprintf(e->onvif_ip, sizeof(e->onvif_ip), "%s", dev_ip ? dev_ip : "");
+            /* onvif_ip：显式 ip 优先；PoE 口无显式 ip → 用 poe_ip_pattern(198.18.<口>.1)，
+             * 否则(数字/LAN 无 ip 且非直给 url)留空。修复:带 sources 的 PoE 口(poe-1/2)
+             * 之前漏了 pattern，导致 onvif_ip 空、后台永不解析。 */
+            if (dev_ip && dev_ip[0])
+                snprintf(e->onvif_ip, sizeof(e->onvif_ip), "%s", dev_ip);
+            else if (poe_port > 0)
+                ipfmt(e->onvif_ip, sizeof(e->onvif_ip), d.ip_pattern, poe_port);
+            else
+                e->onvif_ip[0] = 0;
             e->onvif_port = dev_port;
             e->codec  = codec_of(jstr(src, "codec", "auto"));
             e->stream = stream_of(jstr(src, "stream", "main"));
@@ -296,20 +317,22 @@ int nvr_config_overlay_from_settings(nvr_config_t *cfg, nvr_settings_t *settings
     if (nvr_settings_get_str(settings, "storage.hdd_full", hf, sizeof(hf), "") > 0)
         cfg->storage.hdd_full = (!strcmp(hf, "stop")) ? RSDK_HDDFULL_STOP : RSDK_HDDFULL_OVERWRITE;
 
-    /* 通道表覆盖/新增：settings.channel 行叠加到 cfg->ch[] */
-    nvr_chan_row_t rows[NVR_CFG_MAX_CH];
-    int nr = nvr_settings_channel_list(settings, rows, NVR_CFG_MAX_CH);
+    /* 设备表覆盖/新增：settings.camera 行叠加到 cfg->ch[] */
+    nvr_camera_row_t rows[NVR_CFG_MAX_CH];
+    int nr = nvr_settings_camera_list(settings, rows, NVR_CFG_MAX_CH);
     for (int i = 0; i < nr; i++) {
-        nvr_chan_row_t *r = &rows[i];
+        nvr_camera_row_t *r = &rows[i];
         nvr_channel_t *e = emit(cfg, r->chn);   /* 复用: 存在则取现有, 否则新增 */
         if (!e) continue;
         e->enabled = r->enabled;
         if (!r->enabled) continue;              /* 禁用通道: 保留占位但标记 */
         if (r->name[0])     snprintf(e->name, sizeof(e->name), "%s", r->name);
         if (r->url[0])      snprintf(e->url,  sizeof(e->url),  "%s", r->url);
-        if (r->user[0])     snprintf(e->user, sizeof(e->user), "%s", r->user);
-        if (r->pass[0])     snprintf(e->pass, sizeof(e->pass), "%s", r->pass);
-        if (r->onvif_ip[0]) snprintf(e->onvif_ip, sizeof(e->onvif_ip), "%s", r->onvif_ip);
+        if (r->username[0]) snprintf(e->user, sizeof(e->user), "%s", r->username);
+        if (r->password[0]) snprintf(e->pass, sizeof(e->pass), "%s", r->password);
+        if (r->ip[0])       snprintf(e->onvif_ip, sizeof(e->onvif_ip), "%s", r->ip);
+        if (r->mac[0])      snprintf(e->mac, sizeof(e->mac), "%s", r->mac);
+        if (r->model[0])    snprintf(e->model, sizeof(e->model), "%s", r->model);  /* 型号:重启回显 */
         if (r->onvif_port)  e->onvif_port = r->onvif_port;
         e->onvif_auto = r->onvif_auto;
         e->poe_port   = r->poe_port;
@@ -317,7 +340,7 @@ int nvr_config_overlay_from_settings(nvr_config_t *cfg, nvr_settings_t *settings
         e->stream     = r->stream;
         e->record     = r->record;
         e->kind       = r->kind;
-        e->backend    = (r->kind == 0 /*NOP*/) ? 0 : 1;
+        e->backend    = r->backend;    /* DB 权威(nopOnvif/onvif=1) */
         e->vout_win   = e->chn;
     }
     return 0;

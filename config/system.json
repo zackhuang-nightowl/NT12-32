@@ -14,7 +14,8 @@
   },
 
   "video_out": {
-    "hdmi": { "enable": true, "resolution": "3840x2160", "refresh": 30 },
+    "_note": "hdmi.resolution 可选 1920x1080 / 3840x2160，按所接屏；设失败自动回落 1920x1080。切 4K 由上层切换接口下发并改 LVGL 配置后重启 LVGL。",
+    "hdmi": { "enable": true, "resolution": "1920x1080", "refresh": 60 },
     "cvbs": { "enable": false, "mode": "NTSC" },
     "vga":  { "enable": false, "resolution": "1920x1080" },
     "default_layout": 16,

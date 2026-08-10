@@ -3,6 +3,7 @@
 #define RSDK_BALANCE_H
 #include "rsdk_types.h"
 #include "rsdk_storgedev.h"
+#include <stdint.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -13,8 +14,14 @@ typedef struct rsdk_group rsdk_group_t;
 RSDK_API rsdk_err_t rsdk_group_open(const char *const *devpaths, int n, rsdk_group_t **out);
 RSDK_API int        rsdk_group_count(rsdk_group_t *g);
 RSDK_API rsdk_dev_t*rsdk_group_dev(rsdk_group_t *g, int i);
-/* 为通道选一块盘写入(评分: 写带宽/待分配/覆盖压力 + 通道亲和) */
+/* 为通道选一块盘写入(评分: 写带宽/待分配/覆盖压力 + 通道亲和, 设计 §4.2) */
 RSDK_API rsdk_err_t rsdk_balance_pick(rsdk_group_t *g, int chn, rsdk_dev_t **picked);
+/* SMART 健康刷新(固件按分钟级定时调用, 保持 SG_IO 离热选路径) */
+RSDK_API rsdk_err_t rsdk_group_smart_refresh(rsdk_group_t *g);
+/* 报告段字节数, 更新 EWMA 写带宽; 由录像层在段结束时调用 */
+RSDK_API void       rsdk_balance_report(rsdk_group_t *g, rsdk_dev_t *dev, uint64_t bytes);
+/* 测试钩子: 强制设置某盘健康状态(模拟故障盘; SMART 在 image 文件上返回 unknown→ok) */
+RSDK_API void       rsdk_group_set_health(rsdk_group_t *g, int disk, int ok);
 RSDK_API void       rsdk_group_close(rsdk_group_t *g);
 
 /* ---- 多盘回放(设计 §4/§7.4) ---- */
@@ -30,6 +37,12 @@ RSDK_API rsdk_err_t rsdk_group_play_open(rsdk_group_t *g, const rsdk_index_slot_
 /* 取下一帧(解密后 Annex-B); *disk_out 回填当前帧来自哪块盘(数组下标)。段组尾返回 RSDK_E_NOTFOUND。 */
 RSDK_API rsdk_err_t rsdk_group_play_next(rsdk_group_player_t *p, rsdk_frame_hdr_t *hdr,
                                          const uint8_t **data, uint32_t *len, int *disk_out);
+/* 同 rsdk_group_play_next, 额外输出跨段间隙标志:
+ * *gap_out=1 表示本帧是切到新段后的第一帧且新段与上段存在录制间隙(>2s), 否则 0.
+ * gap_out 为 NULL 时与 rsdk_group_play_next 行为完全一致。 */
+RSDK_API rsdk_err_t rsdk_group_play_next2(rsdk_group_player_t *p, rsdk_frame_hdr_t *hdr,
+                                          const uint8_t **data, uint32_t *len,
+                                          int *disk_out, int *gap_out);
 RSDK_API rsdk_err_t rsdk_group_play_seek_pts(rsdk_group_player_t *p, uint64_t pts);
 RSDK_API void       rsdk_group_play_close(rsdk_group_player_t *p);
 

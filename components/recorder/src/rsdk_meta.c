@@ -31,8 +31,7 @@ rsdk_err_t rsdk_meta_open(const char *db_path, void **out_ctx) {
     return RSDK_OK;
 }
 void rsdk_meta_close(void *ctx) { if (ctx) sqlite3_close((sqlite3*)ctx); }
-
-void *rsdk_meta_db(void *ctx) { return ctx; }   /* ctx 即 sqlite3*（见 rsdk_meta_open） */
+void *rsdk_meta_db(void *ctx) { return ctx; }   /* ctx 即 sqlite3*;供 cloud 等自跑 SQL */
 
 rsdk_err_t rsdk_meta_put(void *ctx, const rsdk_meta_key_t *k,
                          const char *json, size_t len, uint64_t *doc_id) {

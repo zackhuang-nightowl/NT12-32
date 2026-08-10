@@ -21,6 +21,19 @@ int  nvr_net_apply(nvr_settings_t *s);
 /* 应用时区 + 触发一次 NTP 同步（UTC 系统时钟）。返回 0。 */
 int  nvr_time_apply(nvr_settings_t *s);
 
+/* 仅安装时区（不含 NTP）：由 timezone/tz_dst 生成合法 POSIX → TZif(/flash) → /etc/localtime
+ * 软链 + 本进程 tzset。供 setTimezone 命令即时生效(GUI 与 nvr_app 两进程都读 /etc/localtime)。 */
+int  nvr_tz_install(nvr_settings_t *s);
+
+/* 把 NVR 当前时间经 ONVIF 下发所有已添加相机（后台异步，不阻塞）。改时区/改时间时触发。 */
+int  nvr_time_push_cameras(nvr_settings_t *s);
+
+/* 手动授时：把 UTC epoch 设进系统时钟 + 写 RTC + 给相机授时（set_datetime 用；NVR 为主时间）。 */
+int  nvr_time_set_clock(nvr_settings_t *s, long long utc_epoch);
+
+/* 由"自动授时开关"关→开时调用：清同步标志并立即再试 NTP。 */
+void nvr_time_resync(nvr_settings_t *s);
+
 /* 周期维护：NTP 未成功则重试（app 主循环每隔一段调）。 */
 void nvr_time_tick(nvr_settings_t *s);
 

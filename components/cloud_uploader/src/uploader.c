@@ -5,6 +5,7 @@
 #include "nvr_cloud_uploader.h"
 #include "http_vsaas.h"
 #include "ts_mux.h"
+#include "rsdk_cloud.h"   /* 云存上传跟踪(当前 no-op 桩;新 rsdk.h 不再伞含它) */
 #include "nvr_log.h"
 
 #include <pthread.h>

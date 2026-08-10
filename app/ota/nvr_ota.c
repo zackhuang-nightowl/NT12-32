@@ -2,6 +2,7 @@
  *  nvr_ota.c — NVR 固件自升级。见 nvr_ota.h。
  ***************************************************************************************/
 #include "nvr_ota.h"
+#include "nvr_defaults.h"
 #include "nvr_log.h"
 
 #include <curl/curl.h>
@@ -89,7 +90,7 @@ int nvr_ota_start(const char *url, const char *staging, const char *updater)
     ota_job_t *j = calloc(1, sizeof(*j));
     if (!j) { g_busy = 0; return -1; }
     snprintf(j->url, sizeof(j->url), "%s", url);
-    snprintf(j->staging, sizeof(j->staging), "%s", staging && staging[0] ? staging : "/mnt/update.rom");
+    snprintf(j->staging, sizeof(j->staging), "%s", staging && staging[0] ? staging : NVR_DEF_OTA_STAGING);
     snprintf(j->updater, sizeof(j->updater), "%s", updater ? updater : "");
 
     pthread_t th;

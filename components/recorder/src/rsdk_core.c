@@ -16,6 +16,7 @@ const char *rsdk_strerror(rsdk_err_t e)
     case RSDK_E_CRYPTO: return "crypto error";
     case RSDK_E_FORMAT: return "not formatted";
     case RSDK_E_BUSY: return "busy";
+    case RSDK_E_SECTORSIZE: return "unsupported logical sector size (need 512)";
     default: return "unknown";
     }
 }

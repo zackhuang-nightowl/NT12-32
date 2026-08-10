@@ -35,6 +35,8 @@ typedef struct {
     int  kind;             /* 设备子类型 0=NOP 1=NOPONVIF 2=ONVIF（nvr_dev_kind_t） */
     int  backend;          /* 控制面后端 0=NOP 透传 1=ONVIF 翻译（nvr_backend_t） */
     int  enabled;          /* 0=禁用(跳过) 1=启用 */
+    char mac[24];          /* 设备 MAC（发现分类得；IP 变更后按 mac 找回；持久化写 camera） */
+    char model[48];        /* 型号：ONVIF discovery scopes 的 /hardware/（发现/添加时填，持久化） */
 } nvr_channel_t;
 
 /* 系统级 */

@@ -25,6 +25,19 @@ extern "C" {
 typedef struct nop_http_server nop_http_server_t;
 
 /**
+ * Optional custom request handler. Given the request body, returns a malloc'd
+ * response JSON string (server frees it with free()), or NULL on failure.
+ * When set, it replaces the default nop_app_dispatch path — this lets the
+ * single 8089 inbound server run app-level processing (display / channel
+ * forward / nop fallback) instead of dispatching straight into nop_app.
+ */
+typedef char *(*nop_http_handler_fn)(void *ctx, const char *body);
+
+/** Install a custom request handler (see nop_http_handler_fn). NULL-safe. */
+void nop_http_server_set_handler(nop_http_server_t *server,
+                                 nop_http_handler_fn handler, void *ctx);
+
+/**
  * Bind @p port (0 selects the conventional 8089), listen, and serve NOP
  * requests into @p app on a background thread. @p app must outlive the server.
  * Returns NULL on failure (bind/listen/thread).

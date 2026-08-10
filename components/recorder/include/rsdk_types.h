@@ -34,7 +34,8 @@ typedef enum {
     RSDK_E_DB       = -6,
     RSDK_E_CRYPTO   = -7,
     RSDK_E_FORMAT   = -8,
-    RSDK_E_BUSY     = -9
+    RSDK_E_BUSY     = -9,
+    RSDK_E_SECTORSIZE = -10
 } rsdk_err_t;
 
 /* ---- 特性位(= SuperBlock.feature_mask; 冻结 §4) ---- */
@@ -113,26 +114,42 @@ typedef struct __attribute__((packed)) {
     uint8_t  _rsv[4096 - 88 - 32*16];   /* 精确补足到 4096(冻结: ≤4096) */
 } rsdk_systab_t;
 
-/* FrameRecord 头 64B (冻结 §2) */
+/* 记录种类(数据区自描述):帧 + 4 类内联标记。marker 专有数据放 64B 头后的 payload。 */
+enum rsdk_rec_kind {
+    RSDK_RK_FRAME = 0,      /* 音视频帧 */
+    RSDK_RK_SEG_OPEN = 1,   /* 段起(payload: rsdk_mk_seg_open_t) */
+    RSDK_RK_SEG_CLOSE = 2,  /* 段止(payload: rsdk_mk_seg_close_t) */
+    RSDK_RK_EVENT = 3,      /* 事件标记(payload: rsdk_mk_event_t) */
+    RSDK_RK_CLOUD_STATE = 4 /* 云存终态(payload: rsdk_mk_cloud_t) */
+};
+
+/* FrameRecord 头 64B (冻结 §2;偏移不变——原保留字节命名为 rec_kind/rectype/event_id) */
 typedef struct __attribute__((packed)) {
     char     magic[8];           /* "rsdkfrm\0" */
     uint16_t chn;
-    uint8_t  stream;
+    uint8_t  stream;             /* 0主/1子/2音 */
     uint8_t  codec;
     uint8_t  frame_type;
     uint8_t  enc;                /* 0=明文 1=AES-256-CTR */
-    uint16_t _rsv0;
-    uint32_t payload_len;
+    uint8_t  rec_kind;           /* 0x0E: rsdk_rec_kind(帧/标记判别符) */
+    uint8_t  rectype;            /* 0x0F: 所属段类型(0 连续/事件类型枚举) */
+    uint32_t payload_len;        /* FRAME=负载字节;marker=marker payload 字节 */
     uint32_t seg_id;
     uint32_t frame_seq;
     uint64_t pts;
-    uint64_t wall_time;
+    uint64_t wall_time;          /* 掉索引自解析用 */
     uint8_t  iv_nonce[8];
     uint32_t hdr_crc32;
-    uint8_t  _rsvh[8];
+    uint64_t event_id;           /* 0x38: 0=无;连续帧被事件命中则打该 id;事件段帧自带 */
 } rsdk_frame_hdr_t;
 
-/* Index Slot 64B (冻结 §3) */
+/* marker payload(紧跟 64B 头;payload_len=对应结构大小) */
+typedef struct __attribute__((packed)) { uint8_t mode; uint8_t _r[3]; } rsdk_mk_seg_open_t;   /* mode 0 continuous/1 event */
+typedef struct __attribute__((packed)) { uint32_t frame_count; uint64_t total_bytes; uint32_t seg_crc; } rsdk_mk_seg_close_t;
+typedef struct __attribute__((packed)) { uint32_t event_start; uint32_t event_end; uint32_t type_mask; uint32_t ref_seg_id; } rsdk_mk_event_t; /* event_end 0=进行中;type_mask 复合类型位集 */
+typedef struct __attribute__((packed)) { uint8_t state; uint8_t _r[3]; } rsdk_mk_cloud_t;      /* 0不传/1未传/2上传中/3已传/4失败 */
+
+/* Index Slot 64B (冻结 §3;_pad 首字节命名为 stream) */
 enum { RSDK_SLOT_VALID = 0x01, RSDK_SLOT_EVENT = 0x02, RSDK_SLOT_OPEN = 0x04 };
 typedef struct __attribute__((packed)) {
     uint32_t seg_id;
@@ -150,8 +167,16 @@ typedef struct __attribute__((packed)) {
     uint64_t end_chunk;
     uint32_t end_off;
     uint32_t crc32;
-    uint8_t  _pad[4];
+    uint8_t  stream;             /* 0x3C: 0主/1子/2音(段按 chn,stream 区分) */
+    uint8_t  _pad[3];
 } rsdk_index_slot_t;
+
+#ifdef __STDC_VERSION__
+#if __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(rsdk_frame_hdr_t)  == 64, "FrameRecord 头必须 64B");
+_Static_assert(sizeof(rsdk_index_slot_t) == 64, "Index Slot 必须 64B");
+#endif
+#endif
 
 /* 视频定位引用 */
 typedef struct { uint16_t disk; uint64_t chunk; uint32_t off; uint64_t pts; } rsdk_segref_t;

@@ -65,6 +65,13 @@ int rsdk_index_query(rsdk_dev_t *d, uint32_t t0, uint32_t t1, int chn,
     return found;
 }
 
+/* 判断 chunk 是否落在段 [start_chunk, end_chunk] 内, 处理环绕(start > end) */
+static int slot_covers_chunk(const rsdk_index_slot_t *s, uint64_t chunk) {
+    if (s->start_chunk <= s->end_chunk)
+        return chunk >= s->start_chunk && chunk <= s->end_chunk;
+    return chunk >= s->start_chunk || chunk <= s->end_chunk;  /* 环绕 */
+}
+
 int rsdk_index_invalidate_chunk(rsdk_dev_t *d, uint64_t chunk)
 {
     if (!d) return 0;
@@ -72,7 +79,7 @@ int rsdk_index_invalidate_chunk(rsdk_dev_t *d, uint64_t chunk)
     int cleared = 0;
     for (uint32_t i = 0; i < st->index_slot_count; i++) {
         rsdk_index_slot_t s; rd_slot(d, i, &s);
-        if ((s.flags & (RSDK_SLOT_VALID|RSDK_SLOT_OPEN)) && s.start_chunk == chunk) {
+        if ((s.flags & (RSDK_SLOT_VALID|RSDK_SLOT_OPEN)) && slot_covers_chunk(&s, chunk)) {
             s.flags = 0;                       /* 作废该段(数据已/将被覆盖) */
             s.crc32 = 0; s.crc32 = rsdk_crc32(&s, SLOT_SZ);
             wr_slot(d, i, &s); cleared++;

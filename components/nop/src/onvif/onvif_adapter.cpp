@@ -67,9 +67,9 @@ int nop_onvif_global_init(void)
         return 0;
 
     network_init();
-    /* Skip log_init(): the vendored logger no-ops on a NULL file pointer
-     * (log_print_ex guards it), keeping the library quiet. log_init(NULL)
-     * would crash — it strncpy()s the filename. */
+    /* 不调 log_init()：vendored logger 在本平台 log_init 路径会崩(原作者注)，
+     * 且 NULL fp 时 log_print_ex 自动 no-op，保持安静。排查取流用 nvr_onvif.c 里
+     * 的 [onvif] get_url 摘要日志即可。 */
     sys_buf_init(10 * MAX_DEV_NUMS);
     http_msg_buf_init(10 * MAX_DEV_NUMS);
 
@@ -263,6 +263,12 @@ int nop_onvif_get_capabilities(nop_onvif_device_t *device)
     return GetCapabilities(&device->dev) ? 0 : -2;
 }
 
+/* 最近一次 SOAP 调用的底层错误码（ONVIF_ERR_*：-1 连接失败 -4 收超时 -6 空内容 -7 解析失败）。 */
+int nop_onvif_last_error(nop_onvif_device_t *device)
+{
+    return device ? device->dev.errCode : -100;
+}
+
 int nop_onvif_get_services(nop_onvif_device_t *device)
 {
     if (!device) return -1;
@@ -355,6 +361,55 @@ int nop_onvif_get_stream_uri(nop_onvif_device_t *device, const char *profile_tok
     for (ONVIF_PROFILE *p = device->dev.profiles; p; p = p->next) {
         if (strcmp(p->token, profile_token) == 0) {
             strncpy(out_uri, p->stream_uri, out_size - 1);
+            out_uri[out_size - 1] = '\0';
+            return 0;
+        }
+    }
+    return -3;
+}
+
+/* ---- Media2 (ver20 / Profile T)：部分相机只在 media2 返回 profiles/stream uri ---- */
+int nop_onvif_get_profiles2(nop_onvif_device_t *device)
+{
+    int count = 0;
+    if (!device)
+        return -1;
+    if (!tr2_GetProfiles(&device->dev))
+        return -2;
+    /* 预解析 RTSP 地址到 media_profiles[].stream_uri */
+    tr2_GetStreamUris(&device->dev, "RtspUnicast");
+    for (MediaProfileList *p = device->dev.media_profiles; p; p = p->next)
+        count++;
+    return count;
+}
+
+int nop_onvif_get_profile2(nop_onvif_device_t *device, int index, nop_onvif_profile_t *out)
+{
+    int i = 0;
+    if (!device || !out || index < 0)
+        return -1;
+    for (MediaProfileList *p = device->dev.media_profiles; p; p = p->next, i++) {
+        if (i == index) {
+            memset(out, 0, sizeof(*out));
+            strncpy(out->token, p->MediaProfile.token, sizeof(out->token) - 1);
+            strncpy(out->name, p->MediaProfile.Name, sizeof(out->name) - 1);
+            strncpy(out->stream_uri, p->MediaProfile.stream_uri, sizeof(out->stream_uri) - 1);
+            return 0;
+        }
+    }
+    return -2;
+}
+
+int nop_onvif_get_stream_uri2(nop_onvif_device_t *device, const char *profile_token,
+                              char *out_uri, size_t out_size)
+{
+    if (!device || !profile_token || !out_uri || out_size == 0)
+        return -1;
+    if (!tr2_GetStreamUris(&device->dev, "RtspUnicast"))
+        return -2;
+    for (MediaProfileList *p = device->dev.media_profiles; p; p = p->next) {
+        if (strcmp(p->MediaProfile.token, profile_token) == 0) {
+            strncpy(out_uri, p->MediaProfile.stream_uri, out_size - 1);
             out_uri[out_size - 1] = '\0';
             return 0;
         }

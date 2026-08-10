@@ -31,11 +31,13 @@
 #include "rsdk_rawdev.h"
 #include "rsdk_crypto.h"
 #include "rsdk_storgedev.h"
+#include "rsdk_disk.h"
 #include "rsdk_index.h"
 #include "rsdk_rec.h"
 #include "rsdk_play.h"
 #include "rsdk_balance.h"
 #include "rsdk_backup.h"
+#include "rsdk_scan.h"
 #if RSDK_CFG_METADATA
 #include "rsdk_meta.h"
 #include "rsdk_pic.h"

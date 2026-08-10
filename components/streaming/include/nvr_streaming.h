@@ -61,6 +61,23 @@ void       nvr_stream_stop_all   (nvr_stream_mgr_t *m);
 /* 运行期：切主/子码流（换 url 重连）、开/关某通道录像 */
 rsdk_err_t nvr_stream_switch_stream(nvr_stream_mgr_t *m, int chn, int stream, const char *url);
 rsdk_err_t nvr_stream_set_record   (nvr_stream_mgr_t *m, int chn, int on);
+/* 运行时更新录像盘组 + 对录像通道补开 writer(格式化后重组装盘组、免重启启用录像)。 */
+rsdk_err_t nvr_stream_mgr_set_group(nvr_stream_mgr_t *m, rsdk_group_t *group);
+/* 录像中通道位图(bit chn=该通道正在写盘)。供 GUI_longPolling 的 RecordStatus。 */
+uint32_t   nvr_stream_recording_mask(nvr_stream_mgr_t *m);
+/* 回放:取某通道某码流(NVR_STREAM_MAIN/SUB)的解码尺寸。无该通道回退 1080p。返回 0/. */
+int        nvr_stream_dim(nvr_stream_mgr_t *m, int chn, int stream, int *w, int *h, int *fps);
+
+/* 显示门控(preview 驱动)：设通道当前显示目标格。win>=0=在该格显示(开解码即上屏),win<0=隐藏(关解码)。
+ * 拉流与录像不受影响——切布局/翻页只改解码目标,RTSP 会话不动;不可见通道不占硬件解码预算。 */
+rsdk_err_t nvr_stream_set_display  (nvr_stream_mgr_t *m, int chn, int win);
+
+/* ★ 双流:channel 层解析出某码流(NVR_STREAM_MAIN/SUB)的取流 URL → 提供给 streaming,该路 puller
+ * 立即起(主+子两路常拉:主录像+单宫格显示、子录像+多宫格显示)。 */
+rsdk_err_t nvr_stream_set_url      (nvr_stream_mgr_t *m, int chn, int stream, const char *url);
+
+/* ★ 切换喂解码器的码流(单宫格=主/多宫格=子)。两路都在拉 → 瞬时切换、不重连。 */
+rsdk_err_t nvr_stream_set_decode_stream(nvr_stream_mgr_t *m, int chn, int stream);
 
 /* 状态查询（供 UI/诊断） */
 typedef enum { NVR_CH_IDLE, NVR_CH_CONNECTING, NVR_CH_PLAYING, NVR_CH_NOSIGNAL, NVR_CH_FAIL } nvr_ch_state_t;
@@ -68,6 +85,12 @@ nvr_ch_state_t nvr_stream_state(nvr_stream_mgr_t *m, int chn);
 
 /* 该通道是否因解码预算超限被拒绝预览解码（1=只录不显，需 UI 提示"超出解码能力"）。 */
 int nvr_stream_decode_denied(nvr_stream_mgr_t *m, int chn);
+
+/* 该通道当前是否已"出图"(解码器已开且喂到帧)。供切宫格/切码流接口阻塞回复直到有格出图。 */
+int nvr_stream_display_ready(nvr_stream_mgr_t *m, int chn);
+
+/* 给该通道喂缓存关键帧(批量提交结束、解码器 start 后调)→ 不等下个 IDR、秒出图。 */
+rsdk_err_t nvr_stream_feed_keyframe(nvr_stream_mgr_t *m, int chn);
 
 #ifdef __cplusplus
 }

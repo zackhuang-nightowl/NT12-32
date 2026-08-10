@@ -19,9 +19,11 @@ void nvr_app_stop (nvr_app_t *app);                           /* 停并释放 */
 void nvr_app_request_exit(nvr_app_t *app);                    /* 供信号处理触发退出 */
 
 /* ONVIF 取流 URL 钩子（② onvif 模块实现；未实现时弱符号返回 -1，通道保持待定）。
- * stream: "main"/"sub"。成功填 out 并返回 0。 */
+ * stream: "main"/"sub"。成功填 out 并返回 0。
+ * scopes_out(可空):顺带回传发现广播的 scopes(供通道分类 kind/mac);scopes_cap 为其容量。 */
 int  nvr_onvif_get_url(const char *ip, int port, const char *user, const char *pass,
-                       const char *stream, char *out, int out_size);
+                       const char *stream, char *out, int out_size,
+                       char *scopes_out, int scopes_cap);
 
 #ifdef __cplusplus
 }

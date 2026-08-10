@@ -29,18 +29,20 @@ typedef struct {
     nvr_settings_t *settings;   /* 本地命令持久化 */
     nvr_chan_mgr_t *cm;         /* channel→设备 解析 */
     nvr_storage_t  *stg;        /* 存储信息/格式化/健康 */
+    struct nvr_stream_mgr *sm;  /* 拉流/录像管理器:格式化后重组装盘组→补开 writer */
     rsdk_group_t   *group;      /* 事件/录像 查询 */
     void           *meta;       /* rsdk_meta ctx（事件元数据）；可 NULL */
     nop_app_t      *nop;        /* 回落 */
     int             port;       /* 默认 8089 */
     int             dev_nop_port; /* 转发到设备的 NOP 端口，默认 8089 */
     nvr_preview_t      *pv;        /* 出图：显示指令驱动 */
+    struct nvr_playback *pb;       /* 本机回放引擎 */
+    struct nvr_evt_hub *eh;        /* 事件中枢(longPolling 事件位图) */
     nvr_chan_persist_t *persist;   /* 通道映射/能力持久化 */
 } nvr_cmd_router_cfg_t;
 
 int  nvr_cmd_router_start(const nvr_cmd_router_cfg_t *cfg, nvr_cmd_router_t **out);
 void nvr_cmd_router_stop (nvr_cmd_router_t *r);
-int  nvr_cmd_router_port (nvr_cmd_router_t *r);
 
 /* 纯函数：一条 NOP JSON → 应答(malloc；调用方 free)。可主机单测(不起 HTTP)。 */
 char *nvr_cmd_dispatch(nvr_cmd_router_t *r, const char *json_in);

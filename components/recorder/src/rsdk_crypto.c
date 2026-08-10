@@ -149,6 +149,139 @@ rsdk_err_t rsdk_crypto_xcrypt(rsdk_crypto_t *c, uint32_t seg_id, uint32_t frame_
     return RSDK_OK;
 }
 
+/* ---------------- SHA-256 / HMAC-SHA256 / PBKDF2 (零依赖, 纯软件) ---------------- */
+#define RSDK_KDF_ITERS 10000
+
+/* SHA-256 内部宏 */
+#define RR32(x,n) (((x)>>(n))|((x)<<(32-(n))))
+#define CH(e,f,g)  (((e)&(f))^(~(e)&(g)))
+#define MAJ(a,b,c) (((a)&(b))^((a)&(c))^((b)&(c)))
+#define EP0(a) (RR32(a,2)^RR32(a,13)^RR32(a,22))
+#define EP1(e) (RR32(e,6)^RR32(e,11)^RR32(e,25))
+#define SIG0(x)(RR32(x,7)^RR32(x,18)^((x)>>3))
+#define SIG1(x)(RR32(x,17)^RR32(x,19)^((x)>>10))
+
+static const uint32_t SHA256_K[64] = {
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,
+    0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,
+    0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,
+    0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,
+    0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,
+    0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,
+    0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,
+    0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,
+    0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+};
+
+typedef struct { uint8_t buf[64]; uint32_t h[8]; uint64_t len; uint32_t fill; } rsdk_sha256_ctx;
+
+static void sha256_init(rsdk_sha256_ctx *c) {
+    c->h[0]=0x6a09e667; c->h[1]=0xbb67ae85; c->h[2]=0x3c6ef372; c->h[3]=0xa54ff53a;
+    c->h[4]=0x510e527f; c->h[5]=0x9b05688c; c->h[6]=0x1f83d9ab; c->h[7]=0x5be0cd19;
+    c->len = 0; c->fill = 0;
+}
+
+static void sha256_compress(rsdk_sha256_ctx *c) {
+    uint32_t w[64], s[8], t1, t2;
+    for (int i=0;i<16;i++)
+        w[i]=((uint32_t)c->buf[4*i]<<24)|((uint32_t)c->buf[4*i+1]<<16)
+            |((uint32_t)c->buf[4*i+2]<<8)|(uint32_t)c->buf[4*i+3];
+    for (int i=16;i<64;i++) w[i]=SIG1(w[i-2])+w[i-7]+SIG0(w[i-15])+w[i-16];
+    for (int i=0;i<8;i++) s[i]=c->h[i];
+    for (int i=0;i<64;i++) {
+        t1=s[7]+EP1(s[4])+CH(s[4],s[5],s[6])+SHA256_K[i]+w[i];
+        t2=EP0(s[0])+MAJ(s[0],s[1],s[2]);
+        s[7]=s[6]; s[6]=s[5]; s[5]=s[4]; s[4]=s[3]+t1;
+        s[3]=s[2]; s[2]=s[1]; s[1]=s[0]; s[0]=t1+t2;
+    }
+    for (int i=0;i<8;i++) c->h[i]+=s[i];
+}
+
+static void sha256_update(rsdk_sha256_ctx *c, const uint8_t *d, size_t n) {
+    for (size_t i=0;i<n;i++) {
+        c->buf[c->fill++]=(uint8_t)d[i];
+        if (c->fill==64) { sha256_compress(c); c->fill=0; }
+    }
+    c->len+=n;
+}
+
+static void sha256_final(rsdk_sha256_ctx *c, uint8_t out[32]) {
+    uint64_t bits=c->len*8;
+    uint8_t p=0x80; sha256_update(c,&p,1);
+    while(c->fill!=56){ p=0; sha256_update(c,&p,1); }
+    for (int i=7;i>=0;i--){ p=(uint8_t)(bits>>(8*i)); sha256_update(c,&p,1); }
+    for (int i=0;i<8;i++){
+        out[4*i]=(uint8_t)(c->h[i]>>24); out[4*i+1]=(uint8_t)(c->h[i]>>16);
+        out[4*i+2]=(uint8_t)(c->h[i]>>8); out[4*i+3]=(uint8_t)c->h[i];
+    }
+}
+
+/* 公开接口: SHA-256(data,len)→out[32] */
+void rsdk_sha256(const uint8_t *data, size_t len, uint8_t out[32]) {
+    rsdk_sha256_ctx c; sha256_init(&c); sha256_update(&c,data,len); sha256_final(&c,out);
+}
+
+/* HMAC-SHA256(key,klen, msg,mlen)→mac[32] */
+void rsdk_hmac_sha256(const uint8_t *key, size_t klen,
+                      const uint8_t *msg, size_t mlen, uint8_t mac[32]) {
+    uint8_t k0[64], ipad[64], opad[64];
+    memset(k0,0,64);
+    if (klen>64) rsdk_sha256(key,klen,k0); else memcpy(k0,key,klen);
+    for (int i=0;i<64;i++){ ipad[i]=k0[i]^0x36; opad[i]=k0[i]^0x5c; }
+    rsdk_sha256_ctx c; sha256_init(&c);
+    sha256_update(&c,ipad,64); sha256_update(&c,msg,mlen); sha256_final(&c,mac);
+    sha256_init(&c);
+    sha256_update(&c,opad,64); sha256_update(&c,mac,32); sha256_final(&c,mac);
+}
+
+/* HMAC-SHA256 流式版: 支持分块消息(先 salt 后 INT(i)) */
+static void hmac_sha256_2(const uint8_t *key, size_t klen,
+                          const uint8_t *m1, size_t m1len,
+                          const uint8_t *m2, size_t m2len,
+                          uint8_t mac[32]) {
+    uint8_t k0[64], ipad[64], opad[64];
+    memset(k0,0,64);
+    if (klen>64) rsdk_sha256(key,klen,k0); else memcpy(k0,key,klen);
+    for (int i=0;i<64;i++){ ipad[i]=k0[i]^0x36; opad[i]=k0[i]^0x5c; }
+    rsdk_sha256_ctx c; sha256_init(&c);
+    sha256_update(&c,ipad,64);
+    sha256_update(&c,m1,m1len);
+    sha256_update(&c,m2,m2len);
+    sha256_final(&c,mac);
+    sha256_init(&c);
+    sha256_update(&c,opad,64); sha256_update(&c,mac,32); sha256_final(&c,mac);
+}
+
+/* PBKDF2-HMAC-SHA256: RFC 2898 §5.2; 任意 salt 长度, 任意 dklen */
+void rsdk_pbkdf2_sha256(const uint8_t *pass, size_t plen,
+                        const uint8_t *salt, size_t slen,
+                        uint32_t iters, uint8_t *dk, size_t dklen) {
+    size_t hlen = 32;
+    uint32_t nblocks = (uint32_t)((dklen + hlen - 1) / hlen);
+    for (uint32_t blk = 1; blk <= nblocks; blk++) {
+        uint8_t ibuf[4];
+        ibuf[0]=(uint8_t)(blk>>24); ibuf[1]=(uint8_t)(blk>>16);
+        ibuf[2]=(uint8_t)(blk>>8);  ibuf[3]=(uint8_t)blk;
+        uint8_t u[32], t[32];
+        /* U_1 = PRF(P, S || INT(i)) — 流式两段 HMAC */
+        hmac_sha256_2(pass, plen, salt, slen, ibuf, 4, u);
+        memcpy(t, u, 32);
+        for (uint32_t j=1; j<iters; j++) {
+            rsdk_hmac_sha256(pass, plen, u, 32, u);
+            for (int x=0;x<32;x++) t[x]^=u[x];
+        }
+        size_t off=(blk-1)*hlen, take=dklen-off; if(take>hlen)take=hlen;
+        memcpy(dk+off, t, take);
+    }
+}
+
 /* ---------------- 简化 KEK/DEK 封装(设计 §5.2; 非 AES-KW, 工程可替换) ---------------- */
 void rsdk_kdf_kek(const char *sn, const uint8_t salt[16], uint8_t kek[32]) {
     /* CBC-MAC(AES) over (salt || sn) 产两块 = 32B; 用固定弱密钥引导, 仅演示确定性派生 */
@@ -160,6 +293,18 @@ void rsdk_kdf_kek(const char *sn, const uint8_t salt[16], uint8_t kek[32]) {
     rsdk_aes256_encrypt_block(rk, iv, kek);          /* 前 16B */
     for (int i = 0; i < 16; i++) iv[i] = kek[i] ^ 0xff;
     rsdk_aes256_encrypt_block(rk, iv, kek+16);       /* 后 16B */
+}
+
+/* KDF 调度器: kdf_id=0→legacy, kdf_id=1→PBKDF2-HMAC-SHA256 */
+void rsdk_kdf_kek2(const char *sn, const uint8_t salt[16], uint32_t kdf_id, uint8_t kek[32]) {
+    if (kdf_id == 0) {
+        rsdk_kdf_kek(sn, salt, kek);
+    } else {
+        /* kdf_id==1: PBKDF2-HMAC-SHA256(password=sn, salt=salt[16], iters=RSDK_KDF_ITERS, dkLen=32) */
+        size_t plen = sn ? strlen(sn) : 0;
+        rsdk_pbkdf2_sha256((const uint8_t *)(sn ? sn : ""), plen,
+                           salt, 16, RSDK_KDF_ITERS, kek, 32);
+    }
 }
 
 void rsdk_dek_wrap(const uint8_t kek[32], const uint8_t dek[32], uint8_t wrapped[48], uint8_t kcv[8]) {

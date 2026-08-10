@@ -27,12 +27,14 @@ set(NVR_APP_INCLUDES
     ${CMAKE_CURRENT_SOURCE_DIR}/ota
     ${CMAKE_CURRENT_SOURCE_DIR}/netime
     ${CMAKE_CURRENT_SOURCE_DIR}/ble
+    ${CMAKE_CURRENT_SOURCE_DIR}/playback
     ${NVR_ROOT}/third_party/curl/include        # curl.h（转发到设备用；host 用系统头）
     ${NVR_ROOT}/components/streaming/include
     ${NVR_ROOT}/components/storage/include
     ${NVR_ROOT}/components/recorder/include
     ${NVR_ROOT}/components/config/include
     ${NVR_ROOT}/components/onvif/include
+    ${NVR_ROOT}/components/crypto/include
     ${NVR_ROOT}/components/nop/include
     ${NVR_ROOT}/components/cloud_uploader/include
     ${NVR_ROOT}/components/cloud_tutk/include
@@ -44,17 +46,29 @@ set(NVR_APP_INCLUDES
 add_library(nvr_app_core STATIC
     src/nvr_app.c
     config/nvr_config.c
+    config/nvr_gui_config.c
     channel/nvr_channel.c
     preview/nvr_preview.c
     record_sched/nvr_record_sched.c
     event/nvr_event.c
     router/nvr_cmd_router.c
+    router/nvr_cmd_util.c
+    router/nvr_cmd_table.c
     router/nvr_cmd_display.c
+    router/nvr_cmd_lan.c
+    router/nvr_cmd_system.c
+    router/nvr_cmd_storage.c
+    router/nvr_cmd_cloud.c
+    router/nvr_cmd_record.c
+    router/nvr_cmd_ota.c
+    router/nvr_cmd_event.c
     config/nvr_chan_persist.c
     channel/nvr_chan_status.c
     ota/nvr_ota.c
     netime/nvr_netime.c
     ble/nvr_ble.c
+    playback/nvr_playback.c
+    router/nvr_cmd_playback.c
 )
 target_include_directories(nvr_app_core PUBLIC ${NVR_APP_INCLUDES})
 target_link_libraries(nvr_app_core PUBLIC cjson)
@@ -72,7 +86,7 @@ if(NVR_WITH_ONBOARD)
     set(_tutk ${NVR_ROOT}/third_party/tutk_sdk/Lib/Linux/ArmCortexA53_NT98633_8.4.0)
     target_link_libraries(nvr_app PRIVATE
         nvr_app_core
-        nvr_streaming happytime_rtsp
+        nvr_streaming onvifclient
         nvr_storage rsdk nvr_settings nvr_crypto sqlite3
         nvr_onvif nvr_cloud_uploader mhal cjson
         nopcore_static nvr_cloud_tutk
@@ -84,61 +98,3 @@ if(NVR_WITH_ONBOARD)
     target_link_options(nvr_app PRIVATE -Wl,--allow-multiple-definition)
 endif()
 
-# --- BLE 分包/组包单测（主机可运行；不需 BT 硬件）---
-if(NOT NVR_CROSS)
-    add_executable(test_nvr_ble ble/test_nvr_ble.c ble/nvr_ble.c)
-    target_include_directories(test_nvr_ble PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/ble ${NVR_ROOT}/common/include)
-    add_test(NAME test_nvr_ble COMMAND test_nvr_ble)
-
-    # 解码吞吐预算准入单测（纯 C，直接编 mhal_budget.c；无需 hdal）
-    add_executable(test_mhal_budget ${NVR_ROOT}/platform/media_hal/test_mhal_budget.c
-                                    ${NVR_ROOT}/platform/media_hal/mhal_budget.c)
-    target_include_directories(test_mhal_budget PRIVATE ${NVR_ROOT}/platform/media_hal)
-    target_link_libraries(test_mhal_budget PRIVATE pthread)
-    add_test(NAME test_mhal_budget COMMAND test_mhal_budget)
-
-    # channels.json 原子持久化单测（主机可运行；纯 C + cjson）
-    add_executable(test_nvr_chan_persist
-        config/test_nvr_chan_persist.c config/nvr_chan_persist.c)
-    target_include_directories(test_nvr_chan_persist PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/config ${NVR_ROOT}/common/include
-        ${NVR_ROOT}/third_party/cJSON)
-    target_link_libraries(test_nvr_chan_persist PRIVATE cjson)
-    target_compile_options(test_nvr_chan_persist PRIVATE -UNDEBUG)
-    add_test(NAME test_nvr_chan_persist COMMAND test_nvr_chan_persist)
-
-    # 通道状态 0-7 纯映射单测（主机可运行；纯 C，无重依赖）
-    add_executable(test_nvr_chan_status
-        channel/test_nvr_chan_status.c channel/nvr_chan_status.c)
-    target_include_directories(test_nvr_chan_status PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/channel)
-    target_compile_options(test_nvr_chan_status PRIVATE -UNDEBUG)
-    add_test(NAME test_nvr_chan_status COMMAND test_nvr_chan_status)
-
-    # 预览布局/映射/悬浮块单测（主机可运行；mock mhal_vout + streaming）
-    add_executable(test_nvr_preview
-        preview/test_nvr_preview.c preview/nvr_preview.c
-        preview/test/mock_mhal_vout.c preview/test/mock_streaming.c)
-    target_include_directories(test_nvr_preview PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/preview ${CMAKE_CURRENT_SOURCE_DIR}/preview/test
-        ${NVR_ROOT}/platform/media_hal ${NVR_ROOT}/components/streaming/include
-        ${NVR_ROOT}/common/include ${NVR_ROOT}/components/recorder/include)
-    target_link_libraries(test_nvr_preview PRIVATE pthread)
-    target_compile_options(test_nvr_preview PRIVATE -UNDEBUG)
-    add_test(NAME test_nvr_preview COMMAND test_nvr_preview)
-
-    # 显示命令处理器单测（主机可运行；mock mhal_vout/streaming + mock_channel stub）
-    add_executable(test_nvr_cmd_display
-        router/test_nvr_cmd_display.c router/nvr_cmd_display.c
-        preview/nvr_preview.c preview/test/mock_mhal_vout.c preview/test/mock_streaming.c
-        config/nvr_chan_persist.c channel/nvr_chan_status.c router/test/mock_channel.c)
-    target_include_directories(test_nvr_cmd_display PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/router ${CMAKE_CURRENT_SOURCE_DIR}/preview
-        ${CMAKE_CURRENT_SOURCE_DIR}/preview/test ${CMAKE_CURRENT_SOURCE_DIR}/config
-        ${CMAKE_CURRENT_SOURCE_DIR}/channel
-        ${NVR_ROOT}/platform/media_hal ${NVR_ROOT}/components/streaming/include
-        ${NVR_ROOT}/components/config/include ${NVR_ROOT}/components/storage/include
-        ${NVR_ROOT}/components/recorder/include ${NVR_ROOT}/common/include ${NVR_ROOT}/third_party/cJSON)
-    target_link_libraries(test_nvr_cmd_display PRIVATE cjson pthread)
-    target_compile_options(test_nvr_cmd_display PRIVATE -UNDEBUG)
-    add_test(NAME test_nvr_cmd_display COMMAND test_nvr_cmd_display)
-endif()

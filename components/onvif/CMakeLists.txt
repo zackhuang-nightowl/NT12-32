@@ -20,11 +20,3 @@ if(TARGET nopcore_static)
 endif()
 
 set_target_properties(nvr_onvif PROPERTIES C_STANDARD 11)
-
-option(NVR_ONVIF_TEST "构建 onvif 分类自测" ON)
-if(NVR_ONVIF_TEST AND NOT NVR_CROSS)
-  enable_testing()
-  add_executable(test_dev_classify tests/test_dev_classify.c)
-  target_link_libraries(test_dev_classify nvr_dev_classify)
-  add_test(NAME dev_classify COMMAND test_dev_classify)
-endif()

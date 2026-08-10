@@ -33,7 +33,18 @@ struct nop_http_server {
     pthread_t    thread;
     volatile int stop;
     int          thread_started;
+    nop_http_handler_fn handler;      /* NULL → default nop_app_dispatch path */
+    void        *handler_ctx;
 };
+
+void nop_http_server_set_handler(nop_http_server_t *server,
+                                 nop_http_handler_fn handler, void *ctx)
+{
+    if (!server)
+        return;
+    server->handler     = handler;
+    server->handler_ctx = ctx;
+}
 
 static int write_fully(int fd, const char *buf, size_t len)
 {
@@ -170,6 +181,22 @@ static void serve_connection(nop_http_server_t *server, int conn_fd)
         return;
     }
 
+    /* Single 8089 inbound entry: if an app-level handler is installed, it owns
+     * the processing (display / channel forward / nop fallback); otherwise the
+     * default path dispatches straight into nop_app. */
+    if (server->handler) {
+        char *resp = server->handler(server->handler_ctx, body);
+        if (resp) {
+            send_http_response(conn_fd, 200, "OK", resp);
+            free(resp);
+        } else {
+            send_http_response(conn_fd, 500, "Internal Server Error",
+                               "{\"statusCode\":500}");
+        }
+        free(buffer);
+        return;
+    }
+
     if (nop_app_dispatch(server->app, body, &response) == NOP_OK && response) {
         send_http_response(conn_fd, 200, "OK", response);
         nop_app_free_response(response);
@@ -224,7 +251,7 @@ nop_http_server_t *nop_http_server_start(int port, nop_app_t *app)
     server->app       = app;
     server->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server->listen_fd < 0)
-        goto fail;
+        { fprintf(stderr, "[nop_http] socket: %s\n", strerror(errno)); goto fail; }
     setsockopt(server->listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
     memset(&addr, 0, sizeof(addr));
@@ -232,9 +259,9 @@ nop_http_server_t *nop_http_server_start(int port, nop_app_t *app)
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port        = htons((uint16_t)port);
     if (bind(server->listen_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0)
-        goto fail;
+        { fprintf(stderr, "[nop_http] bind %d: %s\n", port, strerror(errno)); goto fail; }
     if (listen(server->listen_fd, 8) != 0)
-        goto fail;
+        { fprintf(stderr, "[nop_http] listen: %s\n", strerror(errno)); goto fail; }
     /* Resolve the actual port (useful when caller passed an ephemeral 0... but
      * we map 0 to 8089 above; still read back for correctness). */
     if (getsockname(server->listen_fd, (struct sockaddr *)&addr, &addr_len) == 0)
@@ -243,7 +270,7 @@ nop_http_server_t *nop_http_server_start(int port, nop_app_t *app)
         server->port = port;
 
     if (pthread_create(&server->thread, NULL, serve_loop, server) != 0)
-        goto fail;
+        { fprintf(stderr, "[nop_http] pthread: %s\n", strerror(errno)); goto fail; }
     server->thread_started = 1;
     return server;
 

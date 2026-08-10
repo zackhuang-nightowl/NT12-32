@@ -17,8 +17,14 @@ void       rsdk_crypto_close(rsdk_crypto_t *c);
 RSDK_API rsdk_err_t rsdk_crypto_xcrypt(rsdk_crypto_t *c, uint32_t seg_id, uint32_t frame_seq,
                                        uint64_t off, uint8_t *buf, size_t len);
 
-/* 工具: 由设备SN+salt 派生 KEK, 并解/封装 DEK(演示用简化 KDF) */
+/* 工具: 由设备SN+salt 派生 KEK, 并解/封装 DEK */
 RSDK_API void rsdk_kdf_kek(const char *sn, const uint8_t salt[16], uint8_t kek[32]);
+/* kdf_id=0→legacy rsdk_kdf_kek; kdf_id=1→PBKDF2-HMAC-SHA256 */
+RSDK_API void rsdk_kdf_kek2(const char *sn, const uint8_t salt[16], uint32_t kdf_id, uint8_t kek[32]);
+/* 原语 */
+RSDK_API void rsdk_sha256(const uint8_t *data, size_t len, uint8_t out[32]);
+RSDK_API void rsdk_hmac_sha256(const uint8_t *key, size_t klen, const uint8_t *msg, size_t mlen, uint8_t mac[32]);
+RSDK_API void rsdk_pbkdf2_sha256(const uint8_t *pass, size_t plen, const uint8_t *salt, size_t slen, uint32_t iters, uint8_t *dk, size_t dklen);
 RSDK_API void rsdk_dek_wrap  (const uint8_t kek[32], const uint8_t dek[32], uint8_t wrapped[48], uint8_t kcv[8]);
 RSDK_API rsdk_err_t rsdk_dek_unwrap(const uint8_t kek[32], const uint8_t wrapped[48], const uint8_t kcv[8], uint8_t dek[32]);
 

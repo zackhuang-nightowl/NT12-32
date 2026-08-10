@@ -31,6 +31,8 @@ typedef struct {
     nvr_backend_t  backend;         /* NOP→NOP 透传；NOPONVIF/ONVIF→ONVIF 翻译 */
     char           mac[24];         /* 从 scopes 的 /mac/ 提取（可空） */
     char           serial[64];      /* 设备 SN：从 scopes 的 /serial/ 或 /sn/ 提取（激活用，可空） */
+    char           model[64];       /* 型号：从 scopes 的 /hardware/ 提取（ONVIF 标准；可空） */
+    char           name[64];        /* 设备名：从 scopes 的 /name/ 提取（ONVIF 标准；可空） */
     int            is_nightowl;     /* manufacturer=NightOwl 或 MAC 前缀 54:2b:57 */
     int            nop_version_x;   /* nopVersion 主版本（无则 0） */
     int            active;          /* scopes 含 nopState/active */

@@ -10,15 +10,18 @@ project(nvr_firmware C CXX)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 14)
 
-# 主机自测聚合（ctest）。各组件用 add_test 注册；从顶层 build 目录 `ctest` 全跑。
-enable_testing()
-
 # 主机构建先决条件（另见 BUILD.md）：cmake≥3.13, gcc/g++, libsqlite3-dev, libssl-dev, python3。
 # 目标机(aarch64)构建 media_hal/app 另需 -DNVR_WITH_ONBOARD=ON -DBSP_ROOT=<na51090_linux_sdk>。
 
 option(NVR_WITH_ONVIF   "启用 ONVIF（Happytime, 需 C++/openssl）" OFF)
 option(NVR_WITH_TUTK    "启用 TUTK P2P"                          OFF)
 option(NVR_WITH_ONBOARD "在目标机上构建（链接 hdal/platform）"   OFF)
+
+# 云环境:默认生产(prod);-DNVR_STAGE=ON 切预发(stage)域名。全局传给 app+components。
+option(NVR_STAGE        "使用预发(stage)云环境域名,默认生产(prod)" OFF)
+if(NVR_STAGE)
+    add_compile_definitions(NVR_BUILD_STAGE=1)
+endif()
 
 # --- 顶层第三方路径（各模块 glue 引用这里，替代原 nop_sdk/third_party）---
 set(NVR_THIRD_PARTY ${CMAKE_CURRENT_SOURCE_DIR}/third_party CACHE PATH "")
@@ -77,7 +80,9 @@ add_subdirectory(components/cloud_uploader)
 # --- 平台层 + happytime RTSP 客户端（仅目标机构建）---
 if(NVR_WITH_ONBOARD)
     add_subdirectory(platform/media_hal)                 # hd_videodec/videoproc/videoout 封装
-    add_subdirectory(third_party/happytime_onvif_rtsp)   # CRtspClient（streaming 拉流）
+    add_subdirectory(third_party/happytime_onvif_rtsp)   # CRtspClient（streaming 拉流）— 旧，逐步替换
+    # 统一 RTSP SDK：NT12-SDK/OnvifClientLibrary(nop::NopRtspClient facade)。external source。
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../NT12-SDK/OnvifClientLibrary onvifclient_build)
 endif()
 
 # --- 集成主程序 ---

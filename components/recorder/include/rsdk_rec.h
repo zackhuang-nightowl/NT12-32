@@ -30,6 +30,12 @@ RSDK_API uint64_t   rsdk_rec_cur_chunk(rsdk_writer_t *w);
  * 供上层清理绑定到该视频 chunk 的元数据/抓拍(retention 联动)。 */
 typedef void (*rsdk_reclaim_cb)(void *user, uint16_t disk, uint64_t chunk);
 RSDK_API void rsdk_rec_set_reclaim(rsdk_writer_t *w, rsdk_reclaim_cb cb, void *user);
+/* 事件标签:置后续帧头 event_id(连续轨命中事件时打标,便于扫描重建;传 0 清除)。 */
+RSDK_API void rsdk_rec_set_event(rsdk_writer_t *w, uint64_t event_id);
+/* 内联标记(自描述,供扫描重建):事件(复合 type_mask+精确时窗)/ 云存终态。 */
+RSDK_API rsdk_err_t rsdk_rec_mark_event(rsdk_writer_t *w, uint64_t event_id, uint8_t rectype,
+                                        uint32_t start, uint32_t end, uint32_t type_mask, uint32_t ref_seg);
+RSDK_API rsdk_err_t rsdk_rec_mark_cloud(rsdk_writer_t *w, uint64_t event_id, uint8_t state, uint32_t ts);
 
 #ifdef __cplusplus
 }

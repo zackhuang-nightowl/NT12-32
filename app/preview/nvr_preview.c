@@ -2,6 +2,7 @@
  *  nvr_preview.c — 预览分屏编排。见 nvr_preview.h / 计划 §B2。
  ***************************************************************************************/
 #include "nvr_preview.h"
+#include "nvr_defaults.h"
 #include "mhal_vout.h"
 
 #include <pthread.h>
@@ -9,8 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>   /* usleep —— 出图就绪轮询 */
 
-#define PV_MAX_WIN 16
+#define PV_MAX_WIN 36   /* 最大宫格数(6x6=36)；通道仍最多 32,多出的格为空 */
 #define PV_MAX_CH  32
 
 struct nvr_preview {
@@ -32,6 +34,10 @@ struct nvr_preview {
     nvr_pv_ext_t ext[PV_MAX_WIN];       /* 当前悬浮块列表 */
 
     int         new_api_active;         /* 首次调用 set_mode 后置 1（Important2 修复） */
+
+    /* --- 数字变焦(ZoomPan)每通道状态；千分比 + ratio(100=1x)。掉电/重启回默认。 --- */
+    struct { int enable, cx, cy, ratio; } zoom[PV_MAX_CH];
+
     pthread_mutex_t lock;                /* 递归锁：8089 路由线程 与 主循环线程 并发访问保护
                                           （Important1 修复；用递归锁因公有函数间存在嵌套调用） */
 };
@@ -61,6 +67,7 @@ int nvr_preview_init(const nvr_preview_cfg_t *cfg, nvr_preview_t **out)
     p->layout = PV_L16; p->win_count = 16;
     p->disp_w = cfg->hdmi_w; p->disp_h = cfg->hdmi_h;
     for (int i = 0; i < PV_MAX_CH; i++) p->map0[i] = i;   /* 默认恒等映射 */
+    for (int i = 0; i < PV_MAX_CH; i++) { p->zoom[i].enable = 1; p->zoom[i].cx = 500; p->zoom[i].cy = 500; p->zoom[i].ratio = 100; }
     p->display_mode = 0; p->display_page = 1; p->ext_n = 0;
     p->new_api_active = 0;
 
@@ -73,6 +80,8 @@ int nvr_preview_init(const nvr_preview_cfg_t *cfg, nvr_preview_t **out)
     *out = p;
     return 0;
 }
+
+void nvr_preview_set_cm(nvr_preview_t *p, nvr_chan_mgr_t *cm) { if (p) p->cfg.cm = cm; }
 
 void nvr_preview_deinit(nvr_preview_t *p) {
     if (!p) return;
@@ -110,7 +119,7 @@ int nvr_preview_set_layout(nvr_preview_t *p, pv_layout_t layout)
     for (int w = 0; w < PV_MAX_WIN; w++) p->win2chn[w] = -1;
     for (int w = 0; w < wc; w++) {
         int chn = p->page * wc + w;
-        if (chn < PV_MAX_CH) { p->win2chn[w] = chn; mhal_vout_bind(w, chn); compose_osd(p, w); }
+        if (chn < PV_MAX_CH) { p->win2chn[w] = chn; nvr_stream_set_display(p->cfg.sm, chn, w); compose_osd(p, w); }
     }
     pthread_mutex_unlock(&p->lock);
     return 0;
@@ -132,7 +141,7 @@ int nvr_preview_map(nvr_preview_t *p, int win, int chn)
     pthread_mutex_lock(&p->lock);
     if (win >= p->win_count) { pthread_mutex_unlock(&p->lock); return -1; }
     p->win2chn[win] = chn;
-    mhal_vout_bind(win, chn);
+    nvr_stream_set_display(p->cfg.sm, chn, win);
     compose_osd(p, win);
     pthread_mutex_unlock(&p->lock);
     return 0;
@@ -172,22 +181,20 @@ int nvr_preview_on_channel_online(nvr_preview_t *p, int chn)
 {
     if (!p || chn < 0 || chn >= PV_MAX_CH) return -1;
     pthread_mutex_lock(&p->lock);
-    int w = win_of_chn(p, chn);
-    if (w < 0) {
-        if (p->new_api_active) {
-            /* 新 API 已激活（曾调用过 set_mode，无论当前 mode 是否为 0）。
-             * display_mode>0：从 map0 重算该通道应在的窗口。
-             * display_mode==0（已离开 LiveView）：什么都不做，保持隐藏，
-             * 不再落回旧公式绑回幽灵宫格窗（Important2 修复）。 */
-            if (p->display_mode > 0) {
-                int win = win_of_chn_by_map(p, chn);
-                if (win >= 0) { p->win2chn[win] = chn; mhal_vout_bind(win, chn); w = win; }
-            }
-        } else {
-            /* 旧 set_layout 路径（从未调用过 set_mode）：兼容旧 page*win_count+chn 公式 */
-            int win = chn - p->page * p->win_count;
-            if (win >= 0 && win < p->win_count) { p->win2chn[win] = chn; mhal_vout_bind(win, chn); w = win; }
+    /* ★ 通道上线 → 若它落在当前页可见格,开解码上屏。**无条件**按 map 重算并 set_display:
+     * 不能用 win_of_chn 早退——set_mode 可能已预填 win2chn(那时通道还没 add 到 streaming、
+     * set_display 是 no-op),真正的解码要等这里(上线后 slot 已存在)才开得起来。set_display 幂等。 */
+    int w = -1;
+    if (p->new_api_active) {
+        /* display_mode>0：从 map0 算该通道应在的窗口;==0(已离开 LiveView)则保持隐藏,什么都不做。 */
+        if (p->display_mode > 0) {
+            w = win_of_chn_by_map(p, chn);
+            if (w >= 0) { p->win2chn[w] = chn; nvr_stream_set_display(p->cfg.sm, chn, w); }
         }
+    } else {
+        /* 旧 set_layout 路径（从未调用过 set_mode）：兼容旧 page*win_count+chn 公式 */
+        int win = chn - p->page * p->win_count;
+        if (win >= 0 && win < p->win_count) { p->win2chn[win] = chn; nvr_stream_set_display(p->cfg.sm, chn, win); w = win; }
     }
     if (w >= 0) compose_osd(p, w);
     pthread_mutex_unlock(&p->lock);
@@ -210,9 +217,9 @@ int nvr_preview_fullscreen(nvr_preview_t *p, int chn)
     if (!p || chn < 0) return -1;
     pthread_mutex_lock(&p->lock);
     nvr_preview_set_layout(p, PV_L1);
-    p->win2chn[0] = chn; mhal_vout_bind(0, chn); compose_osd(p, 0);
+    p->win2chn[0] = chn; nvr_stream_set_display(p->cfg.sm, chn, 0); compose_osd(p, 0);
     /* 单画面 → 切主码流 */
-    if (p->cfg.sm) nvr_stream_switch_stream(p->cfg.sm, chn, NVR_STREAM_MAIN, NULL);
+    if (p->cfg.cm) nvr_chan_set_stream(p->cfg.cm, chn, NVR_STREAM_MAIN);   /* 单画面=主码流 */
     p->zoom_chn = chn;
     pthread_mutex_unlock(&p->lock);
     return 0;
@@ -224,12 +231,69 @@ int nvr_preview_single_zoom(nvr_preview_t *p, int chn, int on)
     pthread_mutex_lock(&p->lock);
     if (on) { int rc = nvr_preview_fullscreen(p, chn); pthread_mutex_unlock(&p->lock); return rc; }
     /* 退出放大 → 回默认布局 + 子码流 */
-    if (p->cfg.sm && p->zoom_chn >= 0)
-        nvr_stream_switch_stream(p->cfg.sm, p->zoom_chn, NVR_STREAM_SUB, NULL);
+    if (p->cfg.cm && p->zoom_chn >= 0)
+        nvr_chan_set_stream(p->cfg.cm, p->zoom_chn, NVR_STREAM_SUB);   /* 退出放大=子码流 */
     p->zoom_chn = -1;
     int rc = nvr_preview_set_layout(p, PV_L16);
     pthread_mutex_unlock(&p->lock);
     return rc;
+}
+
+/* ---- 数字变焦(ZoomPan) ---- */
+#define PV_ZOOM_MIN NVR_DEF_ZOOM_MIN   /* 1.00x = 原画 */
+#define PV_ZOOM_MAX NVR_DEF_ZOOM_MAX   /* 上限(超此报 "Exceeds zoom capabilities") */
+
+int nvr_preview_set_zoom(nvr_preview_t *p, int chn0, int enable,
+                         int cx, int cy, int focusx, int focusy, int ratio,
+                         int *out_cx, int *out_cy, int *out_ratio, const char **out_result)
+{
+    (void)focusx; (void)focusy;   /* v1:以 CenterPointXY 为 ROI 中心(GUI 已据 Focus 算好 Center) */
+    if (!p || chn0 < 0 || chn0 >= PV_MAX_CH) return -1;
+    pthread_mutex_lock(&p->lock);
+
+    const char *res = "OK";
+    if (!enable) {                 /* 关闭变焦 → 复位默认全画面 */
+        cx = 500; cy = 500; ratio = PV_ZOOM_MIN;
+        mhal_vout_set_crop(chn0, 0, 0, 1000, 1000);
+    } else {
+        if (ratio >= PV_ZOOM_MAX) { ratio = PV_ZOOM_MAX; res = "Exceeds zoom capabilities"; }
+        else if (ratio < PV_ZOOM_MIN) ratio = PV_ZOOM_MIN;
+
+        /* ROI 千分比:等比缩小(宽高同因子 → 保持原画宽高比) */
+        int cw = (int)(1000L * PV_ZOOM_MIN / ratio);   /* ratio 200 → 500(半宽) */
+        int ch = cw;
+        int x = cx - cw / 2, y = cy - ch / 2;
+        int clamped = 0;
+        if (x < 0)            { x = 0; clamped = 1; }
+        if (x > 1000 - cw)    { x = 1000 - cw; clamped = 1; }
+        if (y < 0)            { y = 0; clamped = 1; }
+        if (y > 1000 - ch)    { y = 1000 - ch; clamped = 1; }
+        cx = x + cw / 2; cy = y + ch / 2;              /* 回填实际中心 */
+        if (clamped && res[0] == 'O') res = "Exceeds the zoom range";   /* 平移越界被夹 */
+        mhal_vout_set_crop(chn0, x, y, cw, ch);
+    }
+
+    p->zoom[chn0].enable = enable ? 1 : 0;
+    p->zoom[chn0].cx = cx; p->zoom[chn0].cy = cy; p->zoom[chn0].ratio = ratio;
+
+    if (out_cx) *out_cx = cx;
+    if (out_cy) *out_cy = cy;
+    if (out_ratio) *out_ratio = ratio;
+    if (out_result) *out_result = res;
+    pthread_mutex_unlock(&p->lock);
+    return 0;
+}
+
+int nvr_preview_get_zoom(nvr_preview_t *p, int chn0, int *enable, int *cx, int *cy, int *ratio)
+{
+    if (!p || chn0 < 0 || chn0 >= PV_MAX_CH) return -1;
+    pthread_mutex_lock(&p->lock);
+    if (enable) *enable = p->zoom[chn0].enable;
+    if (cx)     *cx     = p->zoom[chn0].cx;
+    if (cy)     *cy     = p->zoom[chn0].cy;
+    if (ratio)  *ratio  = p->zoom[chn0].ratio;
+    pthread_mutex_unlock(&p->lock);
+    return 0;
 }
 
 void nvr_preview_set_icons(nvr_preview_t *p, int chn, unsigned icon_bits)
@@ -271,7 +335,11 @@ static mhal_layout_t mode_to_mhal(int mode, int *win_count)
     switch (mode) {
         case 1:  *win_count = 1;  return MHAL_LAYOUT_1;
         case 4:  *win_count = 4;  return MHAL_LAYOUT_4;
+        case 8:  *win_count = 8;  return MHAL_LAYOUT_8;   /* 1大+7小 */
         case 9:  *win_count = 9;  return MHAL_LAYOUT_9;
+        case 25: *win_count = 25; return MHAL_LAYOUT_25;  /* 5x5 */
+        case 36: *win_count = 36; return MHAL_LAYOUT_36;  /* 6x6 */
+        case 16: *win_count = 16; return MHAL_LAYOUT_16;
         default: *win_count = 16; return MHAL_LAYOUT_16;
     }
 }
@@ -286,8 +354,8 @@ int nvr_preview_set_mode(nvr_preview_t *p, int mode, int page)
     p->new_api_active = 1;
 
     if (mode == 0) {
-        /* 停所有解码/隐藏所有窗 */
-        for (int c = 0; c < PV_MAX_CH; c++) mhal_vout_unbind(c);
+        /* 离开 LiveView：关所有解码(拉流/录像不动),隐藏所有窗 */
+        for (int c = 0; c < PV_MAX_CH; c++) nvr_stream_set_display(p->cfg.sm, c, -1);
         for (int w = 0; w < PV_MAX_WIN; w++) p->win2chn[w] = -1;
         p->display_mode = 0;
         p->display_page = (page > 0 ? page : p->display_page);
@@ -304,23 +372,66 @@ int nvr_preview_set_mode(nvr_preview_t *p, int mode, int page)
     p->display_page = (page > 0 ? page : 1);
     p->win_count = wc;
 
+    /* 先算出本页可见集(格 w ← map0[base+w]) */
     int base = (p->display_page - 1) * wc;
+    int vis[PV_MAX_CH]; for (int c = 0; c < PV_MAX_CH; c++) vis[c] = 0;
     for (int w = 0; w < PV_MAX_WIN; w++) p->win2chn[w] = -1;
     for (int w = 0; w < wc; w++) {
         int idx = base + w;
         int chn = (idx >= 0 && idx < PV_MAX_CH) ? p->map0[idx] : -1;
         p->win2chn[w] = chn;
-        if (chn >= 0) { mhal_vout_bind(w, chn); compose_osd(p, w); }
+        if (chn >= 0) vis[chn] = 1;
     }
-
-    /* 单格全屏 → 主码流；多格 → 子码流 */
+    /* ★ 解码门控(监控通用做法):拉流对所有录像通道常开,解码(硬件VPU)只给可见格。
+     *   先关"本页不可见"的解码 → 释放 VPU 预算,再开可见的(避免换页时预算瞬时叠加被拒)。
+     *   nvr_stream_set_display 只切解码+绑窗,RTSP 会话不动 → 切布局/翻页无重连开销。 */
+    for (int c = 0; c < PV_MAX_CH; c++)
+        if (!vis[c]) nvr_stream_set_display(p->cfg.sm, c, -1);
+    /* 先定各可见通道的解码码流(单宫格=主/多宫格=子),再开解码 → 直接按目标码流开一次(避免双开)。 */
     int st = (mode == 1) ? NVR_STREAM_MAIN : NVR_STREAM_SUB;
     for (int w = 0; w < wc; w++)
-        if (p->win2chn[w] >= 0 && p->cfg.sm)
-            nvr_stream_switch_stream(p->cfg.sm, p->win2chn[w], st, NULL);
+        if (p->win2chn[w] >= 0 && p->cfg.cm)
+            nvr_chan_set_stream(p->cfg.cm, p->win2chn[w], st);
+    for (int w = 0; w < wc; w++)
+        if (p->win2chn[w] >= 0) {
+            nvr_stream_set_display(p->cfg.sm, p->win2chn[w], w);   /* 可见:按 decode_stream 开解码(内部各自成图 + 喂缓存关键帧秒出) */
+            compose_osd(p, w);
+        }
+    mhal_vout_commit();   /* 兜底再成图一次(确保窗口矩形/可见性生效) */
 
     pthread_mutex_unlock(&p->lock);
     return 0;
+}
+
+/* 阻塞等待:轮询直到**任一可见格已出图**(解码器喂到帧)或超时。切宫格/切码流接口用此"等图再回复"。
+ * 不持锁轮询(先快照可见通道),避免阻塞其它 preview 操作。多宫格只要有一格出图即返回。 */
+int nvr_preview_wait_ready(nvr_preview_t *p, int timeout_ms)
+{
+    if (!p || !p->cfg.sm) return -1;
+    int vis[PV_MAX_WIN]; int nvis = 0;
+    pthread_mutex_lock(&p->lock);
+    for (int w = 0; w < p->win_count && w < PV_MAX_WIN; w++)
+        if (p->win2chn[w] >= 0) vis[nvis++] = p->win2chn[w];
+    pthread_mutex_unlock(&p->lock);
+    if (nvis == 0) return 0;                 /* 无可见格 → 立即返回 */
+
+    if (timeout_ms <= 0) timeout_ms = NVR_DEF_WAIT_READY_MS;
+    if (timeout_ms > NVR_DEF_WAIT_READY_MS) timeout_ms = NVR_DEF_WAIT_READY_MS;/* 上限 */
+    /* "喂到帧"只是送进解码器,真正上屏还要解码+合成一段时间。就绪后再沉降一小段(封顶不超总超时)。 */
+    const int settle_ms = NVR_DEF_SETTLE_MS;
+    int waited = 0, step = 20;
+    while (waited < timeout_ms) {
+        for (int i = 0; i < nvis; i++)
+            if (nvr_stream_display_ready(p->cfg.sm, vis[i])) {
+                int extra = settle_ms;
+                if (waited + extra > timeout_ms) extra = timeout_ms - waited;   /* 不超总超时 */
+                if (extra > 0) usleep((useconds_t)extra * 1000);                /* 沉降:等真上屏 */
+                return 0;
+            }
+        usleep((useconds_t)step * 1000);
+        waited += step;
+    }
+    return 1;   /* 超时(最多 2s) */
 }
 
 int nvr_preview_set_mapping(nvr_preview_t *p, const int *map1based, int n)
@@ -347,7 +458,7 @@ int nvr_preview_set_ext(nvr_preview_t *p, const nvr_pv_ext_t *b, int n)
         int w = pv_thousandths_to_px(b[i].w, p->disp_w);
         int h = pv_thousandths_to_px(b[i].h, p->disp_h);
         mhal_vout_bind_rect(b[i].chn0, x, y, w, h);
-        if (p->cfg.sm) nvr_stream_switch_stream(p->cfg.sm, b[i].chn0, b[i].stream, NULL);
+        if (p->cfg.cm) nvr_chan_set_stream(p->cfg.cm, b[i].chn0, b[i].stream);   /* 悬浮块指定码流 */
         p->ext[p->ext_n++] = b[i];
     }
     pthread_mutex_unlock(&p->lock);

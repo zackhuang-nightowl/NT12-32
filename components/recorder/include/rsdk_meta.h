@@ -23,8 +23,8 @@ enum rsdk_doc_type {
     RSDK_DOC_FACE     = 4,   /* 人脸 */
     RSDK_DOC_SNAP     = 5,   /* 抓拍描述 */
     RSDK_DOC_ALARM    = 6,   /* 报警/联动 */
-    RSDK_DOC_POS      = 7,    /* POS 交易 */
-    RSDK_DOC_CLOUD    = 8     /* 云存上传状态（见 rsdk_cloud.h；仅追加，不改盘上格式） */
+    RSDK_DOC_POS      = 7,   /* POS 交易 */
+    RSDK_DOC_CLOUD    = 8    /* 云存上传状态(见 rsdk_cloud.h;仅追加,不改盘上格式) */
 };
 
 /* ---- 写入键: 全部由调用方提供, SDK 不从 JSON 里猜 ---- */
@@ -97,8 +97,7 @@ RSDK_API int        rsdk_meta_purge_chunk(void *ctx, int disk, uint64_t chunk);
 
 RSDK_API void       rsdk_meta_free_list(rsdk_metadoc_list_t *lst);
 
-/* 暴露底层 sqlite3* 句柄（供 rsdk_cloud 就地 UPDATE 云存状态行，复用同一连接/WAL 写者）。
- * 返回 void*（实为 sqlite3*）；ctx 无效返回 NULL。 */
+/* 取内部 sqlite3*(ctx 即 db;供 rsdk_cloud 等自跑 SQL)。 */
 RSDK_API void      *rsdk_meta_db(void *ctx);
 
 #ifdef __cplusplus

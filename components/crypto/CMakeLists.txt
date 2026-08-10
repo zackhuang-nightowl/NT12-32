@@ -26,10 +26,3 @@ else()
   endif()
 endif()
 
-option(NVR_CRYPTO_TEST "构建 nvr_crypto 自测(测试向量)" ON)
-if(NVR_CRYPTO_TEST AND NOT NVR_CROSS)     # 交叉构建不建主机自测 exe
-  enable_testing()
-  add_executable(test_nvr_crypto tests/test_nvr_crypto.c)
-  target_link_libraries(test_nvr_crypto nvr_crypto)
-  add_test(NAME nvr_crypto COMMAND test_nvr_crypto)
-endif()

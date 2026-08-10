@@ -15,30 +15,35 @@ static int next_nal(const uint8_t *d, int len, int from, int *sc_len)
 
 void nal_classify(const uint8_t *data, int len, int codec, nal_class_t *out)
 {
-    out->is_key = 0; out->is_param = 0; out->frame_type = 1 /*P*/;
+    out->is_key = 0; out->is_param = 0; out->has_param = 0; out->frame_type = 1 /*P*/;
     if (!data || len < 5) return;
 
     int sc = 0, off = next_nal(data, len, 0, &sc);
     if (off < 0) off = 0;                 /* 无起始码：当作裸 NAL 从头 */
 
-    /* 遍历 NAL：遇到 VCL(图像)即定帧类型；遇到参数集标记 is_param/is_key */
+    /* 遍历**整帧所有** NAL(不能只看第一个:有的相机把 SPS+PPS+I帧合在一帧发)。
+     * 分别记录:见到参数集 / 见到 VCL slice / VCL 是否 IDR。 */
+    int saw_param = 0, saw_vcl = 0, vcl_key = 0;
     while (off >= 0 && off < len) {
         uint8_t nh = data[off];
         if (codec == 0) {                 /* H.264: nal_type = nh & 0x1F */
             int t = nh & 0x1F;
-            if (t == 7 || t == 8) { out->is_param = 1; out->is_key = 1; }     /* SPS/PPS */
-            else if (t == 5)      { out->frame_type = 0; out->is_key = 1; return; } /* IDR */
-            else if (t == 1)      { out->frame_type = 1; return; }            /* non-IDR */
+            if (t == 7 || t == 8)        saw_param = 1;                 /* SPS/PPS */
+            else if (t == 5)           { saw_vcl = 1; vcl_key = 1; }    /* IDR */
+            else if (t >= 1 && t <= 4)   saw_vcl = 1;                   /* non-IDR slice(I/P未知) */
         } else {                          /* H.265: nal_type = (nh>>1) & 0x3F */
             int t = (nh >> 1) & 0x3F;
-            if (t >= 32 && t <= 34) { out->is_param = 1; out->is_key = 1; }   /* VPS/SPS/PPS */
-            else if (t >= 16 && t <= 23) { out->frame_type = 0; out->is_key = 1; return; } /* IRAP/IDR */
-            else if (t <= 9 || (t >= 10 && t <= 15)) { out->frame_type = 1; return; }      /* trailing/leading */
+            if (t >= 32 && t <= 34)       saw_param = 1;                /* VPS/SPS/PPS */
+            else if (t >= 16 && t <= 23){ saw_vcl = 1; vcl_key = 1; }   /* IRAP/IDR */
+            else if (t <= 15)             saw_vcl = 1;                  /* trailing/leading slice */
         }
         int nsc = 0, nx = next_nal(data, len, off + 1, &nsc);
         if (nx < 0) break;
         off = nx;
     }
-    /* 只有参数集、无 VCL：保持 is_key=1/is_param=1、frame_type=I(供门控起录) */
-    if (out->is_param) out->frame_type = 0;
+    out->has_param  = saw_param;
+    out->is_param   = saw_param && !saw_vcl;             /* 纯参数集(无 slice) → 可扣留缓存 */
+    /* 关键帧:IDR;或"参数集+slice"合并 AU(参数集紧邻其后的 slice 即该 GOP 关键帧);或纯参数集(供起录) */
+    out->is_key     = vcl_key || saw_param;
+    out->frame_type = (vcl_key || saw_param || !saw_vcl) ? 0 /*I*/ : 1 /*P*/;
 }

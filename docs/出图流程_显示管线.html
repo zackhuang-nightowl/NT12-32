@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NVR 出图流程 · 显示管线（含数字变焦）</title>
+<style>
+  :root{
+    --bg:#0f1419; --panel:#161b22; --panel2:#1c2330; --ink:#d6dee8; --dim:#8b98a8;
+    --line:#2a3240; --acc:#4ea1ff; --acc2:#37c98b; --warn:#e6b450; --hot:#ff6b6b;
+    --mono:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.65 -apple-system,"PingFang SC","Microsoft YaHei",Segoe UI,Roboto,sans-serif;}
+  a{color:var(--acc);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{display:flex;max-width:1200px;margin:0 auto}
+  /* sidebar */
+  nav{position:sticky;top:0;align-self:flex-start;width:220px;height:100vh;overflow:auto;
+    padding:22px 14px;border-right:1px solid var(--line);font-size:13.5px}
+  nav h1{font-size:14px;color:var(--acc);margin:0 0 4px}
+  nav .sub{color:var(--dim);font-size:11.5px;margin-bottom:16px}
+  nav a{display:block;color:var(--dim);padding:4px 8px;border-radius:6px;margin:1px 0}
+  nav a:hover{background:var(--panel2);color:var(--ink);text-decoration:none}
+  nav a.new::after{content:"NEW";float:right;font-size:9px;background:var(--acc2);color:#00160c;
+    padding:0 5px;border-radius:8px;font-weight:700;line-height:16px}
+  /* content */
+  main{flex:1;min-width:0;padding:26px 34px 120px}
+  h2{font-size:21px;margin:38px 0 12px;padding-top:10px;border-top:1px solid var(--line);color:#fff}
+  h2:first-of-type{border-top:0;margin-top:8px}
+  h2 .n{color:var(--acc);font-variant-numeric:tabular-nums;margin-right:10px}
+  h3{font-size:16px;margin:22px 0 8px;color:var(--acc2)}
+  p{margin:10px 0}
+  code{font-family:var(--mono);background:var(--panel2);padding:1px 6px;border-radius:5px;font-size:13px;color:#e8c07d}
+  pre{background:#0b0f14;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+    overflow:auto;font-family:var(--mono);font-size:12.5px;line-height:1.55;color:#cdd6e4}
+  pre .c{color:#5c6b7a} pre .k{color:#8ab4ff} pre .g{color:var(--acc2)}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px;
+    background:var(--panel);border-radius:10px;overflow:hidden}
+  th,td{border:1px solid var(--line);padding:8px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:#fff;font-weight:600}
+  td code{background:#0b0f14}
+  .lead{color:var(--dim);font-size:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:14px 0}
+  .tag{display:inline-block;font-size:11px;padding:1px 8px;border-radius:20px;font-weight:600;vertical-align:middle}
+  .t-new{background:rgba(55,201,139,.16);color:var(--acc2);border:1px solid rgba(55,201,139,.4)}
+  .t-warn{background:rgba(230,180,80,.14);color:var(--warn);border:1px solid rgba(230,180,80,.35)}
+  .t-hot{background:rgba(255,107,107,.14);color:var(--hot);border:1px solid rgba(255,107,107,.35)}
+  .callout{border-left:3px solid var(--warn);background:rgba(230,180,80,.07);padding:10px 14px;border-radius:0 8px 8px 0;margin:12px 0}
+  .callout.new{border-color:var(--acc2);background:rgba(55,201,139,.07)}
+  /* pipeline diagram */
+  .flow{display:flex;flex-wrap:wrap;align-items:stretch;gap:8px;margin:16px 0}
+  .stage{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;min-width:120px;flex:1}
+  .stage b{display:block;color:#fff;font-size:13.5px}
+  .stage span{color:var(--dim);font-size:11.5px;font-family:var(--mono)}
+  .arrow{display:flex;align-items:center;color:var(--acc);font-size:20px;font-weight:700}
+  .stage.crop{border-color:var(--acc2);box-shadow:0 0 0 1px rgba(55,201,139,.25)}
+  .kbd{font-family:var(--mono);font-size:12px;color:var(--acc)}
+  .foot{color:var(--dim);font-size:12.5px;margin-top:30px;border-top:1px solid var(--line);padding-top:14px}
+  @media(max-width:820px){nav{display:none}main{padding:20px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav>
+  <h1>NVR 出图流程</h1>
+  <div class="sub">显示管线 · NT98633/NA51090</div>
+  <a href="#s0">0 · 总览拓扑</a>
+  <a href="#s1">1 · 拉流</a>
+  <a href="#s2">2 · NAL / 帧路由</a>
+  <a href="#s3">3 · 分辨率决策</a>
+  <a href="#s4">4 · 硬解配置</a>
+  <a href="#s5">5 · 缩放 / 下采样</a>
+  <a href="#s6" class="new">6 · 数字变焦裁剪</a>
+  <a href="#s7">7 · 出图 / 分屏</a>
+  <a href="#s8">8 · 预算门控</a>
+  <a href="#s9">9 · 预览编排</a>
+  <a href="#s10">10 · HDAL 调用清单</a>
+  <a href="#s11">11 · 编译门控</a>
+</nav>
+
+<main>
+  <p class="lead">平台 Novatek NT98633 / NA51090（aarch64，HDAL）· 从 RTSP 拉流到 HDMI 出图的完整管线，含解码配置、缩放/下采样、buffer、数字变焦裁剪与驱动调用。代码：<code>components/streaming/</code>、<code>platform/media_hal/</code>、<code>app/preview/</code>。</p>
+
+  <!-- 0 -->
+  <h2 id="s0"><span class="n">0</span>总览拓扑</h2>
+  <p>三个外部入口（GUI→8089 / APP→TUTK P2P / 配网→BLE）最终都进 <code>nvr_cmd_dispatch</code>；出图链路是每通道一条 <code>videodec → videoproc(VPE) → videoout(HDMI)</code> 硬件路径。</p>
+  <div class="flow">
+    <div class="stage"><b>RTSP 拉流</b><span>NopRtspClient<br>主+子双路</span></div>
+    <div class="arrow">→</div>
+    <div class="stage"><b>NAL / 路由</b><span>关键帧门控<br>stream_route_video</span></div>
+    <div class="arrow">→</div>
+    <div class="stage"><b>硬解 videodec</b><span>H264/H265<br>mhal_vdec_send</span></div>
+    <div class="arrow">→</div>
+    <div class="stage crop"><b>VPE videoproc</b><span>IN_CROP 变焦<br>+ 缩放到格子</span></div>
+    <div class="arrow">→</div>
+    <div class="stage"><b>videoout</b><span>分屏合成<br>HDMI</span></div>
+  </div>
+  <p>并发用递归锁 <code>mhal_lock/unlock</code> 串行化 <code>g_disp</code>；切宫格用 <code>defer_begin/end</code> 批量成图（9 格一起出、只闪一次）。</p>
+
+  <!-- 1 -->
+  <h2 id="s1"><span class="n">1</span>拉流（components/streaming）</h2>
+  <p>RTSP 客户端 <code>nop::NopRtspClient</code>（外部 <code>OnvifClientLibrary</code>/<code>libonvifclient.a</code>，头 <code>nop_rtsp.h</code>）。</p>
+  <table>
+    <tr><th>项</th><th>值</th><th>位置</th></tr>
+    <tr><td>全局缓冲池</td><td><code>nop::rtspLibInit(256)</code>（库级一次性，256 单元）</td><td>stream_puller.cpp:22</td></tr>
+    <tr><td>每通道 puller</td><td>主 <code>pmain</code> + 子 <code>psub</code> 各一个客户端</td><td>:143-144</td></tr>
+    <tr><td>传输 / 超时</td><td>RTP over TCP；连接 5s / 无数据 10s</td><td>:114-116</td></tr>
+    <tr><td>codec</td><td>AUTO 读 SDP：H264=1 / H265=4</td><td>:15,49-52</td></tr>
+    <tr><td>帧回调</td><td><code>on_video(data,len,ts,seq,ud)</code> 裸字节 → <code>stream_route_video</code></td><td>:61-71</td></tr>
+  </table>
+  <p><b>buffer（拉流侧）</b>：无独立帧队列，回调内<b>同步</b>处理；仅参数集缓存 <code>par[512]</code> + 动态关键帧缓存 <code>kf</code>。</p>
+
+  <!-- 2 -->
+  <h2 id="s2"><span class="n">2</span>NAL 处理与帧路由</h2>
+  <p><code>nal_classify</code> 扫 Annex-B 起始码，识别 SPS/PPS/VPS 与 IDR，输出 <code>is_key/is_param/frame_type</code>。<code>stream_route_video</code> 两条扇出：</p>
+  <table>
+    <tr><th>扇出</th><th>行为</th></tr>
+    <tr><td><b>解码 / 出图</b></td><td>仅 <code>decode_stream</code> 那一路喂解码器（单通道一个硬解器）；<b>从 IDR 起播</b>（<code>live_synced</code> 前丢 P 帧）→ <code>mhal_vdec_send</code></td></tr>
+    <tr><td><b>录像</b></td><td>主+子都写，各自 keyframe 门控；写<b>原始帧</b>（非拼接版）</td></tr>
+  </table>
+  <p><b>主/子选择（核心下采样决策）</b>：默认 <code>decode_stream = SUB</code>（多宫格 720p）；单画面切主码流（8K/1080p）。两路常拉，切换即时无重连。</p>
+
+  <!-- 3 -->
+  <h2 id="s3"><span class="n">3</span>分辨率决策（resolve_dim）</h2>
+  <table>
+    <tr><th>来源</th><th>维度</th></tr>
+    <tr><td>ONVIF <code>enc_w/enc_h</code> 已知</td><td>精确值优先</td></tr>
+    <tr><td>子码流回落</td><td><b>1280×720</b></td></tr>
+    <tr><td>主码流回落</td><td><b>7680×2176</b>（8K）</td></tr>
+    <tr><td>fps</td><td>默认 20</td></tr>
+  </table>
+
+  <!-- 4 -->
+  <h2 id="s4"><span class="n">4</span>硬解配置（mhal_vdec → hd_videodec）</h2>
+  <pre><span class="c">// 路径建立（dev 0, id=chn）</span>
+<span class="k">hd_videodec_open</span>(IN(0,chn), OUT(0,chn))   → dec_path
+<span class="k">hd_videoproc_open</span>(IN(chn,0), OUT(chn,0))  → proc_path (VPE)
+<span class="k">hd_videoout_open</span>(IN(0,chn), OUT(0,0))     → vout_path
+<span class="k">hd_videodec_bind</span>(dec→proc)  <span class="k">hd_videoproc_bind</span>(proc→vout)</pre>
+  <ul>
+    <li><b>对齐</b>：解码维度 <b>64×64 对齐</b>（CTU 要求，否则解不出帧）；上限 8192²，默认 1920×1088。</li>
+    <li><b>解码池</b> <code>data_pool[0]</code> 全分辨率、环深 <b>3</b>；<code>bs_counts=8</code>，<code>max_bitrate=8Mbps</code>，像素 <b>NV12</b>。</li>
+    <li><b>DDR 分池</b>：比特流→DDR0、全分辨率→DDR1、sub-yuv→DDR1（放错就无图）。</li>
+  </ul>
+  <p>送帧 <code>hd_videodec_send_list</code>（Annex-B，fourcc <code>VSTM</code>）；抓拍 <code>hd_videodec_pull_out_buf</code>。</p>
+
+  <!-- 5 -->
+  <h2 id="s5"><span class="n">5</span>缩放 / 下采样（两级）</h2>
+  <h3>5.1 解码器级 sub-yuv 下采样（仅 8K，宽 &gt; 4096）</h3>
+  <p>8K 主码流超 VPE 输入上限（~4K）→ 命解码器直吐 1/2 小图：<code>SUB_YUV_RATIO = 2x</code>，<b>7680×2176 → 3840×1088</b>。下采样输出走 <code>data_pool[1]</code> RATIO 池（DDR1）；8K 比特流 <code>max_bs_size=2MB × bs_counts=4 = 8MB</code>（装下 IDR 又不撑爆 20.3MB DIN 池）。</p>
+  <h3>5.2 VPE 级 source→cell 缩放（每帧上屏）</h3>
+  <p><code>apply_window</code>：<code>hd_videoproc_set(OUT, rect=格子)</code> 把解码源 <code>d-&gt;w×d-&gt;h</code> 缩到目标格（如 1080p 源 → 16 宫格 480×270）。</p>
+
+  <!-- 6 · NEW -->
+  <h2 id="s6"><span class="n">6</span>数字变焦裁剪（ZoomPan）<span class="tag t-new">已实现</span></h2>
+  <p>接口 <code>X_NightOwl_set/getChannelZoomPan</code>。<b>机制</b>：在 VPE 输入端设裁剪 ROI（<code>HD_VIDEOPROC_PARAM_IN_CROP</code>），VPE 只取 ROI 再放大填满窗口 = 数字变焦。相当于在 §5.2 的 source→cell 缩放<b>之前</b>，先把"源"从整帧收窄成一块 ROI。</p>
+
+  <div class="card">
+    <b>接口约定</b>（坐标千分比 0..1000，ratio 100=1.00x，MAX 500=5.0x）
+    <table>
+      <tr><th>字段</th><th>含义</th></tr>
+      <tr><td><code>CenterPointX/Y</code></td><td>ROI 中心（原画千分比）</td></tr>
+      <tr><td><code>ZoomRatio</code></td><td>倍率，100=原画；≥500 → 夹到 500 且 <code>result=Exceeds zoom capabilities</code></td></tr>
+      <tr><td><code>enable=false</code></td><td>复位全画面（500,500,100）</td></tr>
+      <tr><td>返回 <code>result</code></td><td><code>OK</code> / <code>Exceeds the zoom range</code>(平移越界被夹) / <code>Exceeds zoom capabilities</code>(超倍率)</td></tr>
+    </table>
+  </div>
+
+  <h3>三层实现</h3>
+  <table>
+    <tr><th>层</th><th>文件</th><th>职责</th></tr>
+    <tr><td>handler</td><td><code>nvr_cmd_display.c</code></td><td><code>cmd_..._setChannelZoomPan</code> 解析入参 → 调 preview → 回填实际生效值</td></tr>
+    <tr><td>preview</td><td><code>nvr_preview.c</code></td><td><code>nvr_preview_set_zoom</code>：算 ROI（等比、夹边界）、存每通道状态</td></tr>
+    <tr><td>mhal</td><td><code>mhal_vout.c</code></td><td><code>mhal_vout_set_crop</code> → <code>hd_videoproc_set(IN_CROP)</code> 真驱动 VPE</td></tr>
+  </table>
+
+  <h3>ROI 数学（preview 层）</h3>
+  <pre><span class="c">// ratio: 100=1x … 500=5x ; 坐标千分比</span>
+<span class="k">if</span> (ratio &gt;= 500) { ratio = 500; result = <span class="g">"Exceeds zoom capabilities"</span>; }
+cw = 1000 * 100 / ratio;          <span class="c">// ROI 宽(千分):ratio 200 → 500(半宽)；ch=cw 保持宽高比</span>
+x  = clamp(cx - cw/2, 0, 1000-cw);<span class="c">// 中心夹取,越界→ result="Exceeds the zoom range"</span>
+y  = clamp(cy - ch/2, 0, 1000-ch);
+cx = x + cw/2;  cy = y + ch/2;    <span class="c">// 回填实际生效中心</span>
+<span class="k">mhal_vout_set_crop</span>(chn, x, y, cw, ch);   <span class="c">// 千分比 ROI</span></pre>
+
+  <h3>驱动（mhal 层）</h3>
+  <pre><span class="c">// 千分比 → 源像素(d->w/h 已 64 对齐),4 对齐并夹在帧内</span>
+HD_VIDEOPROC_CROP crop = {0};
+crop.mode      = <span class="k">HD_CROP_ON</span>;          <span class="c">// 恒 ON;取消变焦=全帧 rect,不切模式</span>
+crop.win.coord = {0,0};              <span class="c">// {0,0}=像素坐标</span>
+crop.win.rect  = { cx, cy, cw, ch }; <span class="c">// 源 ROI</span>
+<span class="k">hd_videoproc_set</span>(proc_path, <span class="k">HD_VIDEOPROC_PARAM_IN_CROP</span>, &amp;crop);
+<span class="k">if</span> (!crop_on) { <span class="k">hd_videoproc_start</span>(proc_path); crop_on = 1; } <span class="c">// OFF→ON 只 start 一次</span></pre>
+  <div class="callout new">
+    <b>要点</b>：裁剪窗恒用 <code>HD_CROP_ON</code>，"取消变焦"= 设全帧 rect（不切模式，免重启）；模式仅首次 OFF→ON 切一次并 <code>start</code>。ROI 按源画面 4 对齐并夹在帧内，保持原画宽高比。掉电/重启回默认 <code>500,500,100</code>（每通道状态存 preview，不落 DB）。
+  </div>
+  <div class="callout">
+    <b>注</b>：数字变焦作用于<b>单画面</b>（该通道解码器上屏那一路）。<code>FocusPointXY</code> v1 未单独锚定（GUI 已据焦点算好 Center 下发）。切主/子码流会重开解码器 → 变焦复位，需 GUI 重下发。
+  </div>
+
+  <!-- 7 -->
+  <h2 id="s7"><span class="n">7</span>出图 / 分屏（mhal_vout → hd_videoout）</h2>
+  <p><b>HDMI 模式</b>：3840×2160P30 / 1920×1080P60 / 1280×720P60（<code>input_dim</code> 必须显式，AUTO 会退到 720×576 越界）。</p>
+  <p><b>分屏 rect</b>：方阵 1/4/9/16/25/36 → n=1..6 均分；8 宫格 = 1 大(3×3)+7 小。越界窗口<b>隐藏</b>（visible=0）而非下发屏外矩形。</p>
+  <p><b>成图</b> <code>mhal_vout_commit</code>：先 <code>stop_list</code> 旧集合 → 再 <code>start_list</code> 新集合（dec→proc→vout 顺序），任一时刻只需 1 块 large graph（根治 "Can't extend"）。<b>defer</b> 批量：切宫格 <code>begin/end</code> 包住所有 open/close，一次成图。<b>清黑</b>：<code>CLEAR_WIN</code> 填 UYVY 中性黑 <code>0x00800080</code>。</p>
+  <p><span class="tag t-warn">桩</span> OSD <code>mhal_vout_osd</code> 目前是 TODO（暂不做，后补）。</p>
+
+  <!-- 8 -->
+  <h2 id="s8"><span class="n">8</span>硬解预算门控（mhal_budget）</h2>
+  <p>总量 <code>746.496 Mpix/s</code>（=1920×1080×360，数据手册硬解上限）；开销 <code>cost=w×h×fps</code>；<code>try_reserve</code> 超预算 → 拒绝该路预览（<b>录像不受影响</b>），返回 <code>MHAL_VDEC_EBUDGET</code> → UI "仅录像不预览"。</p>
+
+  <!-- 9 -->
+  <h2 id="s9"><span class="n">9</span>预览编排（app/preview/nvr_preview.c）</h2>
+  <p>唯一调用 <code>mhal_vout_*</code> 的模块。<code>set_mode(mode,page)</code>：<code>mode=0</code> 退出 LiveView（停解码保留拉流/录像）；否则先关不可见页省预算 → 按 mode 选主/子码流 → <code>set_display</code> 开解码 → <code>commit</code>。切页/切宫格<b>无重连</b>。<code>wait_ready</code> 轮询 <code>display_ready</code>（20ms/次，超时 2000ms），供 "等图出了再回复"。</p>
+
+  <!-- 10 -->
+  <h2 id="s10"><span class="n">10</span>HDAL 驱动调用清单</h2>
+  <table>
+    <tr><th>阶段</th><th>调用</th></tr>
+    <tr><td>初始化</td><td><code>hd_common_init</code> · <code>hd_videodec/videoproc/videoout_init</code> · <code>hd_videoout_open(CTRL)</code> · <code>get(SYSCAPS/FB_FMT)</code> · <code>set(MODE)</code></td></tr>
+    <tr><td>开解码</td><td><code>hd_videodec_open</code> · <code>hd_videoproc_open</code> · <code>hd_videoout_open</code> · <code>*_bind</code></td></tr>
+    <tr><td>配解码</td><td><code>hd_videodec_set(PATH_CONFIG)</code> · <code>vendor_videodec_set(SUB_YUV_RATIO)</code> · <code>vendor_videoproc_set(SUB_RATIO_THLD)</code></td></tr>
+    <tr><td>送帧</td><td><code>hd_videodec_send_list</code></td></tr>
+    <tr><td>缩放/窗口</td><td><code>hd_videoproc_set(OUT rect)</code> · <code>hd_videoout_set(IN_WIN_ATTR)</code></td></tr>
+    <tr><td class="new"><b>数字变焦</b></td><td><code>hd_videoproc_set(IN_CROP)</code> · <code>hd_videoproc_start</code>（首次切模式）</td></tr>
+    <tr><td>成图</td><td><code>hd_videodec_start_list</code>/<code>stop_list</code> · <code>hd_videoproc_*</code> · <code>hd_videoout_*</code></td></tr>
+    <tr><td>清屏</td><td><code>hd_videoout_set(CLEAR_WIN)</code></td></tr>
+    <tr><td>抓拍</td><td><code>hd_videodec_pull_out_buf</code> / <code>release_out_buf</code></td></tr>
+  </table>
+
+  <!-- 11 -->
+  <h2 id="s11"><span class="n">11</span>编译门控 / real vs stub</h2>
+  <ul>
+    <li>仅 <code>NVR_WITH_ONBOARD=ON</code> 编 <code>platform/media_hal</code>，链接 <code>libhdal.so</code>+<code>libvendor_media.so</code>（aarch64 NT98633）；需 <code>-DBSP_ROOT=&lt;na51090_linux_sdk&gt;</code>。</li>
+    <li>主机只能 <code>-fsyntax-only</code> 检查。数字变焦代码已对真实 BSP 头 syntax 通过。</li>
+    <li>DIN 池（DISP_DEC_IN）≈ 20.3MB；8K 路 <code>bs 4×2MB=8MB</code> 稳在池内。</li>
+  </ul>
+
+  <div class="foot">
+    生成 2026-08-06 · 配套 Markdown：<code>docs/出图流程_显示管线.md</code> · 功能清单：<code>docs/NVR功能清单.md</code> · 改动记录：<code>docs/修改日志.md</code><br>
+    数字变焦(§6)已按 nop 接口 <code>X_NightOwl_setChannelZoomPan</code> 接成真实现（mhal <code>IN_CROP</code> 驱动）。
+  </div>
+</main>
+</div>
+</body>
+</html>

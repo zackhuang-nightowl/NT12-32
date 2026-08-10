@@ -22,6 +22,11 @@ target_include_directories(happytime_rtsp PUBLIC
     ${CMAKE_CURRENT_LIST_DIR}/../openssl/include        # 工程内 vendored openssl 头
 )
 target_compile_definitions(happytime_rtsp PRIVATE
-    EPOLL HTTPS MEDIA_SUPPORT MPEG4_SUPPORT AUDIO_SUPPORT)
+    EPOLL HTTPS MEDIA_SUPPORT MPEG4_SUPPORT AUDIO_SUPPORT
+    # 本库只做 RTSP 客户端；http_cln.cpp 里的 ONVIF 事务函数 http_onvif_trans 是死代码
+    # (RTSP 侧无人调用)，且与 nop ONVIF-client 的同名 6 参版本冲突(--allow-multiple-definition
+    # 会误取本库的 4 参版本，导致 NVR 侧所有 ONVIF 请求 ABI 错位失败)。改名让它不再导出，
+    # 全局 http_onvif_trans 只剩 nop client 的正确版本。
+    http_onvif_trans=ht_rtsp_onvif_trans_unused)
 target_compile_options(happytime_rtsp PRIVATE -O2 -w -fpermissive)
 set_target_properties(happytime_rtsp PROPERTIES CXX_STANDARD 14)

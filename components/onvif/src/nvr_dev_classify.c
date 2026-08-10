@@ -3,6 +3,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>   /* strtol —— URL %XX 解码 */
 
 /* 大小写不敏感子串查找 */
 static const char *ci_strstr(const char *hay, const char *needle)
@@ -49,6 +50,28 @@ static void extract_serial(const char *scopes, char *out, size_t cap)
     out[i] = 0;
 }
 
+/* 从 scopes 的 "<key>" 段后取值（到 '/' 或空白为止），并做 URL %XX 解码
+ * （ONVIF scopes 把空格等编码为 %20）。用于 /hardware/(型号)、/name/(设备名)。 */
+static void extract_scope_val(const char *scopes, const char *key, char *out, size_t cap)
+{
+    out[0] = 0;
+    const char *m = ci_strstr(scopes, key);
+    if (!m) return;
+    m += strlen(key);
+    size_t r = 0, w = 0;
+    while (m[r] && w < cap - 1 && m[r] != ' ' && m[r] != '\t' &&
+           m[r] != '\r' && m[r] != '\n' && m[r] != '/') {
+        if (m[r] == '%' && isxdigit((unsigned char)m[r+1]) && isxdigit((unsigned char)m[r+2])) {
+            char h[3] = { m[r+1], m[r+2], 0 };
+            out[w++] = (char)strtol(h, NULL, 16);
+            r += 3;
+        } else {
+            out[w++] = m[r++];
+        }
+    }
+    out[w] = 0;
+}
+
 nvr_backend_t nvr_dev_backend_of(nvr_dev_kind_t kind)
 {
     return (kind == NVR_DEV_KIND_NOP) ? NVR_BACKEND_NOP : NVR_BACKEND_ONVIF;
@@ -70,9 +93,11 @@ int nvr_dev_classify(const char *scopes, nvr_dev_class_t *out)
     memset(out, 0, sizeof(*out));
     if (!scopes) scopes = "";
 
-    /* MAC + SN + NightOwl 判定 */
+    /* MAC + SN + 型号(hardware) + 设备名(name) + NightOwl 判定 */
     extract_mac(scopes, out->mac, sizeof(out->mac));
     extract_serial(scopes, out->serial, sizeof(out->serial));
+    extract_scope_val(scopes, "/hardware/", out->model, sizeof(out->model));  /* ONVIF 型号 */
+    extract_scope_val(scopes, "/name/",     out->name,  sizeof(out->name));   /* ONVIF 设备名 */
     int mac_owl = (out->mac[0] && ci_strstr(out->mac, "54:2b:57") == out->mac);
     int name_owl = (ci_strstr(scopes, "nightowl") != NULL) || (ci_strstr(scopes, "night_owl") != NULL);
     out->is_nightowl = mac_owl || name_owl;

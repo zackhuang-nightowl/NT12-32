@@ -97,6 +97,8 @@ int nop_onvif_get_device_information(nop_onvif_device_t *device,
 /** Fetch capability/service sets into the handle (validates connectivity). */
 int nop_onvif_get_capabilities(nop_onvif_device_t *device);
 int nop_onvif_get_services(nop_onvif_device_t *device);
+/** Last SOAP call's low-level error code (ONVIF_ERR_*: -1 conn, -4 rx timeout, -6 no content, -7 parse). */
+int nop_onvif_last_error(nop_onvif_device_t *device);
 
 typedef struct nop_onvif_datetime {
     int year, month, day, hour, minute, second;
@@ -136,6 +138,13 @@ int nop_onvif_get_profile(nop_onvif_device_t *device, int index, nop_onvif_profi
 /** Resolve the RTSP stream URI for a profile. */
 int nop_onvif_get_stream_uri(nop_onvif_device_t *device, const char *profile_token,
                              nop_onvif_transport_t proto, char *out_uri, size_t out_size);
+
+/* ---- Media2 (ver20 / Profile T)：同上，但走 tr2_* SOAP。部分相机(Profile T)
+ *      在 media1(trt) 返回空 profiles，需用这组。结果写入独立的 media_profiles 表。 ---- */
+int nop_onvif_get_profiles2(nop_onvif_device_t *device);
+int nop_onvif_get_profile2(nop_onvif_device_t *device, int index, nop_onvif_profile_t *out);
+int nop_onvif_get_stream_uri2(nop_onvif_device_t *device, const char *profile_token,
+                              char *out_uri, size_t out_size);
 /** Resolve the JPEG snapshot URI for a profile. */
 int nop_onvif_get_snapshot_uri(nop_onvif_device_t *device, const char *profile_token,
                                char *out_uri, size_t out_size);

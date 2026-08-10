@@ -9,7 +9,8 @@
 #include <sys/ioctl.h>
 #include <linux/fs.h>
 
-struct rsdk_rawdev { int fd; uint64_t sectors; };
+struct rsdk_rawdev { int fd; uint64_t sectors; uint32_t logical_sec;
+    uint64_t fault_off, fault_end; int fault_left; };   /* fault_*: 测试注入坏扇区 */
 
 rsdk_err_t rsdk_rawdev_open(const char *path, rsdk_rawdev_t **out)
 {
@@ -27,9 +28,13 @@ rsdk_err_t rsdk_rawdev_open(const char *path, rsdk_rawdev_t **out)
     rsdk_rawdev_t *d = calloc(1, sizeof(*d));
     if (!d) { close(fd); return RSDK_E_IO; }
     d->fd = fd; d->sectors = bytes / RSDK_SEC;
+    d->logical_sec = 512;
+    if (S_ISBLK(st.st_mode)) { int ls=0; if (ioctl(fd, BLKSSZGET, &ls)==0 && ls>0) d->logical_sec=(uint32_t)ls; }
     *out = d;
     return RSDK_OK;
 }
+
+uint32_t rsdk_rawdev_logical_sec(rsdk_rawdev_t *d) { return d ? d->logical_sec : 512; }
 
 uint64_t rsdk_rawdev_sectors(rsdk_rawdev_t *d) { return d ? d->sectors : 0; }
 
@@ -49,6 +54,9 @@ rsdk_err_t rsdk_rawdev_pread(rsdk_rawdev_t *d, uint64_t off, void *buf, size_t n
 rsdk_err_t rsdk_rawdev_pwrite(rsdk_rawdev_t *d, uint64_t off, const void *buf, size_t n)
 {
     if (!d) return RSDK_E_PARAM;
+    if (d->fault_left > 0 && off < d->fault_end && off + n > d->fault_off) {
+        d->fault_left--; return RSDK_E_IO;      /* 注入: 模拟坏扇区写失败 */
+    }
     const uint8_t *p = buf; size_t done = 0;
     while (done < n) {
         ssize_t r = pwrite(d->fd, p + done, n - done, (off_t)(off + done));
@@ -59,5 +67,10 @@ rsdk_err_t rsdk_rawdev_pwrite(rsdk_rawdev_t *d, uint64_t off, const void *buf, s
 }
 
 rsdk_err_t rsdk_rawdev_sync(rsdk_rawdev_t *d) { return d && fsync(d->fd) == 0 ? RSDK_OK : RSDK_E_IO; }
+
+void rsdk_rawdev_fault_inject(rsdk_rawdev_t *d, uint64_t off, uint64_t len, int count) {
+    if (!d) return;
+    d->fault_off = off; d->fault_end = off + len; d->fault_left = count;
+}
 
 void rsdk_rawdev_close(rsdk_rawdev_t *d) { if (d) { fsync(d->fd); close(d->fd); free(d); } }

@@ -8,12 +8,15 @@
  ***************************************************************************************/
 #include "nvr_app.h"
 #include "nvr_config.h"
+#include "nvr_gui_config.h"
+#include "nvr_defaults.h"
 #include "nvr_storage.h"
 #include "nvr_streaming.h"
 #include "mhal_vout.h"
 
 #include "nvr_channel.h"
 #include "nvr_preview.h"
+#include "nvr_playback.h"
 #include "nvr_record_sched.h"
 #include "nvr_event.h"
 #include "nvr_settings.h"
@@ -26,7 +29,13 @@
 #include "nop_sdk/nop_app.h"
 #include "nop_sdk/nop_nvr_channels.h"
 #include "nvr_cmd_router.h"
+#include "nop_sdk/nop_http_server.h"
 #include "nvr_chan_persist.h"
+#include "cJSON.h"
+#include <time.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 /* ONVIF 映射后端（nop 内部实现，避免拉 nop 内部头，这里前向声明所需 4 个 API） */
 typedef struct nop_onvif_map_backend nop_onvif_map_backend_t;
@@ -51,24 +60,37 @@ struct nvr_app {
     nop_app_t        *nop;          /* NOP 分派后端（回落/翻译） */
     nop_nvr_channels_t *nop_chans;  /* 通道注册表（供 ONVIF 映射按 channel 找设备会话） */
     nop_onvif_map_backend_t *onvif_backend;  /* ONVIF 客户端映射后端（逐通道会话缓存+事件轮询）*/
-    nvr_cmd_router_t *router;       /* 127.0.0.1:8089 命令路由（本地存/查 + channel→设备转发）*/
+    nvr_cmd_router_t *router;       /* 8089 入口的请求处理器（本地存/查 + 出图 + channel→设备转发）*/
+    nop_http_server_t *nop_http;    /* 唯一 8089 入口(inbound)；处理器=nvr_cmd_dispatch */
     nvr_rec_sched_t  *rs;
     nvr_preview_t    *pv;
+    struct nvr_playback *pb;        /* 本机回放引擎(GUI_playbackControl) */
     nvr_chan_persist_t *persist;    /* 通道映射/能力持久化(channels.json) */
     nvr_evt_hub_t    *eh;
     nvr_chan_mgr_t   *cm;
     nvr_cloud_uploader_t *up;       /* 云存上传器（有盘+meta+udid 时启动） */
     nvr_ble_t        *ble;          /* BLE 配网通路（复用命令路由；板级链路真机接入） */
     int               tutk_on;      /* TUTK P2P 已启动 */
+    int               manual_only;  /* 仅连手动添加的相机（NVR_MANUAL_ONLY）：不自动发现/加载配置通道 */
+    signed char       rec_applied[32]; /* 连续录像排程:每通道上次已下发的 record 状态(-1=未知),仅变化时才 set_record */
     volatile int      running;
 };
+
+/* 8089 入口处理器：把请求体交给命令路由处理(出图/转发/回落 nop)。
+ * 返回 malloc 的应答串，nop_http_server 负责 free。 */
+static char *app_http_handler(void *ctx, const char *body)
+{
+    return nvr_cmd_dispatch((nvr_cmd_router_t *)ctx, body);
+}
 
 /* ② 未实现时的弱兜底：返回 -1，onvif_auto 通道保持待定 */
 __attribute__((weak))
 int nvr_onvif_get_url(const char *ip, int port, const char *user, const char *pass,
-                      const char *stream, char *out, int out_size)
+                      const char *stream, char *out, int out_size,
+                      char *scopes_out, int scopes_cap)
 {
     (void)ip; (void)port; (void)user; (void)pass; (void)stream; (void)out; (void)out_size;
+    if (scopes_out && scopes_cap > 0) scopes_out[0] = 0;
     return -1;
 }
 
@@ -78,11 +100,14 @@ static void on_chan_online(void *user, int chn)
     nvr_app_t *a = user;
     nvr_rec_channel_up(a->rs, chn, NVR_CODEC_AUTO);
     nvr_preview_on_channel_online(a->pv, chn);
+    /* 持久化通道状态到 channels.json(GUI 开机可先按上次已知状态绘制) */
+    if (a->persist && a->cm) nvr_chan_persist_set_status(a->persist, chn + 1, nvr_chan_status_code_of(a->cm, chn));
 }
 static void on_chan_offline(void *user, int chn)
 {
     nvr_app_t *a = user;
     nvr_preview_on_channel_offline(a->pv, chn);
+    if (a->persist && a->cm) nvr_chan_persist_set_status(a->persist, chn + 1, nvr_chan_status_code_of(a->cm, chn));
 }
 static void on_evt_icon(void *user, int chn, unsigned bits)
 {
@@ -226,6 +251,18 @@ static void apply_remote_access(nvr_app_t *a)
     printf("[app] 远程访问(BLE+P2P) = %s\n", eff ? "开" : "关");
 }
 
+/* 读 LVGL 的 GUI_CONFIG.json:启动宫格(displayMode/displayPage)+ 通道数(channels=[PoE,LAN])。
+ * 路径优先级:$NVR_GUI_CONFIG → /mnt/custom/GUI_CONFIG.json → <config_dir>/GUI_CONFIG.json。
+ * 读不到给安全默认(9宫格/page1, 16 PoE + 16 LAN)。 */
+static void read_gui_config(const char *config_dir, int *mode, int *page, int *poe_n, int *lan_n)
+{
+    nvr_gui_config_init(config_dir);              /* 解析并记住路径(供 set/get + LAN 添加容量共用) */
+    nvr_gui_config_get_display(mode, page);       /* 读不到给默认 9/1 */
+    nvr_gui_config_get_channels(poe_n, lan_n);    /* 读不到给默认 16/16 */
+    printf("[app] GUI_CONFIG.json: displayMode=%d page=%d channels=[%d PoE,%d LAN]\n",
+           *mode, *page, *poe_n, *lan_n);
+}
+
 int nvr_app_start(const char *config_dir, nvr_app_t **out)
 {
     if (!config_dir || !out) return -1;
@@ -237,9 +274,22 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
         printf("[app] 配置加载失败(%s)\n", config_dir); free(a); return -1;
     }
 
-    /* 2) 运行期设置库（首启从 JSON 播种）+ overlay 覆盖 */
+    /* 2) 运行期设置库（首启从 JSON 播种）+ overlay 覆盖
+     *
+     * ★ 持久化:两个 .db 落**持久分区** /flash/nvrcfg(ubifs),重启不丢;OTA 镜像**跳过**
+     *   flash/sys/user 分区(见 FW98633A_ota.ini,ITEM08/09/10=0),故 OTA 也不丢。
+     *   config_dir(/tmp/nvrcfg,tmpfs)仅作只读 JSON 默认源(首启一次性播种)。
+     *   seeding 由 DB 内 'seeded' 标志护住(见 nvr_settings.c),重启/OTA 不会用 JSON 覆盖已存值。
+     *   /flash 不可写时回落 config_dir(至少不崩,退化为不持久)。 */
+    char data_dir[512];
+    snprintf(data_dir, sizeof(data_dir), "%s", "/flash/nvrcfg");
+    mkdir(data_dir, 0755);                      /* 幂等;父 /flash 已挂载 */
+    if (access(data_dir, W_OK) != 0) {
+        printf("[app] 警告: 持久目录 %s 不可写, 回落 %s(不持久)\n", data_dir, config_dir);
+        snprintf(data_dir, sizeof(data_dir), "%s", config_dir);
+    }
     char dbpath[512];
-    snprintf(dbpath, sizeof(dbpath), "%s/nvr_settings.db", config_dir);
+    snprintf(dbpath, sizeof(dbpath), "%s/nvr_settings.db", data_dir);
     if (nvr_settings_open(dbpath, config_dir, &a->settings) == 0)
         nvr_config_overlay_from_settings(&a->cfg, a->settings);
     else
@@ -268,7 +318,7 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
 #if RSDK_CFG_METADATA
     {
         char metapath[512];
-        snprintf(metapath, sizeof(metapath), "%s/meta.db", config_dir);
+        snprintf(metapath, sizeof(metapath), "%s/meta.db", data_dir);   /* 持久:同 settings 库 */
         if (rsdk_meta_open(metapath, &a->meta) != RSDK_OK) {
             printf("[app] 警告: meta 打开失败(%s), 云存状态禁用\n", metapath); a->meta = NULL;
         }
@@ -313,18 +363,34 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
     nvr_evt_init(&ec, &a->eh);
 
     /* 8) 通道管理器：载入配置 → 起流（回调驱动 rec/preview） */
-    nvr_chan_mgr_cfg_t cc = { .sm = a->sm, .reconnect_base_s = 5, .reconnect_max_s = 30,
+    nvr_chan_mgr_cfg_t cc = { .sm = a->sm, .settings = a->settings,
+                              .reconnect_base_s = 5, .reconnect_max_s = 30,
                               .user = a, .on_online = on_chan_online, .on_offline = on_chan_offline };
     nvr_chan_mgr_init(&cc, &a->cm);
-    nvr_chan_load_config(a->cm, &a->cfg);
+    nvr_preview_set_cm(a->pv, a->cm);     /* 迟绑：preview 按显示模式切通道主/子码流 */
+    /* NVR_MANUAL_ONLY：只连手动添加(LanAddDevice/setLanDevice)的相机，
+     * 不加载配置通道、不自动发现绑定。用于受控测试/护 IPC(不拿错凭据轰别的相机)。 */
+    a->manual_only = (getenv("NVR_MANUAL_ONLY") != NULL);
+    if (!a->manual_only) nvr_chan_load_config(a->cm, &a->cfg);
     nvr_chan_start_all(a->cm);
 
-    /* 8a) PoE/LAN 自动发现绑定（初次）：ONVIF WS-Discovery → 分类 → 绑定 → 取流出图 */
+    /* ★ 启动宫格由 LVGL 的 GUI_CONFIG.json 决定(displayMode/displayPage)。必须在通道加载后调,
+     * set_mode 走解码门控(nvr_stream_set_display),只对可见格通道开解码——通道 slot 先存在才生效。
+     * channels=[PoE,LAN] 亦读入(供 16 PoE + 16 LAN 通道布局;完整 32 通道模型见后续)。 */
     {
-        char dip[64]; nvr_settings_get_str(a->settings, "network.discovery_ip", dip, sizeof(dip), "");
-        int nb = nvr_chan_run_discovery(a->cm, dip[0] ? dip : NULL, 2);
-        printf("[app] 初次发现绑定 %d 台相机\n", nb);
+        int gmode, gpage, poe_n, lan_n;
+        read_gui_config(config_dir, &gmode, &gpage, &poe_n, &lan_n);
+        nvr_preview_set_mode(a->pv, gmode, gpage);
     }
+
+    /* 8a) 连接策略（用户定）：
+     *   · PoE 口：配置已把 16 口(198.18.<口>.1)登记为 onvif_auto 通道；tick 后台对每口做
+     *     ONVIF 广播,扫到相机就取流出图(=“PoE 扫到就连”),没相机的口限次退避后停。
+     *   · LAN(eth0)：**只连已添加的**(channels.json 显式 IP 相机 / LanAddDevice)，
+     *     **不在 eth0 上做广播自动绑定**——否则会把局域网上别人的相机全绑进来并反复骚扰。
+     * 故此处不再跑 eth0 全网段自动发现;先监听(下面 8089),通道解析全走 tick 后台限速。 */
+    if (a->manual_only) printf("[app] MANUAL_ONLY：仅连手动添加的相机\n");
+    else                printf("[app] 通道解析走后台(先监听 8089;PoE 自动扫连, LAN 仅连已添加)\n");
 
     /* 8b) ONVIF 映射后端：把每通道 host/凭据/backend 注册进 nop_nvr_channels，
      *     建映射后端并挂到 nop_app；通用 ONVIF 通道的控制命令经此翻译成 ONVIF SOAP 发相机。
@@ -352,15 +418,34 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
         }
     }
 
+    /* 8a2) 本机回放引擎(rsdk_play → mhal_vdec 上屏);盘组/流管/预览就绪后创建 */
+    {
+        nvr_playback_cfg_t pbc = { .group = a->group, .sm = a->sm, .pv = a->pv,
+                                   .hdmi_w = a->cfg.sys.hdmi_w, .hdmi_h = a->cfg.sys.hdmi_h };
+        if (nvr_playback_create(&pbc, &a->pb) != 0) { a->pb = NULL; printf("[app] 警告: 回放引擎创建失败\n"); }
+    }
+
     /* 8b) 8089 命令路由（本地存/查设置库 + channel→真实设备 转发/翻译；回落 nop_app） */
     {
         nvr_cmd_router_cfg_t rc = { .settings = a->settings, .cm = a->cm,
-                                    .stg = a->stg, .group = a->group, .meta = a->meta, .nop = a->nop,
-                                    .port = nvr_settings_get_int(a->settings, "system.nop_port", 8089),
+                                    .stg = a->stg, .sm = a->sm, .group = a->group, .meta = a->meta, .nop = a->nop,
+                                    .port = nvr_settings_get_int(a->settings, "system.nop_port", NVR_DEF_NOP_PORT),
                                     .dev_nop_port = 8089,
-                                    .pv = a->pv, .persist = a->persist };
+                                    .pv = a->pv, .pb = a->pb, .eh = a->eh, .persist = a->persist };
         if (nvr_cmd_router_start(&rc, &a->router) != 0)
-            printf("[app] 警告: 命令路由(8089) 启动失败\n");
+            printf("[app] 警告: 命令路由处理器 初始化失败\n");
+    }
+
+    /* 8c) 唯一 8089 入口：nop_http_server(inbound)，请求处理器=nvr_cmd_dispatch
+     *     —— 收到 JSON 后内部完成 出图/通道转发/回落 nop_app_dispatch，不再单独监听。 */
+    if (a->router) {
+        int nop_port = nvr_settings_get_int(a->settings, "system.nop_port", NVR_DEF_NOP_PORT);
+        printf("[app] 8c 前: a->nop=%p nop_port=%d\n", (void *)a->nop, nop_port); fflush(stdout);
+        a->nop_http = nop_http_server_start(nop_port, a->nop);
+        printf("[app] 8c 后: nop_http=%p → 8089 入口 %s\n",
+               (void *)a->nop_http, a->nop_http ? "就绪" : "启动失败"); fflush(stdout);
+        if (a->nop_http)
+            nop_http_server_set_handler(a->nop_http, app_http_handler, a->router);
     }
 
     /* 9) 云存上传器（有盘+meta+UID 时） */
@@ -392,20 +477,76 @@ fail:
     return -1;
 }
 
+/* "HHMMSS" → 当日秒数;非法返回 -1。 */
+static int hms_to_sod(const char *hms)
+{
+    if (!hms) return -1; size_t n = strlen(hms); if (n < 6) return -1;
+    for (int i = 0; i < 6; i++) if (hms[i] < '0' || hms[i] > '9') return -1;
+    int h = (hms[0]-'0')*10+(hms[1]-'0'), m = (hms[2]-'0')*10+(hms[3]-'0'), s = (hms[4]-'0')*10+(hms[5]-'0');
+    return h*3600 + m*60 + s;
+}
+/* 当前(周几 1-7、当日秒 sod)是否落在排程 rules 任一区间内。rules 空=默认 7×24 全录。 */
+static int rules_match_now(const char *rules_json, int wday, int sod)
+{
+    if (!rules_json || !rules_json[0]) return 1;
+    cJSON *arr = cJSON_Parse(rules_json);
+    if (!arr || !cJSON_IsArray(arr)) { if (arr) cJSON_Delete(arr); return 1; }
+    int match = 0; cJSON *rule;
+    cJSON_ArrayForEach(rule, arr) {
+        cJSON *wd = cJSON_GetObjectItem(rule, "weekdays"), *d; int day_ok = 0;
+        if (cJSON_IsArray(wd)) cJSON_ArrayForEach(d, wd) if ((int)cJSON_GetNumberValue(d) == wday) { day_ok = 1; break; }
+        if (!day_ok) continue;
+        int st = hms_to_sod(cJSON_GetStringValue(cJSON_GetObjectItem(rule, "startTime")));
+        int en = hms_to_sod(cJSON_GetStringValue(cJSON_GetObjectItem(rule, "endTime")));
+        if (st < 0 || en < 0) continue;
+        int in = (st <= en) ? (sod >= st && sod <= en) : (sod >= st || sod <= en);  /* en<st=跨零点 */
+        if (in) { match = 1; break; }
+    }
+    cJSON_Delete(arr);
+    return match;
+}
+/* 连续录像排程评估:按当前时间对每通道算 should_record(sched_on && 落在时段),仅变化时下发
+ * nvr_stream_set_record(避免每次重置关键帧门控)。无排程行=默认开+7×24(NVR 缺省常录)。 */
+static void rec_schedule_apply(nvr_app_t *app)
+{
+    if (!app->sm || !app->settings) return;
+    time_t now = time(NULL); struct tm tmv; localtime_r(&now, &tmv);
+    int wday = (tmv.tm_wday == 0) ? 7 : tmv.tm_wday;   /* tm 0=Sun → 协议 7=Sun */
+    int sod  = tmv.tm_hour*3600 + tmv.tm_min*60 + tmv.tm_sec;
+    for (int chn0 = 0; chn0 < 32; chn0++) {
+        /* 手动总开关(record_config.record_on,无行默认开)—— 用户在 GUI 关某通道录像即置 0。 */
+        nvr_record_cfg_t rc;
+        int manual_on = (nvr_settings_record_get(app->settings, chn0, &rc) == 0) ? rc.record_on : 1;
+        /* 连续录像排程(sched_on + rules 时段,无行默认 sched_on=1/7×24)。 */
+        nvr_rec_schedule_t s;
+        nvr_settings_rec_sched_get(app->settings, chn0, &s);
+        /* 录像 = 手动开 && 排程开 && 落在时段。开机首轮(rec_applied=-1)即按持久 DB 初始化。 */
+        int should = manual_on && s.sched_on && rules_match_now(s.rules, wday, sod);
+        if (app->rec_applied[chn0] != (signed char)should) {
+            nvr_stream_set_record(app->sm, chn0, should);
+            app->rec_applied[chn0] = (signed char)should;
+        }
+    }
+}
+
 void nvr_app_run(nvr_app_t *app)
 {
     if (!app) return;
     unsigned tick = 0;
+    memset(app->rec_applied, -1, sizeof(app->rec_applied));   /* 强制首轮下发 */
     while (app->running) {
         if (app->stg) nvr_storage_tick(app->stg);   /* 盘健康/满盘/热插拔 */
         nvr_chan_tick(app->cm);                      /* 在线状态机 + 重连 + 解析待定 URL */
         nvr_rec_tick(app->rs);                       /* 结束到期事件时窗 */
+        if (tick % 5 == 0) rec_schedule_apply(app);  /* 每 5s 评估连续录像排程(时段+开关) */
         nvr_preview_tick(app->pv);                   /* 时间 OSD */
         nvr_evt_tick(app->eh);                        /* 图标衰减 */
         if (tick % 60 == 0 && app->settings)          /* 每 60s：NTP 未成功则重试(UTC) */
             nvr_time_tick(app->settings);
-        if (++tick % 30 == 0)                         /* 每 30s 重扫，捕获新插入的 PoE/LAN 相机 */
-            nvr_chan_run_discovery(app->cm, NULL, 2);
+        ++tick;
+        /* 不再在 eth0 上周期性全网段自动发现绑定(会把 LAN 上别人的相机绑进来)。
+         * PoE 口即插即用由每口 onvif_auto 通道的 tick 后台 ONVIF 广播覆盖;
+         * LAN 新增设备走 LanAddDevice(显式添加)。 */
         sleep(1);
     }
 }
@@ -420,10 +561,12 @@ void nvr_app_stop(nvr_app_t *app)
     if (app->up) { nvr_cloud_uploader_stop(app->up); app->up = NULL; }
     if (app->cm) { nvr_chan_stop_all(app->cm); nvr_chan_mgr_deinit(app->cm); app->cm = NULL; }
     if (app->eh) { nvr_evt_deinit(app->eh); app->eh = NULL; }
+    if (app->pb) { nvr_playback_destroy(app->pb); app->pb = NULL; }   /* 回放先停(用 pv/sm) */
     if (app->pv) { nvr_preview_deinit(app->pv); app->pv = NULL; }
     if (app->persist) { nvr_chan_persist_close(app->persist); app->persist = NULL; }
     if (app->rs) { nvr_rec_sched_deinit(app->rs); app->rs = NULL; }
     if (app->nop_hub) { nop_event_hub_destroy(app->nop_hub); app->nop_hub = NULL; }
+    if (app->nop_http) { nop_http_server_stop(app->nop_http); app->nop_http = NULL; }
     if (app->router) { nvr_cmd_router_stop(app->router); app->router = NULL; }
     if (app->onvif_backend) { nop_onvif_map_events_stop(app->onvif_backend);
                               nop_onvif_map_backend_destroy(app->onvif_backend); app->onvif_backend = NULL; }

@@ -25,6 +25,32 @@ typedef struct {
     uint32_t feature_mask; uint8_t enc_algo; uint8_t hdd_full;
 } rsdk_dev_info_t;
 
+typedef struct {
+    uint32_t chunk_mib;          /* 选定档: opt 指定值, 或 8/16/32 */
+    uint64_t chunk_sectors;
+    uint64_t chunk_count;        /* 总 chunk(含 meta) */
+    uint64_t data_start_sec;
+    uint64_t bitmap_sectors;
+    uint64_t index_sectors;
+    uint64_t meta_chunk_count;
+    uint64_t data_chunk_count;   /* = chunk_count - meta_chunk_count */
+    uint32_t index_slot_count;
+} rsdk_layout_t;
+
+/* 扇区大小谓词: 512 → 1(支持); 其它(如 4096/4Kn) → 0(不支持) */
+RSDK_API int rsdk_sector_supported(uint32_t logical_sec);
+
+/* 纯函数(无 I/O): 由容量+参数推导布局。total_sectors=512B单位盘扇区数;
+ * chunk_mib_req=0 时按容量自动选档; slots=每chunk索引槽因子(0→RSDK_CFG_SLOTS_PER_CHUNK);
+ * feature_mask 决定是否留 MetaRegion; meta_ratio_pct=meta 占比(<=0→配置默认)。
+ * 容量过小无法布局(<64MiB 或算得 data_chunk_count==0)返回 RSDK_E_NOSPACE。 */
+RSDK_API rsdk_err_t rsdk_plan_layout(uint64_t total_sectors, uint32_t chunk_mib_req,
+                                     uint32_t slots, uint32_t feature_mask,
+                                     double meta_ratio_pct, rsdk_layout_t *out);
+
+/* 免 open 探测: 读主 SuperBlock 并校验 magic+CRC(供 rsdk_disk_probe / 上层枚举) */
+RSDK_API rsdk_err_t rsdk_peek_superblock(const char *devpath, rsdk_superblock_t *sb);
+
 /* 打开(若未格式化返回 RSDK_E_FORMAT, 需先 rsdk_format) */
 RSDK_API rsdk_err_t rsdk_dev_open (const char *path, rsdk_dev_t **out);
 RSDK_API rsdk_err_t rsdk_format   (const char *path, const rsdk_format_opt_t *opt);
@@ -46,6 +72,11 @@ RSDK_API rsdk_err_t rsdk_dev_alloc_chunk(rsdk_dev_t *d, uint64_t *chunk, uint64_
 RSDK_API rsdk_err_t rsdk_dev_meta_alloc(rsdk_dev_t *d, uint64_t size, uint64_t *abs_off);
 RSDK_API uint16_t   rsdk_dev_index(rsdk_dev_t *d);   /* 本盘在盘组内序号 */
 RSDK_API int        rsdk_dev_is_wrapped(rsdk_dev_t *d); /* 是否已绕盘至少一圈(覆盖模式) */
+
+/* 坏 chunk 处理(设计 §4.3 / 坏块): 标记/查询/计数。位图落 bitmap 区(主+备+CRC), 分配自动跳坏。 */
+RSDK_API rsdk_err_t rsdk_dev_mark_bad_chunk(rsdk_dev_t *d, uint64_t chunk);
+RSDK_API int        rsdk_dev_is_bad_chunk (rsdk_dev_t *d, uint64_t chunk);
+RSDK_API uint64_t   rsdk_dev_bad_chunk_count(rsdk_dev_t *d);
 
 #ifdef __cplusplus
 }

@@ -11,7 +11,6 @@ project(nop_sdk
 set(NOP_OSAL_PORT "posix" CACHE STRING "OSAL port: posix | linux_uclibc | windows")
 option(NOP_BUILD_SHARED   "Build shared library"            ON)
 option(NOP_BUILD_STATIC   "Build static library"            ON)
-option(NOP_BUILD_TESTS    "Build unit/contract tests"       ON)
 option(NOP_BUILD_EXAMPLES "Build example programs"          ON)
 option(NOP_WITH_HAL_STUB  "Include print-stub HAL (runs with no hardware)" ON)
 option(NOP_WITH_TUTK      "Enable built-in TUTK P2P backend (requires SDK)" OFF)
@@ -77,13 +76,11 @@ set(NOP_SRC
     src/transport/transport_unix.c
     src/transport/http_server.c
     src/media/nop_media.c
-    src/media/rtsp_server.c
     src/services/svc_event.c
     src/services/svc_push.c
     src/services/svc_record.c
     src/services/svc_ptz_patrol.c
     src/services/svc_chime.c
-    src/services/camera/svc_event8012.c
     src/services/camera/svc_snapshot.c
     src/services/camera/svc_light_linkage.c
     src/services/camera/svc_sdcard_upgrade.c
@@ -333,12 +330,8 @@ set(NOP_PRIVATE_INCLUDES
     CACHE INTERNAL "private include dirs")
 
 # ---------------------------------------------------------------------------
-# Tests / examples
+# Examples
 # ---------------------------------------------------------------------------
-if(NOP_BUILD_TESTS)
-    enable_testing()
-    add_subdirectory(tests)
-endif()
 if(NOP_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()

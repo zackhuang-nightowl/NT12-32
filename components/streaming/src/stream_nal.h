@@ -7,8 +7,9 @@ extern "C" {
 #endif
 
 typedef struct {
-    int is_key;      /* 1=关键帧(IDR/IRAP) 或 参数集(VPS/SPS/PPS) → 录像可从此起 */
-    int is_param;    /* 1=纯参数集 NAL */
+    int is_key;      /* 1=关键帧(IDR/IRAP) / 含参数集的关键帧 AU / 纯参数集 → 录像可从此起 */
+    int is_param;    /* 1=**纯**参数集帧(只有 VPS/SPS/PPS,无 VCL slice) → 硬解可扣留缓存 */
+    int has_param;   /* 1=帧内含 SPS/PPS(可能同时有 slice=合并关键帧 AU,如某些相机) */
     int frame_type;  /* RSDK_FRAME_I=0 / RSDK_FRAME_P=1 */
 } nal_class_t;
 

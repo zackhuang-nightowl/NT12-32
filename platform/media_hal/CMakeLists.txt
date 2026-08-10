@@ -35,7 +35,8 @@ target_include_directories(mhal PUBLIC
 target_include_directories(mhal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../common/include)  # nvr_log.h
 target_include_directories(mhal PRIVATE
     ${HDAL}/include                      # hdal.h + hd_*.h
-    ${HDAL}/vendor/isp/include           # vendor_* (如需 vendor_videodec 精调)
+    ${HDAL}/vendor/isp/include           # vendor_* (isp)
+    ${HDAL}/vendor/media/include         # vendor_videodec.h/vendor_videoproc.h (8K sub-yuv 下采样)
 )
 
 # 链接 hdal 预编译库（BSP，aarch64）+ pthread；PUBLIC 传递给最终 exe
@@ -45,6 +46,10 @@ elseif(EXISTS ${HDAL}/source/libhdal.so)
     target_link_libraries(mhal PUBLIC ${HDAL}/source/libhdal.so pthread)
 else()
     message(WARNING "libhdal.so 未找到于 ${HDAL}/output|source；最终链接会缺 hd_* 符号")
+endif()
+# vendor_media:vendor_videodec_set/vendor_videoproc_set(8K sub-yuv 下采样)
+if(EXISTS ${HDAL}/vendor/media/source/libvendor_media.so)
+    target_link_libraries(mhal PUBLIC ${HDAL}/vendor/media/source/libvendor_media.so)
 endif()
 
 set_target_properties(mhal PROPERTIES C_STANDARD 11)

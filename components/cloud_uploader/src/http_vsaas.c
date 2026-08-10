@@ -7,9 +7,18 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* GET URL 服务器域名（cloudRec 文档 §Cloud Server） */
+/* GET URL 服务器域名（cloudRec 文档 §Cloud Server）。
+ * 域名按 prod/stage **编译期**选择:默认生产;stage 构建加 -DNVR_BUILD_STAGE=1(顶层 -DNVR_STAGE=ON)。 */
 #define HOST_PROD  "us-vsaasapi-nop.kalayservice.com"
 #define HOST_STAGE "asia-vpapi-tutk-stg.kalay.us"
+#ifndef NVR_BUILD_STAGE
+#define NVR_BUILD_STAGE 0
+#endif
+#if NVR_BUILD_STAGE
+#define VSAAS_HOST HOST_STAGE
+#else
+#define VSAAS_HOST HOST_PROD
+#endif
 
 int vsaas_http_init(void)  { return curl_global_init(CURL_GLOBAL_DEFAULT) == 0 ? 0 : -1; }
 void vsaas_http_cleanup(void) { curl_global_cleanup(); }
@@ -30,6 +39,7 @@ int vsaas_get_url(int stage, const char *udid, const char *stoken,
                   vsaas_url_t *out)
 {
     if (!udid || !stoken || !out) return -1;
+    (void)stage;   /* 域名编译期定(VSAAS_HOST),运行期 stage 不再切主机 */
     memset(out, 0, sizeof(*out));
     out->event_recording_max_length = 300;
 
@@ -41,7 +51,7 @@ int vsaas_get_url(int stage, const char *udid, const char *stoken,
     char url[2048];
     snprintf(url, sizeof(url),
         "https://%s/vsaas/api/v1/stream/stream_url/%s?stoken=%s&starttime=%u&protocol=upload&event_id=%d&tags=%s",
-        stage ? HOST_STAGE : HOST_PROD, udid, e_stoken ? e_stoken : "",
+        VSAAS_HOST, udid, e_stoken ? e_stoken : "",
         starttime_embedded, event_id_code, e_tags ? e_tags : "");
     if (e_stoken) curl_free(e_stoken);
     if (e_tags)   curl_free(e_tags);
@@ -130,6 +140,7 @@ int vsaas_update_tags(int stage, const char *udid, const char *stoken,
                       uint32_t starttime_embedded, const char *tags)
 {
     if (!udid || !stoken) return -1;
+    (void)stage;   /* 域名编译期定(VSAAS_HOST) */
     CURL *c = curl_easy_init();
     if (!c) return -1;
     char *e_stoken = curl_easy_escape(c, stoken, 0);
@@ -137,7 +148,7 @@ int vsaas_update_tags(int stage, const char *udid, const char *stoken,
     char url[2048];
     snprintf(url, sizeof(url),
         "https://%s/vsaas/api/v1/stream/stream_event/%s?stoken=%s&starttime=%u&tags=%s",
-        stage ? HOST_STAGE : HOST_PROD, udid, e_stoken ? e_stoken : "",
+        VSAAS_HOST, udid, e_stoken ? e_stoken : "",
         starttime_embedded, e_tags ? e_tags : "");
     if (e_stoken) curl_free(e_stoken);
     if (e_tags)   curl_free(e_tags);

@@ -102,6 +102,51 @@ cJSON *nvr_chan_persist_get_caps(nvr_chan_persist_t *p, int ch){
     return p?find_caps(p->root,ch):NULL;
 }
 
+/* ---- 每通道状态值 + 主/子显示分辨率(出图用;caps 已移 DB) ---- */
+static cJSON *find_in_arr(cJSON *arr, int ch){
+    cJSON *it; cJSON_ArrayForEach(it,arr){ cJSON *c=cJSON_GetObjectItem(it,"channel");
+        if(c && (int)cJSON_GetNumberValue(c)==ch) return it; } return NULL;
+}
+static cJSON *ensure_arr(cJSON *root, const char *key){
+    cJSON *a=cJSON_GetObjectItem(root,key); if(!a) a=cJSON_AddArrayToObject(root,key); return a;
+}
+static cJSON *upsert_entry(cJSON *root, const char *key, int ch){
+    cJSON *arr=ensure_arr(root,key); cJSON *e=find_in_arr(arr,ch);
+    if(!e){ e=cJSON_CreateObject(); cJSON_AddNumberToObject(e,"channel",ch); cJSON_AddItemToArray(arr,e); }
+    return e;
+}
+
+int nvr_chan_persist_set_status(nvr_chan_persist_t *p, int ch, int status){
+    if(!p) return -1;
+    cJSON *e=upsert_entry(p->root,"channelStatus",ch);
+    cJSON_DeleteItemFromObject(e,"status"); cJSON_AddNumberToObject(e,"status",status);
+    return atomic_save(p);
+}
+int nvr_chan_persist_get_status(nvr_chan_persist_t *p, int ch){
+    if(!p) return -1;
+    cJSON *arr=cJSON_GetObjectItem(p->root,"channelStatus"); if(!arr) return -1;
+    cJSON *e=find_in_arr(arr,ch); if(!e) return -1;
+    cJSON *s=cJSON_GetObjectItem(e,"status"); return s?(int)cJSON_GetNumberValue(s):-1;
+}
+int nvr_chan_persist_set_res(nvr_chan_persist_t *p, int ch, const char *mainr, const char *subr){
+    if(!p) return -1;
+    cJSON *e=upsert_entry(p->root,"channelResolution",ch);
+    cJSON_DeleteItemFromObject(e,"main"); cJSON_AddStringToObject(e,"main",mainr?mainr:"");
+    cJSON_DeleteItemFromObject(e,"sub");  cJSON_AddStringToObject(e,"sub", subr?subr:"");
+    return atomic_save(p);
+}
+int nvr_chan_persist_get_res(nvr_chan_persist_t *p, int ch, char *mo,int mc,char *so,int sc){
+    if(mo&&mc>0) mo[0]=0; if(so&&sc>0) so[0]=0;
+    if(!p) return -1;
+    cJSON *arr=cJSON_GetObjectItem(p->root,"channelResolution"); if(!arr) return -1;
+    cJSON *e=find_in_arr(arr,ch); if(!e) return -1;
+    const char *m=cJSON_GetStringValue(cJSON_GetObjectItem(e,"main"));
+    const char *s=cJSON_GetStringValue(cJSON_GetObjectItem(e,"sub"));
+    if(mo&&mc>0&&m) snprintf(mo,mc,"%s",m);
+    if(so&&sc>0&&s) snprintf(so,sc,"%s",s);
+    return 0;
+}
+
 int nvr_chan_persist_set_caps(nvr_chan_persist_t *p, int ch, cJSON *obj){
     if(!p||!obj) return -1;
     cJSON_DeleteItemFromObject(obj,"channel");

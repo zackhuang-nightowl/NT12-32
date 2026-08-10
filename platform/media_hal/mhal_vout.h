@@ -19,13 +19,25 @@ extern "C" {
 typedef enum { MHAL_OUT_HDMI, MHAL_OUT_CVBS, MHAL_OUT_VGA } mhal_out_t;
 
 /* 布局：1/4/9/16 分屏 */
-typedef enum { MHAL_LAYOUT_1, MHAL_LAYOUT_4, MHAL_LAYOUT_9, MHAL_LAYOUT_16 } mhal_layout_t;
+/* 设备支持的宫格：1/4/8/9/16/25/36(8=1大+7小,其余 n×n)。宫格数由 LVGL 下发的 displayMode 决定。 */
+typedef enum { MHAL_LAYOUT_1, MHAL_LAYOUT_4, MHAL_LAYOUT_8, MHAL_LAYOUT_9,
+               MHAL_LAYOUT_16, MHAL_LAYOUT_25, MHAL_LAYOUT_36 } mhal_layout_t;
 
 int  mhal_vout_init(mhal_out_t out, int width, int height);   /* 如 HDMI 3840x2160 */
 int  mhal_vout_set_layout(mhal_layout_t layout);              /* 切分屏 */
+int  mhal_vout_commit(void);                                 /* 重建显示合成图(切布局后重排生效) */
+/* ★ 批量提交:begin/end 之间的解码器开/关不各自重成图,由 end 一次成图(9格一起出、只闪一次)。
+ * 必须成对调用(可嵌套计数)。切宫格 set_mode 用它包住所有 open/close。 */
+void mhal_vout_defer_begin(void);
+void mhal_vout_defer_end(void);
+int  mhal_vout_is_deferred(void);   /* 1=当前在批量提交中(解码器已开但未 start) */
 int  mhal_vout_bind(int win_idx, int decoder_chn);            /* 某分屏窗口绑某解码通道 */
 int  mhal_vout_bind_rect(int decoder_chn, int x, int y, int w, int h); /* 任意像素矩形 */
 int  mhal_vout_unbind(int decoder_chn);                                /* 隐藏该通道窗口 */
+void mhal_vout_clear_black(void);                                      /* 整屏(视频层)清稳定黑;回放进入时黑屏用 */
+/* 数字变焦:对某解码通道设**输入裁剪 ROI**(源画面千分比 0..1000),VPE 把 ROI 放大填满窗口。
+ * x_pm/y_pm=0 且 w_pm/h_pm=1000 → 全画面(取消变焦)。返回 0 成功、-1 该通道未在解码。 */
+int  mhal_vout_set_crop(int decoder_chn, int x_pm, int y_pm, int w_pm, int h_pm);
 int  mhal_vout_osd(int win_idx, const char *text);           /* 通道名/时间/事件 OSD 叠加 */
 void mhal_vout_deinit(mhal_out_t out);
 

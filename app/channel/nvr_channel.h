@@ -30,6 +30,7 @@ typedef struct nvr_chan_mgr nvr_chan_mgr_t;
 
 typedef struct {
     nvr_stream_mgr_t *sm;                 /* borrowed：唯一取流管理器 */
+    nvr_settings_t   *settings;           /* borrowed：设备落库(camera 表);可空(不持久化) */
     int   reconnect_base_s;               /* 重连基础退避秒，默认 5 */
     int   reconnect_max_s;                /* 最大退避秒，默认 30 */
     void *user;                           /* 回调上下文 */
@@ -61,6 +62,14 @@ void nvr_chan_stop_all (nvr_chan_mgr_t *m);
 
 /* 周期：轮询流状态 → 跑 FSM → 退避重连 → 解析待定 ONVIF URL。app 主循环每秒调。 */
 void nvr_chan_tick(nvr_chan_mgr_t *m);
+
+/* 切通道主/子码流(供 preview 按 单宫格=主 / 多宫格=子 调)：stream=NVR_STREAM_MAIN/SUB。
+ * 停当前 puller、置新 stream、清 url 强制按新码流经 ONVIF 重解析,由 tick 重连出图。
+ * 已是该码流且已解析则不动。返回 0/-1。 */
+int  nvr_chan_set_stream(nvr_chan_mgr_t *m, int chn, int stream);
+
+/* 读并清"状态变化位图"(bit=chn)。供 GUI_longPolling 返回 ChannelStatusNotify。 */
+unsigned nvr_chan_drain_notify(nvr_chan_mgr_t *m);
 
 /* 查询（供 preview OSD / NOP handler / 诊断） */
 int  nvr_chan_get   (nvr_chan_mgr_t *m, int chn, nvr_channel_t *out);

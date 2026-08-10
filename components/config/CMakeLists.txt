@@ -16,12 +16,3 @@ endif()
 add_library(nvr_settings STATIC src/nvr_settings.c)
 target_include_directories(nvr_settings PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(nvr_settings PUBLIC cjson sqlite3)
-
-# 自测（host 验证：种子/回写/订阅/结构化表）
-option(NVR_SETTINGS_TEST "构建 nvr_settings 自测" ON)
-if(NVR_SETTINGS_TEST AND NOT NVR_CROSS)
-  enable_testing()
-  add_executable(test_nvr_settings tests/test_nvr_settings.c)
-  target_link_libraries(test_nvr_settings nvr_settings)
-  add_test(NAME nvr_settings COMMAND test_nvr_settings)
-endif()

@@ -343,8 +343,7 @@ FAILED:
     {
         xml_node_del(p_node);
     }
-    
-    return ret;    
+    return ret;
 }
 
 BOOL http_onvif_file_upload_req(HTTPREQ * p_http, const char * filename)

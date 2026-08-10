@@ -19,9 +19,28 @@ extern "C" {
 int  nvr_onvif_init(void);
 void nvr_onvif_cleanup(void);
 
-/* 取流 URL（= app/src/nvr_app.h 声明的钩子；stream: "main"/"sub"）。成功填 out 返 0。 */
+/* 取流 URL（= app/src/nvr_app.h 声明的钩子；stream: "main"/"sub"）。成功填 out 返 0。
+ * scopes_out(可空):顺带回传发现广播 scopes(供通道 nvr_dev_classify 分类 kind/mac)。 */
 int  nvr_onvif_get_url(const char *ip, int port, const char *user, const char *pass,
-                       const char *stream, char *out, int out_size);
+                       const char *stream, char *out, int out_size,
+                       char *scopes_out, int scopes_cap);
+
+/* 设备探测结果(首次上线一次会话拿全:身份 + 主/子流 + 能力标识)。 */
+typedef struct {
+    char scopes[512];
+    char manufacturer[64], model[64], firmware[64], serial[64];
+    char main_uri[300], sub_uri[300];
+    int  ptz;             /* PTZ 节点数>0 → 有云台 */
+    int  time_set;        /* 已成功把 NVR 时间下发到相机 */
+} nvr_onvif_info_t;
+
+/* 一次 ONVIF 会话:发现→建设备→GetDeviceInformation/GetServices/GetCapabilities→GetProfiles(主/子 URI)
+ * →PTZ 节点检测→SetSystemDateAndTime(把 NVR 时间下发相机,setTime 走 ONVIF)。成功填 out 返 0。
+ * 供"首次上线按设备构建能力级 + 校时"。stream 影响不大(主/子都取)。 */
+int  nvr_onvif_probe(const char *ip, int port, const char *user, const char *pass, nvr_onvif_info_t *out);
+
+/* 仅把 NVR 当前时间经 ONVIF 下发到指定相机(供命令触发的显式校时)。成功返 0。 */
+int  nvr_onvif_set_time_now(const char *ip, int port, const char *user, const char *pass);
 
 /* 发现回调：一台相机 */
 typedef struct {

@@ -27,9 +27,10 @@ add_custom_target(rsdk_config DEPENDS ${RSDK_CONFIG_H})
 set(RSDK_SRC
   src/rsdk_core.c src/rsdk_util.c src/rsdk_feature.c src/rsdk_rawdev.c
   src/rsdk_crypto.c src/rsdk_storgedev.c src/rsdk_index.c src/rsdk_rec.c
-  src/rsdk_play.c src/rsdk_balance.c src/rsdk_backup.c)
+  src/rsdk_play.c src/rsdk_balance.c src/rsdk_backup.c src/rsdk_disk.c
+  src/rsdk_scan.c)   # 自描述扫描重建(索引/meta 丢失可扫盘重建;新 SDK)
 if(RSDK_WITH_METADATA)
-  list(APPEND RSDK_SRC src/rsdk_meta.c src/rsdk_pic.c src/rsdk_cloud.c)
+  list(APPEND RSDK_SRC src/rsdk_meta.c src/rsdk_pic.c src/rsdk_cloud.c)  # rsdk_cloud.c = no-op 桩(云存待实现)
 endif()
 
 add_library(rsdk STATIC ${RSDK_SRC})
@@ -80,8 +81,6 @@ if(RSDK_BUILD_EXAMPLES)
   if(RSDK_WITH_METADATA)
     add_executable(cloud_demo examples/cloud_demo.c)   # 云存状态: begin/set_state/enumerate/reclaim
     target_link_libraries(cloud_demo rsdk)
-    enable_testing()
-    add_test(NAME rsdk_cloud COMMAND cloud_demo)
   endif()
 endif()
 

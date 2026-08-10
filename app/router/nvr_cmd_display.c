@@ -1,141 +1,185 @@
-#include "nvr_cmd_display.h"
+/***************************************************************************************
+ *  nvr_cmd_display.c — display 出图域 handler:布局/映射/自定义窗/系统显示/通道状态/
+ *  longPolling/设备能力/数字变焦。见 nvr_cmd_internal.h。
+ ***************************************************************************************/
+#include "nvr_cmd_internal.h"
+#include "nvr_cmd_util.h"
+#include "nvr_streaming.h"  /* nvr_stream_recording_mask:RecordStatus */
+#include "nvr_event.h"      /* nvr_evt_masks:Motion/Human/Face/Car 位图 */
+#include <stdint.h>
+#include "nvr_chan_status.h"
+#include "nvr_gui_config.h"
+#include "nvr_defaults.h"
 #include <stdlib.h>
 #include <string.h>
 
-static char *resp_ok_content(cJSON *content){
-    cJSON *r=cJSON_CreateObject();
-    cJSON_AddNumberToObject(r,"statusCode",200);
-    cJSON_AddStringToObject(r,"statusMsg","OK");
-    cJSON_AddItemToObject(r,"content",content?content:cJSON_CreateObject());
-    char *s=cJSON_PrintUnformatted(r); cJSON_Delete(r); return s;
+char *cmd_GUI_setDeviceDisplayMode(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    int mode = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(a, "displayMode"));
+    int page = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(a, "displayPage"));
+    nvr_preview_set_mode(c->pv, mode, page);
+    /* 持久化到 GUI_CONFIG.json(开机据此出图);mode==0 为退出 Liveview 瞬时态,helper 内部不写。 */
+    nvr_gui_config_set_display(mode, page);
+    /* ★ 等图出了再回复:阻塞到**任一可见格出图**或最多 2s,LVGL 等待期间放加载动画,
+     * 避免"回复了但画面还没出/还在黑闪"的体验。 */
+    nvr_preview_wait_ready(c->pv, NVR_DEF_WAIT_READY_MS);
+    return nvr_resp_result("OK");
 }
-static char *resp_result(const char *result){
-    cJSON *c=cJSON_CreateObject(); cJSON_AddStringToObject(c,"result",result); return resp_ok_content(c);
+char *cmd_GUI_getDeviceDisplayMode(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a; (void)c; int m = NVR_DEF_GUI_MODE, pg = NVR_DEF_GUI_PAGE; nvr_gui_config_get_display(&m, &pg);  /* 从 GUI_CONFIG.json 读 */
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddNumberToObject(o, "displayMode", m); cJSON_AddNumberToObject(o, "displayPage", pg);
+    return nvr_resp_content(o);
 }
-
-char *nvr_cmd_display_handle(const char *func, cJSON *args, const nvr_display_ctx_t *ctx){
-    if(!func||!ctx) return NULL;
-
-    if(!strcmp(func,"GUI_setDeviceDisplayMode")){
-        int mode=(int)cJSON_GetNumberValue(cJSON_GetObjectItem(args,"displayMode"));
-        int page=(int)cJSON_GetNumberValue(cJSON_GetObjectItem(args,"displayPage"));
-        nvr_preview_set_mode(ctx->pv,mode,page);
-        return resp_result("OK");
+char *cmd_GUI_setChannelMapping(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    cJSON *arr = cJSON_GetObjectItem(a, "ChannelMapping");
+    if (!cJSON_IsArray(arr)) return nvr_resp_result("input channel num exception");
+    int n = cJSON_GetArraySize(arr), map[32]; if (n > 32) n = 32;
+    for (int i = 0; i < n; i++) map[i] = (int)cJSON_GetNumberValue(cJSON_GetArrayItem(arr, i));
+    nvr_preview_set_mapping(c->pv, map, n);
+    if (c->persist) nvr_chan_persist_set_mapping(c->persist, map, n);
+    return nvr_resp_result("OK");
+}
+char *cmd_GUI_getChannelMapping(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a; int map[32]; int n = c->persist ? nvr_chan_persist_get_mapping(c->persist, map, 32) : 0;
+    cJSON *o = cJSON_CreateObject(); cJSON *arr = cJSON_AddArrayToObject(o, "ChannelMapping");
+    for (int i = 0; i < n; i++) cJSON_AddItemToArray(arr, cJSON_CreateNumber(map[i]));
+    return nvr_resp_content(o);
+}
+char *cmd_GUI_setDeviceDisplayExt(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    cJSON *arr = cJSON_GetObjectItem(a, "channels");
+    int n = cJSON_IsArray(arr) ? cJSON_GetArraySize(arr) : 0;
+    nvr_pv_ext_t b[16]; if (n > 16) n = 16;
+    for (int i = 0; i < n; i++) { cJSON *e = cJSON_GetArrayItem(arr, i);
+        b[i].chn0 = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(e, "channel")) - 1;
+        b[i].x = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(e, "x"));
+        b[i].y = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(e, "y"));
+        b[i].w = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(e, "w"));
+        b[i].h = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(e, "h"));
+        const char *st = cJSON_GetStringValue(cJSON_GetObjectItem(e, "streamType"));
+        b[i].stream = (st && !strcmp(st, "sub")) ? NVR_STREAM_SUB : NVR_STREAM_MAIN;
     }
-    if(!strcmp(func,"GUI_getDeviceDisplayMode")){
-        int m=0,pg=1; nvr_preview_get_mode(ctx->pv,&m,&pg);
-        cJSON *c=cJSON_CreateObject(); cJSON_AddNumberToObject(c,"displayMode",m); cJSON_AddNumberToObject(c,"displayPage",pg);
-        return resp_ok_content(c);
+    nvr_preview_set_ext(c->pv, n ? b : NULL, n);
+    return nvr_resp_content(NULL);
+}
+char *cmd_GUI_getDeviceDisplayExt(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a; nvr_pv_ext_t b[16]; int n = nvr_preview_get_ext(c->pv, b, 16);
+    cJSON *o = cJSON_CreateObject(); cJSON *arr = cJSON_AddArrayToObject(o, "channels");
+    for (int i = 0; i < n; i++) { cJSON *e = cJSON_CreateObject();
+        cJSON_AddNumberToObject(e, "channel", b[i].chn0 + 1);
+        cJSON_AddNumberToObject(e, "x", b[i].x); cJSON_AddNumberToObject(e, "y", b[i].y);
+        cJSON_AddNumberToObject(e, "w", b[i].w); cJSON_AddNumberToObject(e, "h", b[i].h);
+        cJSON_AddStringToObject(e, "streamType", b[i].stream == NVR_STREAM_SUB ? "sub" : "main");
+        cJSON_AddItemToArray(arr, e); }
+    return nvr_resp_content(o);
+}
+char *cmd_GUI_getSysDisplay(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a; (void)c;
+    return NULL;   /* TODO 待实现:查实际显示态(mhal 显示分辨率等)。无业务→返回 NULL→路由统一 501 notSupport */
+}
+char *cmd_GUI_setSysDisplay(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a; (void)c;
+    return NULL;   /* TODO 待实现:设实际显示。无业务→返回 NULL→路由 501 */
+}
+char *cmd_X_NightOwl_getChannelStatus(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    int ch1 = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(a, "channel"));
+    int code = c->cm ? nvr_chan_status_code_of(c->cm, ch1 - 1) : 0;
+    cJSON *o = cJSON_CreateObject(); cJSON_AddNumberToObject(o, "status", code);
+    return nvr_resp_content(o);
+}
+/* longPolling:返回通道状态变化位图。gui 收到 ChannelStatusNotify!=0 → 重拉 getChannelStatus。 */
+char *cmd_GUI_longPolling(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    int refresh = a ? nvr_jbool(a, "refresh", 0) : 0;
+    unsigned notify = c->cm ? nvr_chan_drain_notify(c->cm) : 0;
+    /* refresh:true → 全量重同步:置所有(容量内)通道位,GUI 据此重拉每通道 getChannelStatus。 */
+    if (refresh) {
+        int cap = c->settings ? nvr_settings_get_int(c->settings, "system.capacity", 32) : 32;
+        notify = (cap >= 32) ? 0xFFFFFFFFu : ((1u << cap) - 1u);
     }
-    if(!strcmp(func,"GUI_setChannelMapping")){
-        cJSON *arr=cJSON_GetObjectItem(args,"ChannelMapping");
-        if(!cJSON_IsArray(arr)) return resp_result("input channel num exception");
-        int n=cJSON_GetArraySize(arr), map[32]; if(n>32)n=32;
-        for(int i=0;i<n;i++) map[i]=(int)cJSON_GetNumberValue(cJSON_GetArrayItem(arr,i));
-        nvr_preview_set_mapping(ctx->pv,map,n);
-        if(ctx->persist) nvr_chan_persist_set_mapping(ctx->persist,map,n);
-        return resp_result("OK");
-    }
-    if(!strcmp(func,"GUI_getChannelMapping")){
-        int map[32]; int n = ctx->persist? nvr_chan_persist_get_mapping(ctx->persist,map,32):0;
-        cJSON *c=cJSON_CreateObject(); cJSON *arr=cJSON_AddArrayToObject(c,"ChannelMapping");
-        for(int i=0;i<n;i++) cJSON_AddItemToArray(arr,cJSON_CreateNumber(map[i]));
-        return resp_ok_content(c);
-    }
-    if(!strcmp(func,"GUI_setDeviceDisplayExt")){
-        cJSON *arr=cJSON_GetObjectItem(args,"channels");
-        int n=cJSON_IsArray(arr)?cJSON_GetArraySize(arr):0;
-        nvr_pv_ext_t b[16]; if(n>16)n=16;
-        for(int i=0;i<n;i++){ cJSON *o=cJSON_GetArrayItem(arr,i);
-            b[i].chn0=(int)cJSON_GetNumberValue(cJSON_GetObjectItem(o,"channel"))-1;
-            b[i].x=(int)cJSON_GetNumberValue(cJSON_GetObjectItem(o,"x"));
-            b[i].y=(int)cJSON_GetNumberValue(cJSON_GetObjectItem(o,"y"));
-            b[i].w=(int)cJSON_GetNumberValue(cJSON_GetObjectItem(o,"w"));
-            b[i].h=(int)cJSON_GetNumberValue(cJSON_GetObjectItem(o,"h"));
-            const char *st=cJSON_GetStringValue(cJSON_GetObjectItem(o,"streamType"));
-            b[i].stream=(st&&!strcmp(st,"sub"))?NVR_STREAM_SUB:NVR_STREAM_MAIN;
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddNumberToObject(o, "ChannelStatusNotify", (double)notify);
+    /* Motion/Human/Face/Car:32 位,bit chn=通道 chn+1 近期有该类事件(事件中枢按类型聚合)。 */
+    uint32_t mo = 0, hu = 0, fa = 0, car = 0;
+    if (c->eh) nvr_evt_masks(c->eh, &mo, &hu, &fa, &car);
+    cJSON_AddNumberToObject(o, "MotionStatus", (double)mo);
+    cJSON_AddNumberToObject(o, "FaceStatus", (double)fa);
+    cJSON_AddNumberToObject(o, "HumanStatus", (double)hu);
+    cJSON_AddNumberToObject(o, "CarStatus", (double)car);
+    /* RecordStatus:32位,bit chn=通道 chn+1 正在录像(writer 开)。GUI 据此显示录像图标。 */
+    unsigned rec = c->sm ? nvr_stream_recording_mask(c->sm) : 0;
+    cJSON_AddNumberToObject(o, "RecordStatus", (double)rec);
+    return nvr_resp_content(o);
+}
+char *cmd_X_NightOwl_getDeviceCapabilities(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a;
+    cJSON *o = cJSON_CreateObject();
+    cJSON *dev = cJSON_AddObjectToObject(o, "device");
+    cJSON *dc = cJSON_AddArrayToObject(dev, "capabilities");
+    cJSON_AddItemToArray(dc, cJSON_CreateString("displayMode"));
+    cJSON_AddItemToArray(dc, cJSON_CreateString("groupInPrimary"));
+    cJSON_AddItemToArray(dc, cJSON_CreateString("multiStorage"));
+    cJSON_AddItemToArray(dc, cJSON_CreateString("format"));
+    cJSON_AddItemToArray(dc, cJSON_CreateString("cloudRecording"));
+    cJSON *chs = cJSON_AddArrayToObject(o, "channels");
+    int list_n = 0; nvr_channel_t list[32];
+    if (c->cm) list_n = nvr_chan_list(c->cm, list, 32);
+    for (int i = 0; i < list_n; i++) {
+        int ch1 = list[i].chn + 1;
+        /* 每通道能力:首次上线探测后写入 DB camera_capability(P2);未探到给安全默认。 */
+        char caps_json[1024];
+        cJSON *e = NULL;
+        if (c->settings && nvr_settings_caps_get(c->settings, ch1, caps_json, sizeof(caps_json), NULL, 0) > 0)
+            e = cJSON_Parse(caps_json);
+        if (!e) e = cJSON_CreateObject();
+        if (!cJSON_GetObjectItem(e, "channel")) cJSON_AddNumberToObject(e, "channel", ch1);
+        if (!cJSON_GetObjectItem(e, "signal"))  cJSON_AddStringToObject(e, "signal", "IPC");
+        if (!cJSON_GetObjectItem(e, "capabilities")) {
+            cJSON *cc = cJSON_AddArrayToObject(e, "capabilities");
+            cJSON_AddItemToArray(cc, cJSON_CreateString("cloudRecording"));
         }
-        nvr_preview_set_ext(ctx->pv,n?b:NULL,n);
-        return resp_ok_content(NULL);
+        cJSON_AddItemToArray(chs, e);
     }
-    if(!strcmp(func,"GUI_getDeviceDisplayExt")){
-        nvr_pv_ext_t b[16]; int n=nvr_preview_get_ext(ctx->pv,b,16);
-        cJSON *c=cJSON_CreateObject(); cJSON *arr=cJSON_AddArrayToObject(c,"channels");
-        for(int i=0;i<n;i++){ cJSON *o=cJSON_CreateObject();
-            cJSON_AddNumberToObject(o,"channel",b[i].chn0+1);
-            cJSON_AddNumberToObject(o,"x",b[i].x); cJSON_AddNumberToObject(o,"y",b[i].y);
-            cJSON_AddNumberToObject(o,"w",b[i].w); cJSON_AddNumberToObject(o,"h",b[i].h);
-            cJSON_AddStringToObject(o,"streamType",b[i].stream==NVR_STREAM_SUB?"sub":"main");
-            cJSON_AddItemToArray(arr,o); }
-        return resp_ok_content(c);
-    }
-    if(!strcmp(func,"GUI_getSysDisplay")){
-        cJSON *c=cJSON_CreateObject();
-        cJSON *rl=cJSON_AddArrayToObject(c,"resolutionList");
-        cJSON_AddItemToArray(rl,cJSON_CreateString("1920*1080"));
-        cJSON_AddStringToObject(c,"resolution","1920*1080");
-        cJSON_AddNumberToObject(c,"displayOpacity",255);
-        cJSON_AddStringToObject(c,"fb","fb0");
-        return resp_ok_content(c);
-    }
-    if(!strcmp(func,"GUI_setSysDisplay")){
-        cJSON *c=cJSON_CreateObject(); cJSON_AddStringToObject(c,"fb","fb0");
-        return resp_ok_content(c);  /* 分辨率固定 1080P，仅回 fb */
-    }
-    if(!strcmp(func,"X_NightOwl_getChannelStatus")){
-        int ch1=(int)cJSON_GetNumberValue(cJSON_GetObjectItem(args,"channel"));
-        int code = ctx->cm? nvr_chan_status_code_of(ctx->cm, ch1-1) : 0;
-        cJSON *c=cJSON_CreateObject(); cJSON_AddNumberToObject(c,"status",code);
-        return resp_ok_content(c);
-    }
-    if(!strcmp(func,"X_NightOwl_getDeviceCapabilities")){
-        cJSON *c=cJSON_CreateObject();
-        cJSON *dev=cJSON_AddObjectToObject(c,"device");
-        cJSON *dc=cJSON_AddArrayToObject(dev,"capabilities");
-        cJSON_AddItemToArray(dc,cJSON_CreateString("displayMode"));
-        cJSON_AddItemToArray(dc,cJSON_CreateString("groupInPrimary"));
-        /* 合并旧路由分支(nvr_cmd_router.c)已删除的广播项：本命令现在是
-         * getDeviceCapabilities 的唯一实现，必须保持超集，否则真机上依赖
-         * 这些项判断"多盘位/格式化/云存录像"开关的客户端功能会回归。 */
-        cJSON_AddItemToArray(dc,cJSON_CreateString("multiStorage"));
-        cJSON_AddItemToArray(dc,cJSON_CreateString("format"));
-        cJSON_AddItemToArray(dc,cJSON_CreateString("cloudRecording"));
-        cJSON *chs=cJSON_AddArrayToObject(c,"channels");
-        int list_n=0; nvr_channel_t list[32];
-        if(ctx->cm) list_n=nvr_chan_list(ctx->cm,list,32);
-        for(int i=0;i<list_n;i++){
-            int ch1=list[i].chn+1;
-            cJSON *cached = ctx->persist? nvr_chan_persist_get_caps(ctx->persist,ch1):NULL;
-            cJSON *o = cached? cJSON_Duplicate(cached,1) : cJSON_CreateObject();
-            /* 确保有 channel/signal 字段 */
-            if(!cJSON_GetObjectItem(o,"channel")) cJSON_AddNumberToObject(o,"channel",ch1);
-            if(!cJSON_GetObjectItem(o,"signal"))  cJSON_AddStringToObject(o,"signal","IPC");
-            /* 无缓存(真机相机能力探测尚未写缓存前)时给安全默认值：至少含
-             * cloudRecording(NVR 侧恒为真，等同旧路由行为)，避免通道对象
-             * 缺 capabilities 必填字段。 */
-            if(!cJSON_GetObjectItem(o,"capabilities")){
-                cJSON *cc=cJSON_AddArrayToObject(o,"capabilities");
-                cJSON_AddItemToArray(cc,cJSON_CreateString("cloudRecording"));
-            }
-            cJSON_AddItemToArray(chs,o);
-        }
-        return resp_ok_content(c);
-    }
-    if(!strcmp(func,"X_NightOwl_setChannelZoomPan")){
-        /* 预留：回显生效值，不驱动实际裁剪 */
-        cJSON *c=cJSON_CreateObject();
-        cJSON_AddStringToObject(c,"result","OK");
-        cJSON_AddNumberToObject(c,"CenterPointX",(int)cJSON_GetNumberValue(cJSON_GetObjectItem(args,"CenterPointX")));
-        cJSON_AddNumberToObject(c,"CenterPointY",(int)cJSON_GetNumberValue(cJSON_GetObjectItem(args,"CenterPointY")));
-        cJSON_AddNumberToObject(c,"ZoomRatio",(int)cJSON_GetNumberValue(cJSON_GetObjectItem(args,"ZoomRatio")));
-        return resp_ok_content(c);
-    }
-    if(!strcmp(func,"X_NightOwl_getChannelZoomPan")){
-        cJSON *c=cJSON_CreateObject();
-        cJSON_AddBoolToObject(c,"enable",0);
-        cJSON_AddNumberToObject(c,"CenterPointX",500); cJSON_AddNumberToObject(c,"CenterPointY",500);
-        cJSON_AddNumberToObject(c,"ZoomRatio",100);
-        return resp_ok_content(c);
-    }
-    return NULL;
+    return nvr_resp_content(o);
+}
+char *cmd_X_NightOwl_setChannelZoomPan(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    int chn0   = nvr_jint(a, "channel", 1) - 1;         /* 1-based → 0-based */
+    int enable = nvr_jbool(a, "enable", 1);
+    int cx     = nvr_jint(a, "CenterPointX", 500);
+    int cy     = nvr_jint(a, "CenterPointY", 500);
+    int fx     = nvr_jint(a, "FocusPointX", 500);
+    int fy     = nvr_jint(a, "FocusPointY", 500);
+    int ratio  = nvr_jint(a, "ZoomRatio", 100);
+    const char *result = "OK";
+    if (c->pv && chn0 >= 0)
+        nvr_preview_set_zoom(c->pv, chn0, enable, cx, cy, fx, fy, ratio, &cx, &cy, &ratio, &result);
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "result", result);        /* OK / Exceeds the zoom range / Exceeds zoom capabilities */
+    cJSON_AddNumberToObject(o, "CenterPointX", cx);       /* 实际生效值(被夹取后回填) */
+    cJSON_AddNumberToObject(o, "CenterPointY", cy);
+    cJSON_AddNumberToObject(o, "ZoomRatio", ratio);
+    return nvr_resp_content(o);
+}
+char *cmd_X_NightOwl_getChannelZoomPan(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    int chn0 = nvr_jint(a, "channel", 1) - 1;
+    int enable = 1, cx = 500, cy = 500, ratio = 100;
+    if (c->pv && chn0 >= 0)
+        nvr_preview_get_zoom(c->pv, chn0, &enable, &cx, &cy, &ratio);
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddBoolToObject(o, "enable", enable);
+    cJSON_AddNumberToObject(o, "CenterPointX", cx);
+    cJSON_AddNumberToObject(o, "CenterPointY", cy);
+    cJSON_AddNumberToObject(o, "ZoomRatio", ratio);
+    return nvr_resp_content(o);
 }

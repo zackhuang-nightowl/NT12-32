@@ -3,6 +3,7 @@
  *  注意：连续录像由 ③streaming 负责；本模块只做事件/云存登记 + 满盘策略 + 状态。
  ***************************************************************************************/
 #include "nvr_record_sched.h"
+#include "rsdk_cloud.h"   /* 云存上传跟踪(当前 no-op 桩;新 rsdk.h 不再伞含它) */
 #include "nvr_log.h"
 
 #include <stdio.h>

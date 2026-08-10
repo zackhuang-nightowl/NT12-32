@@ -2,7 +2,8 @@
 cmake_minimum_required(VERSION 3.13)
 project(nvr_streaming C CXX)
 
-set(HAPPY ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/happytime_onvif_rtsp/source)
+# 统一 RTSP SDK：NT12-SDK/OnvifClientLibrary(nop::NopRtspClient facade)。puller 仅需 nop_rtsp.h。
+set(OCL ${CMAKE_CURRENT_SOURCE_DIR}/../../../NT12-SDK/OnvifClientLibrary)
 
 add_library(nvr_streaming STATIC
     src/stream_nal.c        # 纯 C：NAL 分类
@@ -17,8 +18,7 @@ target_include_directories(nvr_streaming PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../../platform/media_hal # mhal_vdec.h / mhal_vout.h
 )
 target_include_directories(nvr_streaming PRIVATE
-    ${HAPPY}/bm ${HAPPY}/media ${HAPPY}/rtsp ${HAPPY}/rtp
-    ${HAPPY}/http ${HAPPY}/librtmp                        # happytime 传递依赖 (puller.cpp 用)
+    ${OCL}                                                # nop_rtsp.h (puller.cpp 用)
     ${CMAKE_CURRENT_SOURCE_DIR}/../../common/include      # nvr_log.h
 )
 
