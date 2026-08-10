@@ -14,6 +14,42 @@
 #include <ifaddrs.h>       /* getifaddrs —— 取 eth0 IP 作 LAN 发现的多播源 */
 #include <arpa/inet.h>     /* inet_ntop */
 #include <netinet/in.h>    /* sockaddr_in */
+#include <curl/curl.h>     /* NOP 设备 getDeviceCapabilities 直取(POST 8089/APPJsonCmd) */
+#include "cJSON.h"
+
+/* NOP 设备默认命令端口(NightOwl 从机 8089/APPJsonCmd)。 */
+#ifndef NVR_DEV_NOP_PORT
+#define NVR_DEV_NOP_PORT 8089
+#endif
+
+/* curl 收集应答体 */
+typedef struct { char *buf; size_t len; } chan_http_buf_t;
+static size_t chan_http_sink(void *p, size_t sz, size_t nm, void *u)
+{
+    size_t n = sz * nm; chan_http_buf_t *b = (chan_http_buf_t *)u;
+    char *nb = realloc(b->buf, b->len + n + 1); if (!nb) return 0;
+    b->buf = nb; memcpy(b->buf + b->len, p, n); b->len += n; b->buf[b->len] = 0;
+    return n;
+}
+/* 向 NOP 设备 POST 一条 JSON 命令,返回 malloc 应答体(调用方 free);失败返回 NULL。 */
+static char *chan_nop_post(const char *ip, int port, const char *json_in)
+{
+    CURL *c = curl_easy_init(); if (!c) return NULL;
+    char url[128]; snprintf(url, sizeof(url), "http://%s:%d/APPJsonCmd", ip, port > 0 ? port : NVR_DEV_NOP_PORT);
+    chan_http_buf_t m = {0};
+    struct curl_slist *hdr = curl_slist_append(NULL, "Content-Type: application/json");
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_POSTFIELDS, json_in);
+    curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdr);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, chan_http_sink);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, &m);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 5L);
+    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 3L);
+    CURLcode rc = curl_easy_perform(c);
+    curl_slist_free_all(hdr); curl_easy_cleanup(c);
+    if (rc != CURLE_OK) { free(m.buf); return NULL; }
+    return m.buf;
+}
 
 typedef struct {
     nvr_channel_t     d;          /* 通道描述（含 kind/backend/enabled） */
@@ -106,6 +142,20 @@ int nvr_chan_status_code_of(nvr_chan_mgr_t *m, int chn)
     if (!slot_has_device(s)) return 0;
     nvr_chan_status_t st = nvr_chan_status(m, chn);
     return nvr_chan_status_code(conn_of(st), &s->sub);
+}
+
+char *nvr_chan_dev_post(nvr_chan_mgr_t *m, int chn, const char *func, const char *args_json)
+{
+    slot_t *s = slot_of(m, chn);
+    if (!s || !s->in_use || s->d.backend != 0) return NULL;   /* 仅 NOP 设备透传 */
+    if (!s->d.onvif_ip[0]) return NULL;
+    /* 设备侧 channel 固定 1(单相机);若调用方给了 args 就带上,否则只带 channel。 */
+    char body[640];
+    if (args_json && args_json[0])
+        snprintf(body, sizeof(body), "{\"func\":\"%s\",\"args\":%s}", func ? func : "", args_json);
+    else
+        snprintf(body, sizeof(body), "{\"func\":\"%s\",\"args\":{\"channel\":1}}", func ? func : "");
+    return chan_nop_post(s->d.onvif_ip, NVR_DEV_NOP_PORT, body);
 }
 
 int nvr_chan_mgr_init(const nvr_chan_mgr_cfg_t *cfg, nvr_chan_mgr_t **out)
@@ -546,6 +596,13 @@ static void tick_slot(nvr_chan_mgr_t *m, slot_t *s, time_t now, int *resolve_bud
         case NVR_CH_PLAYING:
             s->status = NVR_CHAN_ONLINE;
             s->backoff_s = m->cfg.reconnect_base_s;
+            /* ★ 出图=设备已激活:清 inactive(否则 getChannelStatus 恒返 7 让 GUI 报错,尽管已出图)。
+             * 若之前误报 inactive,清零后强制 longPolling 推一次让 GUI 重拉更新为在线。 */
+            if (s->sub.inactive) {
+                s->sub.inactive = 0;
+                m->notify_mask |= (1u << s->d.chn);
+                NVR_LOGI("chan", "ch%d 出图→清 inactive(status 7→1),通知 GUI 刷新", s->d.chn);
+            }
             if (!s->notified_online) {
                 s->notified_online = 1;
                 m->notify_mask |= (1u << s->d.chn);   /* 通知 gui 该通道状态变(→CNN),重拉状态出图 */
@@ -561,6 +618,7 @@ static void tick_slot(nvr_chan_mgr_t *m, slot_t *s, time_t now, int *resolve_bud
             s->status = (st == NVR_CH_NOSIGNAL) ? NVR_CHAN_NOSIGNAL : NVR_CHAN_FAIL;
             if (s->notified_online) {
                 s->notified_online = 0;
+                s->caps_probed = 0;                   /* 掉线→下次连上重取设备能力更新 DB(保持实时/自愈) */
                 m->notify_mask |= (1u << s->d.chn);   /* 掉线也通知 gui 刷新(→显示 NO SIGNAL) */
                 NVR_LOGW("chan", "ch%d 掉线(%s)", s->d.chn,
                          (st == NVR_CH_NOSIGNAL) ? "NOSIGNAL" : "FAIL");
@@ -579,22 +637,132 @@ static void tick_slot(nvr_chan_mgr_t *m, slot_t *s, time_t now, int *resolve_bud
             break;
     }
 
-    /* 首次上线:按设备 ONVIF 探测(身份/PTZ)+ 校时 → 写 camera_capability(只探一次;
-     * 占用同一 ONVIF 会话预算,避免与 URL 解析并发阻塞主循环)。改凭据/重装 slot 会清零重探。 */
+    /* 连上设备即取设备能力更新 camera_capability(保持实时/自愈):caps_probed 在掉线时清零,
+     * 故每次(重)连都取一次。仅在**成功入库**后置 caps_probed=1;失败(HTTP/BUSY/解析)保持 0,
+     * 下 tick 在预算内重试(避免开机三机并发写库 SQLITE_BUSY 丢数据)。占用同一会话预算。 */
     if (s->status == NVR_CHAN_ONLINE && !s->caps_probed && m->cfg.settings
         && s->d.onvif_ip[0] && resolve_budget && *resolve_budget > 0) {
         (*resolve_budget)--;
-        s->caps_probed = 1;
-        nvr_onvif_info_t info;
-        if (nvr_onvif_probe(s->d.onvif_ip, s->d.onvif_port, s->d.user, s->d.pass, &info) == 0) {
-            char caps[600];
-            snprintf(caps, sizeof(caps),
-                     "{\"capabilities\":[\"cloudRecording\"%s],\"serial\":\"%s\",\"model\":\"%s\",\"firmware\":\"%s\"}",
-                     info.ptz ? ",\"ptz\"" : "", info.serial, info.model, info.firmware);
-            nvr_settings_caps_set(m->cfg.settings, s->d.chn + 1, caps, "IPC");
-            NVR_LOGI("chan", "ch%d 能力入库(ptz=%d model=%s time_set=%d)",
-                     s->d.chn, info.ptz, info.model, info.time_set);
+        int stored = 0;
+
+        if (s->d.backend == 0) {
+            /* NOP 设备:直接向设备 getDeviceCapabilities,取回真实能力入库。 */
+            char *resp = chan_nop_post(s->d.onvif_ip, NVR_DEV_NOP_PORT,
+                                       "{\"func\":\"X_NightOwl_getDeviceCapabilities\",\"args\":{}}");
+            if (resp) {
+                /* 设备应答: {statusCode, content:{device:{...}, channels:[{...}]}}。
+                 * 设备是单相机 → 取 content.channels[0] 作本通道能力对象入库。 */
+                cJSON *root = cJSON_Parse(resp);
+                cJSON *content = root ? cJSON_GetObjectItem(root, "content") : NULL;
+                cJSON *chs = content ? cJSON_GetObjectItem(content, "channels") : NULL;
+                cJSON *ch0 = (chs && cJSON_IsArray(chs)) ? cJSON_GetArrayItem(chs, 0) : NULL;
+                if (ch0) {
+                    char *cj = cJSON_PrintUnformatted(ch0);
+                    if (cj) {
+                        const char *sig = cJSON_GetStringValue(cJSON_GetObjectItem(ch0, "signal"));
+                        if (nvr_settings_caps_set(m->cfg.settings, s->d.chn + 1, cj, sig ? sig : "POE") == 0) {
+                            stored = 1;
+                            NVR_LOGI("chan", "ch%d NOP 能力入库(signal=%s)", s->d.chn, sig ? sig : "POE");
+                        } else NVR_LOGW("chan", "ch%d NOP 能力入库失败(DB busy?),下次重试", s->d.chn);
+                        free(cj);
+                    }
+                } else {
+                    NVR_LOGW("chan", "ch%d NOP 应答无 content.channels[0]: %s", s->d.chn, resp);
+                }
+                if (root) cJSON_Delete(root);
+                free(resp);
+            } else NVR_LOGW("chan", "ch%d NOP getDeviceCapabilities 无应答,下次重试", s->d.chn);
+        } else {
+            /* ONVIF 设备:探测身份 + 按 NOPMappingONVIF.md 组能力集(Media2 ConfigurationSet +
+             * Analytics 规则 + PTZ 子能力),构建与设备 getDeviceCapabilities 同构的通道能力对象。 */
+            nvr_onvif_info_t info;
+            if (nvr_onvif_probe(s->d.onvif_ip, s->d.onvif_port, s->d.user, s->d.pass, &info) == 0) {
+                cJSON *e = cJSON_CreateObject();
+                cJSON *caps = cJSON_AddArrayToObject(e, "capabilities");
+                if (info.cap_mic)     cJSON_AddItemToArray(caps, cJSON_CreateString("mic"));
+                if (info.cap_speaker) cJSON_AddItemToArray(caps, cJSON_CreateString("speaker"));
+                if (info.cap_mic && info.cap_speaker)
+                                      cJSON_AddItemToArray(caps, cJSON_CreateString("full_duplex"));
+                if (info.cap_sensor)  cJSON_AddItemToArray(caps, cJSON_CreateString("sensor"));
+                if (info.ptz)         cJSON_AddItemToArray(caps, cJSON_CreateString("ptz"));
+                /* ptz[] 子能力 */
+                if (info.ptz) {
+                    cJSON *p = cJSON_AddArrayToObject(e, "ptz");
+                    cJSON_AddItemToArray(p, cJSON_CreateString("pan"));
+                    cJSON_AddItemToArray(p, cJSON_CreateString("tilt"));
+                    cJSON_AddItemToArray(p, cJSON_CreateString("zoom"));
+                    if (info.ptz_focus)   cJSON_AddItemToArray(p, cJSON_CreateString("focus"));
+                    if (info.ptz_presets) cJSON_AddItemToArray(p, cJSON_CreateString("nodes"));
+                    if (info.ptz_tours)   cJSON_AddItemToArray(p, cJSON_CreateString("patrol"));
+                }
+                /* sensors[] */
+                if (info.cap_sensor) {
+                    cJSON *ss = cJSON_AddArrayToObject(e, "sensors");
+                    if (info.cap_motion) {
+                        cJSON *m1 = cJSON_CreateObject();
+                        cJSON_AddStringToObject(m1, "sensor", "motion");
+                        cJSON *md = cJSON_AddArrayToObject(m1, "modes");
+                        cJSON_AddItemToArray(md, cJSON_CreateString("pixelChange"));
+                        cJSON_AddItemToArray(ss, m1);
+                    }
+                    if (info.cap_objdet) {
+                        cJSON *o1 = cJSON_CreateObject();
+                        cJSON_AddStringToObject(o1, "sensor", "objectDetection");
+                        cJSON *md = cJSON_AddArrayToObject(o1, "modes");
+                        if (info.obj_human)   cJSON_AddItemToArray(md, cJSON_CreateString("human"));
+                        if (info.obj_vehicle) cJSON_AddItemToArray(md, cJSON_CreateString("vehicle"));
+                        if (info.obj_animal)  cJSON_AddItemToArray(md, cJSON_CreateString("animal"));
+                        if (info.obj_face)    cJSON_AddItemToArray(md, cJSON_CreateString("face"));
+                        cJSON_AddItemToArray(ss, o1);
+                    }
+                }
+                cJSON_AddBoolToObject(e, "hasBattery", 0);
+                /* 内部 _ai:供 AI_getChannelAICapabilities 用(getDeviceCapabilities 聚合时剥离)。
+                 * objectDetection 类别来自 GetRuleOptions 的 ClassFilter;ruledDetection 来自
+                 * GetSupportedRules 的 LineDetector/FieldDetector(maxInstances 等)。 */
+                if (info.cap_objdet || info.line_cross || info.field_intrusion) {
+                    cJSON *ai = cJSON_AddObjectToObject(e, "_ai");
+                    if (info.cap_objdet) {
+                        cJSON *od = cJSON_AddArrayToObject(ai, "objectDetection");
+                        if (info.obj_human)   cJSON_AddItemToArray(od, cJSON_CreateString("human"));
+                        if (info.obj_vehicle) cJSON_AddItemToArray(od, cJSON_CreateString("vehicle"));
+                        if (info.obj_animal)  cJSON_AddItemToArray(od, cJSON_CreateString("animal"));
+                        if (info.obj_face)    cJSON_AddItemToArray(od, cJSON_CreateString("face"));
+                    }
+                    if (info.line_cross || info.field_intrusion) {
+                        cJSON *rd = cJSON_AddObjectToObject(ai, "ruledDetection");
+                        if (info.line_cross) {
+                            cJSON *lc = cJSON_AddObjectToObject(rd, "lineCross");
+                            cJSON_AddNumberToObject(lc, "maxLineCount", info.line_max > 0 ? info.line_max : 1);
+                            cJSON_AddNumberToObject(lc, "maxPointsPerLine", info.line_max_points > 0 ? info.line_max_points : 2);
+                            cJSON *dir = cJSON_AddArrayToObject(lc, "direction");
+                            cJSON_AddItemToArray(dir, cJSON_CreateString("AB"));
+                            cJSON_AddItemToArray(dir, cJSON_CreateString("BA"));
+                            cJSON_AddItemToArray(dir, cJSON_CreateString("BOTH"));
+                        }
+                        if (info.field_intrusion) {
+                            cJSON *fi = cJSON_AddObjectToObject(rd, "fieldIntrusion");
+                            cJSON_AddNumberToObject(fi, "maxFieldCount", info.field_max > 0 ? info.field_max : 1);
+                            cJSON_AddNumberToObject(fi, "maxVerticesPerField", info.field_max_verts > 0 ? info.field_max_verts : 10);
+                        }
+                    }
+                }
+                /* 身份留存(NVR 侧展示/诊断用) */
+                if (info.serial[0])   cJSON_AddStringToObject(e, "serial", info.serial);
+                if (info.model[0])    cJSON_AddStringToObject(e, "model", info.model);
+                if (info.firmware[0]) cJSON_AddStringToObject(e, "firmware", info.firmware);
+                char *cj = cJSON_PrintUnformatted(e);
+                if (cj) {
+                    if (nvr_settings_caps_set(m->cfg.settings, s->d.chn + 1, cj, "IPC") == 0) {
+                        stored = 1;
+                        NVR_LOGI("chan", "ch%d ONVIF 能力入库: %s", s->d.chn, cj);
+                    } else NVR_LOGW("chan", "ch%d ONVIF 能力入库失败(DB busy?),下次重试", s->d.chn);
+                    free(cj);
+                }
+                cJSON_Delete(e);
+            }
         }
+        if (stored) s->caps_probed = 1;   /* 成功才封口;失败保持 0 → 下 tick 重试 */
     }
 }
 

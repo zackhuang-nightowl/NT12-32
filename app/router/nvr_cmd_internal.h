@@ -34,6 +34,8 @@ typedef struct {
     struct nvr_playback *pb;          /* 本机回放引擎(GUI_playbackControl) */
     struct nvr_evt_hub *eh;           /* 事件中枢:longPolling 的 Motion/Human/Face/Car 位图 */
     nvr_chan_persist_t *persist;      /* 出图↔channel 映射(channels.json) */
+    void               *disp_user;    /* 分辨率热切回调上下文(app) */
+    void              (*on_set_resolution)(void *disp_user, int w, int h);  /* setSysDisplay 热切 */
     int                 dev_nop_port; /* 透传到设备的 NOP 端口,默认 8089 */
     char                nvr_sn[64];   /* 本机 SN(nopOnvif 激活密码用) */
 } nvr_cmd_ctx_t;
@@ -65,6 +67,7 @@ char *cmd_GUI_playbackControl(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_GUI_setPlaybackMode(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_GUI_getPlaybackMode(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_X_NightOwl_getDeviceCapabilities(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_AI_getChannelAICapabilities(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_X_NightOwl_setChannelZoomPan(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_X_NightOwl_getChannelZoomPan(cJSON *a, const nvr_cmd_ctx_t *c);
 
@@ -86,6 +89,7 @@ char *cmd_set_datetime(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_X_NightOwl_setTimeSyncSwitch(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_X_NightOwl_getTimeSyncSwitch(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_reboot(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_X_NightOwl_resetToFactorySettings(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_X_NightOwl_setOwner(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_X_NightOwl_getOwner(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_GUI_getRemoteAccessState(cJSON *a, const nvr_cmd_ctx_t *c);

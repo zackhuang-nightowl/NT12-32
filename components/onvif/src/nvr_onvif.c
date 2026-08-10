@@ -3,6 +3,7 @@
  ***************************************************************************************/
 #include "nvr_onvif.h"
 #include "nop_sdk/nop_onvif.h"
+#include "nop_sdk/nop_onvif_ext.h"   /* media caps / analytics rules 映射能力集 */
 #include "nop_sdk/nop_log.h"
 
 #include <string.h>
@@ -103,10 +104,9 @@ int nvr_onvif_get_url(const char *ip, int port, const char *user, const char *pa
         f.host, f.port > 0 ? f.port : 80,
         f.service_url[0] ? f.service_url : "/onvif/device_service", 0);
     if (!dev) return -1;
-    /* 默认匿名请求——不带 UsernameToken/digest（NightOwl PoE 相机默认无需账户密码）。
-     * Happytime 仅在 username 非空时才加 Security 头(build_onvif_req_header)，故不设凭据即匿名。
-     * 只有显式给了口令(pass 非空)才带鉴权。 */
-    if (pass && pass[0]) nop_onvif_device_set_auth(dev, (user && user[0]) ? user : "admin", pass);
+    /* ONVIF 请求按 DB 账户密码鉴权:总带 WS-Security UsernameToken(用户名默认 admin,密码即使为空
+     * 也带,空密码 digest 对空密码相机成立)。相机 media2/analytics 需鉴权,不带 token 会 401→能力空。 */
+    nop_onvif_device_set_auth(dev, (user && user[0]) ? user : "admin", pass ? pass : "");
 
     /* ③ GetServices 取全部 service 链接 */
     int svc = nop_onvif_get_services(dev);
@@ -144,7 +144,9 @@ int nvr_onvif_probe(const char *ip, int port, const char *user, const char *pass
         f.host, f.port > 0 ? f.port : 80,
         f.service_url[0] ? f.service_url : "/onvif/device_service", 0);
     if (!dev) return -1;
-    if (pass && pass[0]) nop_onvif_device_set_auth(dev, (user && user[0]) ? user : "admin", pass);
+    /* ONVIF 请求按 DB 账户密码鉴权:总带 WS-Security UsernameToken(用户名默认 admin,密码即使为空
+     * 也带,空密码 digest 对空密码相机成立)。相机 media2/analytics 需鉴权,不带 token 会 401→能力空。 */
+    nop_onvif_device_set_auth(dev, (user && user[0]) ? user : "admin", pass ? pass : "");
 
     nop_onvif_device_information_t di;
     if (nop_onvif_get_device_information(dev, &di) == 0) {
@@ -156,6 +158,45 @@ int nvr_onvif_probe(const char *ip, int port, const char *user, const char *pass
     nop_onvif_get_services(dev);
     nop_onvif_get_capabilities(dev);
     out->ptz = (nop_onvif_ptz_get_node_count(dev) > 0) ? 1 : 0;
+
+    /* --- getDeviceCapabilities 能力集(NOPMappingONVIF.md):
+     *   Media2 ConfigurationSet 标志 → mic/speaker/sensor/ptz;Analytics 规则 → motion/objectDetection;
+     *   PTZ 子能力 → presets(nodes)/tours(patrol)/focus。 */
+    nop_onvif_media_caps_t mc;
+    if (nop_onvif_get_media_caps(dev, &mc) == 0) {
+        out->cap_mic     = mc.mic;
+        out->cap_speaker = (mc.audio_out && mc.audio_dec) ? 1 : 0;  /* AudioOutput + backchannel */
+        out->cap_sensor  = mc.analytics;
+        if (!out->ptz && mc.ptz) out->ptz = 1;
+    }
+    if (out->cap_sensor) {
+        /* sensors[] 明细 = GetSupportedRules ∪ GetSupportedAnalyticsModules(能力发现,而非已配置实例)。 */
+        nop_onvif_analytics_caps_t ac;
+        if (nop_onvif_analytics_get_supported(dev, &ac) == 0) {
+            out->cap_motion  = ac.motion;
+            out->cap_objdet  = ac.objdet;
+            out->obj_human   = ac.obj_human;
+            out->obj_vehicle = ac.obj_vehicle;
+            out->obj_animal  = ac.obj_animal;
+            out->obj_face    = ac.obj_face;
+            out->line_cross      = ac.line_cross;      out->line_max        = ac.line_max;
+            out->line_max_points = ac.line_max_points; out->field_intrusion = ac.field_intrusion;
+            out->field_max       = ac.field_max;       out->field_max_verts = ac.field_max_verts;
+            /* objectDetection 探到但类别名未细分 → 给通用默认 human+vehicle(与参考样式一致)。 */
+            if (out->cap_objdet && !out->obj_human && !out->obj_vehicle &&
+                !out->obj_animal && !out->obj_face) { out->obj_human = 1; out->obj_vehicle = 1; }
+        }
+    }
+    if (out->ptz) {
+        nop_onvif_profile_t pf;
+        if (nop_onvif_get_profile(dev, 0, &pf) == 0 && pf.token[0]) {
+            nop_onvif_preset_t ps[4];
+            if (nop_onvif_ptz_get_presets(dev, pf.token, ps, 4) > 0) out->ptz_presets = 1;
+            nop_onvif_tour_t tr[2];
+            if (nop_onvif_ptz_get_tours(dev, pf.token, tr, 2) > 0) out->ptz_tours = 1;
+        }
+        out->ptz_focus = 1;   /* 有 PTZ 一般含 Imaging 对焦(精确判定可加 GetImagingSettings) */
+    }
 
     /* 主/子流 URI:media1 优先,空则 media2 */
     int n1 = nop_onvif_get_profiles(dev);
@@ -187,7 +228,9 @@ int nvr_onvif_set_time_now(const char *ip, int port, const char *user, const cha
         f.host, f.port > 0 ? f.port : 80,
         f.service_url[0] ? f.service_url : "/onvif/device_service", 0);
     if (!dev) return -1;
-    if (pass && pass[0]) nop_onvif_device_set_auth(dev, (user && user[0]) ? user : "admin", pass);
+    /* ONVIF 请求按 DB 账户密码鉴权:总带 WS-Security UsernameToken(用户名默认 admin,密码即使为空
+     * 也带,空密码 digest 对空密码相机成立)。相机 media2/analytics 需鉴权,不带 token 会 401→能力空。 */
+    nop_onvif_device_set_auth(dev, (user && user[0]) ? user : "admin", pass ? pass : "");
     int rc = nop_onvif_set_system_datetime_now(dev);
     nop_onvif_device_destroy(dev);
     return rc == 0 ? 0 : -1;

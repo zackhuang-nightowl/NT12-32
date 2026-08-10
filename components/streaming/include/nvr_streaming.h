@@ -63,6 +63,11 @@ rsdk_err_t nvr_stream_switch_stream(nvr_stream_mgr_t *m, int chn, int stream, co
 rsdk_err_t nvr_stream_set_record   (nvr_stream_mgr_t *m, int chn, int on);
 /* 运行时更新录像盘组 + 对录像通道补开 writer(格式化后重组装盘组、免重启启用录像)。 */
 rsdk_err_t nvr_stream_mgr_set_group(nvr_stream_mgr_t *m, rsdk_group_t *group);
+
+/* 格式化编排:pause 暂停所有写盘并关闭 writer(盘静默,供安全格式化),返回原录像通道位图;
+ * resume 恢复原录像通道并换新盘组补开 writer。命令线程调用,内部沿用无锁 record=0 契约。 */
+uint32_t nvr_stream_mgr_pause_recording (nvr_stream_mgr_t *m);
+void     nvr_stream_mgr_resume_recording(nvr_stream_mgr_t *m, rsdk_group_t *group, uint32_t was);
 /* 录像中通道位图(bit chn=该通道正在写盘)。供 GUI_longPolling 的 RecordStatus。 */
 uint32_t   nvr_stream_recording_mask(nvr_stream_mgr_t *m);
 /* 回放:取某通道某码流(NVR_STREAM_MAIN/SUB)的解码尺寸。无该通道回退 1080p。返回 0/. */

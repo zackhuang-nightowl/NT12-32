@@ -943,3 +943,121 @@ int nop_onvif_events_pull_msgs(nop_onvif_device_t *device, int timeout_s, int ma
     onvif_free_NotificationMessages(&res.NotifyMessages);
     return n;
 }
+
+/* Media2 GetProfiles → 汇总各 profile 的 ConfigurationSet 标志位(ConfigurationsSupported):
+ *   AudioSource→mic、AudioOutput→speaker 声明、AudioDecoder→backchannel、PTZ→ptz、Analytics→sensor。 */
+int nop_onvif_get_media_caps(nop_onvif_device_t *device, nop_onvif_media_caps_t *out)
+{
+    if (!device || !out)
+        return -1;
+    memset(out, 0, sizeof(*out));
+    tr2_GetProfiles_REQ req;
+    tr2_GetProfiles_RES res;
+    memset(&req, 0, sizeof(req));
+    memset(&res, 0, sizeof(res));
+    /* ① Media2(tr2)主:profile 的 ConfigurationSet 标志。部分相机 media2 profile 精简/无音频。 */
+    if (onvif_tr2_GetProfiles(&device->dev, &req, &res)) {
+        for (MediaProfileList *p = res.Profiles; p; p = p->next) {
+            onvif_ConfigurationSet *c = &p->MediaProfile.Configurations;
+            if (c->AudioSourceFlag)  out->mic = 1;
+            if (c->AudioOutputFlag)  out->audio_out = 1;
+            if (c->AudioDecoderFlag) out->audio_dec = 1;
+            if (c->PTZFlag)          out->ptz = 1;
+            if (c->AnalyticsFlag)    out->analytics = 1;
+        }
+        onvif_free_MediaProfiles(&res.Profiles);
+    }
+    /* ② Media1(trt)兜底/补充:很多相机(如 CM-EA-*)音频/分析只在 media1 profile 暴露。
+     * happytime 把 media1 profile 解析进 device->dev.profiles(a_src_cfg/a_enc_cfg/va_cfg;
+     * 注意:ONVIF_PROFILE 无音频输出字段,speaker 只能靠 media2 的 AudioOutput/AudioDecoder)。 */
+    if (GetProfiles(&device->dev)) {
+        for (ONVIF_PROFILE *p = device->dev.profiles; p; p = p->next) {
+            if (p->a_src_cfg || p->a_enc_cfg) out->mic = 1;      /* AudioSource → mic */
+            if (p->va_cfg)                    out->analytics = 1;/* VideoAnalytics → sensor */
+        }
+    }
+    return 0;
+}
+
+/* 名称扫描:把 GetSupportedRules/AnalyticsModules 的 ConfigDescription.Name 归类到 sensor 类型。 */
+static void analytics_scan_name(const char *name, nop_onvif_analytics_caps_t *o)
+{
+    if (!name || !name[0]) return;
+    if (strstr(name, "CellMotion") || strstr(name, "Motion"))                    o->motion = 1;
+    if (strstr(name, "ObjectDetection") || strstr(name, "ObjectInField") ||
+        strstr(name, "FieldDetector"))                                            o->objdet = 1;
+    if (strstr(name, "Human") || strstr(name, "People") || strstr(name, "Person")) { o->objdet = 1; o->obj_human   = 1; }
+    if (strstr(name, "Vehicle") || strstr(name, "Car"))                          { o->objdet = 1; o->obj_vehicle = 1; }
+    if (strstr(name, "Animal") || strstr(name, "Pet"))                           { o->objdet = 1; o->obj_animal  = 1; }
+    if (strstr(name, "Face"))                                                    { o->objdet = 1; o->obj_face    = 1; }
+}
+
+int nop_onvif_analytics_get_supported(nop_onvif_device_t *device, nop_onvif_analytics_caps_t *out)
+{
+    if (!device || !out) return -1;
+    memset(out, 0, sizeof(*out));
+
+    /* 解析分析配置 token:media2 优先,media1 va_cfg 兜底。 */
+    char token[ONVIF_TOKEN_LEN] = {0};
+    if (nop_onvif_analytics_config_token(device, token, sizeof(token)) != 0 || !token[0]) {
+        if (GetProfiles(&device->dev)) {
+            for (ONVIF_PROFILE *p = device->dev.profiles; p; p = p->next) {
+                if (p->va_cfg && p->va_cfg->Configuration.token[0]) {
+                    strncpy(token, p->va_cfg->Configuration.token, sizeof(token) - 1);
+                    break;
+                }
+            }
+        }
+    }
+    if (!token[0]) return -2;
+
+    /* GetSupportedRules ∪ GetSupportedAnalyticsModules(两者组合,NOPMappingONVIF.md)。
+     * 同时抓 LineDetector/FieldDetector 的 maxInstances(供 AI_getChannelAICapabilities 的
+     * maxLineCount/maxFieldCount)。 */
+    tan_GetSupportedRules_REQ rq; tan_GetSupportedRules_RES rs;
+    memset(&rq, 0, sizeof(rq)); memset(&rs, 0, sizeof(rs));
+    strncpy(rq.ConfigurationToken, token, sizeof(rq.ConfigurationToken) - 1);
+    if (onvif_tan_GetSupportedRules(&device->dev, &rq, &rs)) {
+        for (ConfigDescriptionList *d = rs.SupportedRules.RuleDescription; d; d = d->next) {
+            const char *nm = d->ConfigDescription.Name;
+            analytics_scan_name(nm, out);
+            int mi = d->ConfigDescription.maxInstancesFlag ? d->ConfigDescription.maxInstances : 0;
+            if (nm && strstr(nm, "LineDetector"))  { out->line_cross = 1;      out->line_max  = mi; }
+            if (nm && strstr(nm, "FieldDetector")) { out->field_intrusion = 1; out->field_max = mi; }
+        }
+        onvif_free_ConfigDescriptions(&rs.SupportedRules.RuleDescription);
+    }
+    tan_GetSupportedAnalyticsModules_REQ mq; tan_GetSupportedAnalyticsModules_RES ms;
+    memset(&mq, 0, sizeof(mq)); memset(&ms, 0, sizeof(ms));
+    strncpy(mq.ConfigurationToken, token, sizeof(mq.ConfigurationToken) - 1);
+    if (onvif_tan_GetSupportedAnalyticsModules(&device->dev, &mq, &ms)) {
+        for (ConfigDescriptionList *d = ms.SupportedAnalyticsModules.AnalyticsModuleDescription; d; d = d->next)
+            analytics_scan_name(d->ConfigDescription.Name, out);
+        onvif_free_ConfigDescriptions(&ms.SupportedAnalyticsModules.AnalyticsModuleDescription);
+    }
+
+    /* GetRuleOptions(RuleType=NULL → 全部):objectDetection 的 ClassFilter 支持类别 + 线/场点数上限。
+     * ClassFilter 允许值多在 ConfigOptions 的 Name/RuleType/any 原始串里,按名扫描归类。 */
+    tan_GetRuleOptions_REQ oq; tan_GetRuleOptions_RES os;
+    memset(&oq, 0, sizeof(oq)); memset(&os, 0, sizeof(os));
+    strncpy(oq.ConfigurationToken, token, sizeof(oq.ConfigurationToken) - 1);
+    if (onvif_tan_GetRuleOptions(&device->dev, &oq, &os)) {
+        for (ConfigOptionsList *d = os.RuleOptions; d; d = d->next) {
+            onvif_ConfigOptions *co = &d->Options;
+            /* ClassFilter 类别:扫 Name / RuleType / any(原始 XML,含枚举值) */
+            if ((co->Name && strstr(co->Name, "ClassFilter")) ||
+                (co->RuleType[0] && strstr(co->RuleType, "ObjectDetection")) ||
+                (co->Name && strstr(co->Name, "Class"))) {
+                analytics_scan_name(co->any, out);   /* any 里含 Human/Vehicle/... 枚举 */
+                analytics_scan_name(co->Name, out);
+            }
+            /* 线/场点数(有些设备在 RuleOptions 报 MinCount/MaxCount) */
+            if (co->any) {
+                if (strstr(co->any, "LineDetector") || strstr(co->RuleType, "LineDetector")) out->line_max_points  = 2;
+                if (strstr(co->any, "FieldDetector") || strstr(co->RuleType, "FieldDetector")) out->field_max_verts = 10;
+            }
+        }
+        /* ConfigOptions.any 是 malloc 的原始串,happytime 无专用 free,随 device 生命周期;此处不单独释放。 */
+    }
+    return 0;
+}

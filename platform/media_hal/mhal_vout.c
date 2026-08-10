@@ -6,6 +6,8 @@
  ***************************************************************************************/
 #include "mhal_internal.h"
 #include "nvr_log.h"
+#include "nvr_display_modes.h"    /* HDMI 分辨率阶梯单一来源(热切降级) */
+#include "vendor_videoout.h"      /* VENDOR_VIDEOOUT_PARAM_AUTO_CLEARWIN:空/停路窗口自动清黑 */
 #include <stdio.h>
 #include <string.h>
 #include <pthread.h>
@@ -129,9 +131,10 @@ void mhal_vout_clear_black(void)
     cw.input_dim.h = (g_disp.disp_h > 1080) ? 272 : 136;
     cw.in_fmt = HD_VIDEO_PXLFMT_YUV422_ONE;
     cw.buf = va;
-    /* YUV422(UYVY)黑:字节序 [U Y V Y]=[0x80 0x00 0x80 0x00] → uint32 LE = 0x00800080。
-     * (之前填 0x80008000 = 字节[00 80 00 80] → U=V=0 = 绿色,错。UYVY 里 U/V 必须 0x80 才中性黑) */
-    UINT32 pat = 0x00800080;
+    /* 统一采用 SDK 样例 liveview_with_clearwin.c 的 WINCOLOR_BLACK=0x10801080:
+     * uint32 LE 字节序 [80 10 80 10] = UYVY [U=0x80 Y=0x10 V=0x80 Y=0x10] → Y=16(视频黑,限幅
+     * 范围下限)、U=V=128(中性)。之前用 0x00800080(Y=0)是"低于黑",部分屏渲染偏色/发绿。 */
+    UINT32 pat = 0x10801080;
     for (UINT32 i = 0; i < (cw.input_dim.w * cw.input_dim.h / 2); i++)
         *(UINT32 *)(cw.buf + 4 * i) = pat;
     cw.output_rect.x = 0; cw.output_rect.y = 0;
@@ -215,6 +218,34 @@ int mhal_vout_commit(void)
     return rc;
 }
 
+/* 请求分辨率并落地到 g_disp.disp_w/h:屏幕不支持则沿阶梯(NVR_DISPLAY_MODES,高→低)逐级下探到可用者。
+ * ⚠️ disp_w/h 必须取实际生效值(越界会落 lcd_0 不上屏)。供 init 与 set_resolution 共用。 */
+static void apply_hdmi_resolution(int width, int height)
+{
+    static const struct { int w, h; } ladder[] = {
+#define X(w, h, label) { (w), (h) },
+        NVR_DISPLAY_MODES(X)
+#undef X
+    };
+    const unsigned nl = (unsigned)(sizeof(ladder) / sizeof(ladder[0]));
+    int tw = width  > 0 ? width  : NVR_DISPLAY_DEFAULT_W;
+    int th = height > 0 ? height : NVR_DISPLAY_DEFAULT_H;
+    int ok = (set_hdmi_mode(g_disp.ctrl_path, tw, th) == 0);
+    if (!ok) {
+        long req_area = (long)tw * th;
+        for (unsigned i = 0; i < nl; i++) {
+            if ((long)ladder[i].w * ladder[i].h >= req_area) continue;
+            if (set_hdmi_mode(g_disp.ctrl_path, ladder[i].w, ladder[i].h) == 0) {
+                NVR_LOGW("mhal", "HDMI %dx%d 屏幕不支持,降级到 %dx%d", tw, th, ladder[i].w, ladder[i].h);
+                tw = ladder[i].w; th = ladder[i].h; ok = 1; break;
+            }
+        }
+    }
+    if (!ok) { tw = NVR_DISPLAY_DEFAULT_W; th = NVR_DISPLAY_DEFAULT_H; set_hdmi_mode(g_disp.ctrl_path, tw, th); }
+    g_disp.disp_w = tw; g_disp.disp_h = th;
+    NVR_LOGD("mhal", "HDMI 输出实际 %dx%d", g_disp.disp_w, g_disp.disp_h);
+}
+
 int mhal_vout_init(mhal_out_t out, int width, int height)
 {
     HD_RESULT ret;
@@ -244,27 +275,111 @@ int mhal_vout_init(mhal_out_t out, int width, int height)
     /* HDMI 输出分辨率：config 给的(4K/1080p 可选,按所接屏)；设失败 → 回落 1920x1080。
      * ⚠️ disp_w/disp_h 必须取**实际生效**分辨率——之前 config 写 4K 但屏是 1080p，
      * 设 4K 失败后仍按 3840 算窗口 → 越界到 lcd_0(720x576) → 不上屏。现在回落后按 1080p 算。 */
-    {
-        int tw = width  > 0 ? width  : 1920;
-        int th = height > 0 ? height : 1080;
-        if (set_hdmi_mode(g_disp.ctrl_path, tw, th) != 0 && !(tw == 1920 && th == 1080)) {
-            NVR_LOGW("mhal", "HDMI %dx%d 设置失败,回落 1920x1080", tw, th);
-            tw = 1920; th = 1080;
-            set_hdmi_mode(g_disp.ctrl_path, tw, th);
-        }
-        g_disp.disp_w = tw;
-        g_disp.disp_h = th;
-        NVR_LOGD("mhal", "HDMI 输出实际 %dx%d", g_disp.disp_w, g_disp.disp_h);
-    }
-
-    /* fb 透明(方案A)暂不在 init 里设——FB_ATTR get/set 在本板可能阻塞。先保证出图，
-     * fb 透明按可视结果再单独调(见 mhal_vout_setup_fb_alpha)。 */
-    (void)mhal_vout_setup_fb_alpha;
+    /* HDMI 输出分辨率:按请求;屏幕不支持沿阶梯降级(取实际生效值)。 */
+    apply_hdmi_resolution(width, height);
 
     g_disp.inited = 1;
-    /* ★ 默认清黑:HDMI 模式设好后立即把视频层刷成中性黑,不等首次出图。否则开机 HDMI 起来到
-     * 首帧解码之间,视频层是未初始化的 YUV 全 0(=绿),表现为"先绿后黑"。此处提前一次即默认黑。 */
+    /* ★ 开机默认黑(LVGL 走 ARGB1555 逐像素 alpha 挖透明,视频层无信号时默认是绿 → 必须由 NVR 兜黑):
+     *  ① setup_fb_alpha —— 关 OSD FB colorkey、走 ARGB1555 逐像素 alpha(与 GUI 一致)。
+     *  ② AUTO_CLEARWIN(SDK liveview_with_clearwin.c 方式)—— 开启后驱动**自动**把"未起/已停 vo 路"
+     *     的窗口区域清成黑,持续生效:开机无通道、无设备、通道掉线,对应区域都默认黑(核心兜底)。
+     *  ③ clear_black —— 再显式挂一帧视频黑(WINCOLOR_BLACK),保证开机瞬间即黑不闪绿。 */
+    mhal_vout_setup_fb_alpha();
+    mhal_vout_enable_auto_clearwin();
+    mhal_vout_push_black_bg();     /* ★ 挂全屏黑帧到专用背景窗口:开机/无设备立即黑(核心) */
     mhal_vout_clear_black();
+    return 0;
+}
+
+/* ★ 开机默认黑的核心:向一个**专用全屏背景 vo 窗口**直接 push 一帧黑 YUV(SDK user_videoout.c
+ * 的 hd_videoout_push_in_buf 方式,无需 dec/proc/start_list 即刻上屏)。
+ * 背景窗口用远离通道(0..31)的 IN(0,63),置最低层 HD_LAYER1 → 后开的通道窗口自然盖在其上。
+ * 一帧常驻:开机无通道/无设备时整屏是这帧黑;通道上图后盖住,空处仍是黑(替代"露绿")。 */
+#define MHAL_BG_WIN_ID 63
+static HD_PATH_ID           g_bg_path = 0;
+static HD_COMMON_MEM_VB_BLK g_bg_blk  = HD_COMMON_MEM_VB_INVALID_BLK;
+
+void mhal_vout_push_black_bg(void)
+{
+    if (!g_disp.inited) return;
+    int w = g_disp.disp_w > 0 ? g_disp.disp_w : 1920;
+    int h = g_disp.disp_h > 0 ? g_disp.disp_h : 1080;
+    HD_RESULT ret;
+
+    /* 1) 首次:开背景 vo 路 + 全屏窗口 + 置最低层 */
+    if (!g_bg_path) {
+        if ((ret = hd_videoout_open(HD_VIDEOOUT_IN(0, MHAL_BG_WIN_ID),
+                                    HD_VIDEOOUT_OUT(0, 0), &g_bg_path)) != HD_OK) {
+            NVR_LOGW("mhal", "背景 vo 路 open 失败 %d(跳过默认黑背景)", ret);
+            g_bg_path = 0; return;
+        }
+        HD_VIDEOOUT_WIN_ATTR win; memset(&win, 0, sizeof(win));
+        win.rect.x = 0; win.rect.y = 0; win.rect.w = w; win.rect.h = h;
+        win.visible = 1;
+        hd_videoout_set(g_bg_path, HD_VIDEOOUT_PARAM_IN_WIN_ATTR, &win);
+        VENDOR_VIDEOOUT_WIN_LAYER_ATTR la; memset(&la, 0, sizeof(la));
+        la.layer = HD_LAYER1;   /* 最低层(背景),通道窗口在其上 */
+        vendor_videoout_set(g_bg_path, VENDOR_VIDEOOUT_PARAM_WIN_LAYER_ATTR, &la);
+    }
+
+    /* 2) 分配全屏黑 YUV422(UYVY)缓冲并 push 一帧(常驻显示,不释放该 block) */
+    UINT32 sz = (UINT32)w * h * 2;
+    if (g_bg_blk == HD_COMMON_MEM_VB_INVALID_BLK) {
+        g_bg_blk = hd_common_mem_get_block(HD_COMMON_MEM_USER_BLK, sz, DDR_ID0);
+        if (g_bg_blk == HD_COMMON_MEM_VB_INVALID_BLK) {
+            NVR_LOGW("mhal", "背景黑帧 get_block 失败(跳过)"); return;
+        }
+    }
+    UINTPTR pa = hd_common_mem_blk2pa(g_bg_blk);
+    UINT8 *va = (UINT8 *)hd_common_mem_mmap(HD_COMMON_MEM_MEM_TYPE_NONCACHE, pa, sz);
+    if (!va) { NVR_LOGW("mhal", "背景黑帧 mmap 失败"); return; }
+    for (UINT32 i = 0; i < sz / 4; i++) *(UINT32 *)(va + 4 * i) = 0x10801080;  /* WINCOLOR_BLACK */
+    hd_common_mem_munmap(va, sz);
+
+    HD_VIDEO_FRAME f; memset(&f, 0, sizeof(f));
+    f.sign        = MAKEFOURCC('V', 'F', 'R', 'M');
+    f.ddr_id      = DDR_ID0;
+    f.pxlfmt      = HD_VIDEO_PXLFMT_YUV422_ONE;
+    f.dim.w       = w;         f.dim.h       = h;
+    f.pw[0]       = w;         f.ph[0]       = h;
+    f.loff[0]     = (UINT32)w * 2;                 /* UYVY 行跨距 */
+    f.phy_addr[0] = pa;
+    f.blk         = g_bg_blk;
+    if ((ret = hd_videoout_push_in_buf(g_bg_path, &f, NULL, 0)) != HD_OK)
+        NVR_LOGW("mhal", "背景黑帧 push_in_buf 失败 %d", ret);
+    else
+        NVR_LOGI("mhal", "背景黑帧已上屏(IN63 全屏 %dx%d,最低层):开机/无设备默认黑", w, h);
+}
+
+/* SDK 统一方式:开启 videoout AUTO_CLEARWIN —— 驱动自动把未起/已停的 vo 路窗口区清黑。
+ * 一次开启持续生效:无视频/无设备/掉线的区域都默认黑(不再露出视频层绿底)。 */
+void mhal_vout_enable_auto_clearwin(void)
+{
+    if (!g_disp.inited || !g_disp.ctrl_path) return;
+    VENDOR_VIDEOOUT_AUTO_CLEARWIN acw;
+    memset(&acw, 0, sizeof(acw));
+    acw.enable = 1;
+    if (vendor_videoout_set(g_disp.ctrl_path, VENDOR_VIDEOOUT_PARAM_AUTO_CLEARWIN, &acw) != HD_OK)
+        NVR_LOGW("mhal", "AUTO_CLEARWIN 开启失败(vendor_videoout_set)");
+    else
+        NVR_LOGI("mhal", "AUTO_CLEARWIN 开启:空/停 vo 路窗口默认黑");
+}
+
+void mhal_vout_get_resolution(int *w, int *h)
+{
+    if (w) *w = g_disp.disp_w;
+    if (h) *h = g_disp.disp_h;
+}
+
+/* 运行期热切 HDMI 输出分辨率(setSysDisplay)。只改输出模式 + 画布尺寸 + 清屏;窗口重排由
+ * 上层 preview(nvr_preview_set_hdmi)负责。屏幕不支持按阶梯降级,生效值经 get 读回。 */
+int mhal_vout_set_resolution(int w, int h)
+{
+    mhal_lock();
+    if (!g_disp.inited) { mhal_unlock(); return -1; }
+    apply_hdmi_resolution(w, h);
+    mhal_vout_clear_black();
+    mhal_unlock();
     return 0;
 }
 

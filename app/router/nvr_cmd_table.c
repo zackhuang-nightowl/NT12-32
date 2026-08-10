@@ -22,6 +22,7 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
     { "GUI_setPlaybackMode",                   cmd_GUI_setPlaybackMode },
     { "GUI_getPlaybackMode",                   cmd_GUI_getPlaybackMode },
     { "X_NightOwl_getDeviceCapabilities",      cmd_X_NightOwl_getDeviceCapabilities },
+    { "AI_getChannelAICapabilities",           cmd_AI_getChannelAICapabilities },
     { "X_NightOwl_setChannelZoomPan",          cmd_X_NightOwl_setChannelZoomPan },
     { "X_NightOwl_getChannelZoomPan",          cmd_X_NightOwl_getChannelZoomPan },
 
@@ -43,6 +44,7 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
     { "X_NightOwl_setTimeSyncSwitch",          cmd_X_NightOwl_setTimeSyncSwitch },
     { "X_NightOwl_getTimeSyncSwitch",          cmd_X_NightOwl_getTimeSyncSwitch },
     { "reboot",                                cmd_reboot },
+    { "X_NightOwl_resetToFactorySettings",     cmd_X_NightOwl_resetToFactorySettings },
     { "X_NightOwl_setOwner",                   cmd_X_NightOwl_setOwner },
     { "X_NightOwl_getOwner",                   cmd_X_NightOwl_getOwner },
     { "GUI_getRemoteAccessState",              cmd_GUI_getRemoteAccessState },

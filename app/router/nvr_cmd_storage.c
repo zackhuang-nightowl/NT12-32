@@ -83,18 +83,21 @@ char *cmd_formatStorage(cJSON *a, const nvr_cmd_ctx_t *c)
     nvr_disk_t disk;
     if (!stg_find_by_name(c, value, &disk, NULL)) return nvr_resp_err("no_such_storage");
     NVR_LOGW("router", "formatStorage(%s) → %s", value, disk.path);
-    if (nvr_storage_format(c->stg, disk.path, 0, 1) != RSDK_OK)
-        return nvr_resp_err("format_failed");
-    /* ★ 格式化成功 → 免重启启用录像:重扫(盘状态转 OURS)→ 重组装盘组 → 推给 streaming 补开 writer。
+    /* ★ 先暂停所有写盘并关闭 writer(盘静默)——否则录像 writer 正写着被格式化的盘,
+     * 既冲突(格式化不干净),格式化后又因旧 writer 还开着导致 set_group 补开 0 路(录像坏)。 */
+    uint32_t was = c->sm ? nvr_stream_mgr_pause_recording(c->sm) : 0;
+    rsdk_err_t frc = nvr_storage_format(c->stg, disk.path, 0, 1);
+    /* ★ 无论成败都要恢复写盘:重扫(盘状态转 OURS)→ 重组装盘组 → 恢复录像通道并在新组补开 writer。
      * 开机盘未格式化时 assemble 失败、group=NULL、录像禁用;此处补上,ch 立即开始写盘。 */
     nvr_storage_scan(c->stg);
     rsdk_group_t *g = NULL;
     if (c->sm && nvr_storage_assemble(c->stg, &g) == RSDK_OK && g) {
-        nvr_stream_mgr_set_group(c->sm, g);
-        NVR_LOGW("router", "格式化后重组装盘组成功 → 录像已启用(免重启)");
+        nvr_stream_mgr_resume_recording(c->sm, g, was);
+        NVR_LOGW("router", "格式化后重组装盘组成功 → 录像已恢复(免重启)");
     } else {
-        NVR_LOGW("router", "格式化成功但盘组重组装失败(可能多盘缺盘/SATA异常),录像待重启");
+        NVR_LOGW("router", "盘组重组装失败(可能格式化失败/多盘缺盘/SATA异常),录像待重启");
     }
+    if (frc != RSDK_OK) return nvr_resp_err("format_failed");
     return nvr_resp_ok();
 }
 char *cmd_getAllDisksHealth(cJSON *a, const nvr_cmd_ctx_t *c)

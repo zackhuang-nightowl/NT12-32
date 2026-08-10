@@ -296,6 +296,26 @@ void nvr_settings_close(nvr_settings_t *s)
     free(s);
 }
 
+/* 恢复出厂:清所有数据表的行(表结构保留),**不清 meta_kv**(存 schema_version + seeded;
+ * 保留 seeded → 不自动重播种 → 出厂真正空表,交向导初始化)。单事务,失败回滚。 */
+int nvr_settings_factory_reset(nvr_settings_t *s)
+{
+    if (!s || !s->db) return -1;
+    static const char *TABLES[] = {
+        "setting", "auth", "nop_owner", "camera", "camera_capability",
+        "record_config", "record_schedule", "push_config", "cloud_channel", "schedule",
+        "local_link", "email_alert", "ftp", "ddns",
+    };
+    if (exec_sql(s->db, "BEGIN;") != 0) return -1;
+    for (unsigned i = 0; i < sizeof(TABLES)/sizeof(TABLES[0]); i++) {
+        char sql[64]; snprintf(sql, sizeof(sql), "DELETE FROM %s;", TABLES[i]);
+        if (exec_sql(s->db, sql) != 0) { exec_sql(s->db, "ROLLBACK;"); return -1; }
+    }
+    if (exec_sql(s->db, "COMMIT;") != 0) return -1;
+    notify(s, "");   /* 全量变更通知 */
+    return 0;
+}
+
 /* ---------------- KV ---------------- */
 int nvr_settings_get_int(nvr_settings_t *s, const char *key, int def)
 {

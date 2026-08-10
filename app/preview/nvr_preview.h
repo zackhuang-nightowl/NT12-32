@@ -52,6 +52,7 @@ int  nvr_preview_set_mode(nvr_preview_t *p, int display_mode, int display_page);
 int  nvr_preview_set_mapping(nvr_preview_t *p, const int *map1based, int n);
 /* 悬浮块列表（覆盖式设置；n=0 清空所有悬浮块）。 */
 int  nvr_preview_set_ext(nvr_preview_t *p, const nvr_pv_ext_t *b, int n);
+int  nvr_preview_set_hdmi(nvr_preview_t *p, int w, int h, int *eff_w, int *eff_h);  /* 分辨率热切 */
 
 /* 阻塞等待:切宫格/切码流后,轮询直到**任一可见格出图**或超时(ms)。供接口层"等图出了再回复"
  * (LVGL 等待期间放加载动画)。返回 0=已出图,1=超时。 */

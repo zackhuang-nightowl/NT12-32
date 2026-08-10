@@ -82,6 +82,11 @@ void nvr_chan_set_substate(nvr_chan_mgr_t *m, int chn, const nvr_chan_substate_t
 /* 取该通道 getChannelStatus 用的 0-7 码：FSM→conn 映射 + 子状态 → nvr_chan_status_code。 */
 int  nvr_chan_status_code_of(nvr_chan_mgr_t *m, int chn);
 
+/* NOP 透传:把一条 NOP 命令 POST 到该通道(0-based)的设备 8089/APPJsonCmd(args.channel 改设备侧 1),
+ * 返回 malloc 的应答体(调用方 free);非 NOP 设备/无 IP/失败返回 NULL。供 AI_getChannelAICapabilities
+ * 等"NOP 透传/ONVIF 映射"的接口在本地 handler 内对 NOP 设备直接透传。 */
+char *nvr_chan_dev_post(nvr_chan_mgr_t *m, int chn, const char *func, const char *args_json);
+
 #ifdef __cplusplus
 }
 #endif

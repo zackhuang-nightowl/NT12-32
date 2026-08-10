@@ -318,6 +318,51 @@ typedef struct nop_onvif_event_msg {
 int nop_onvif_events_pull_msgs(nop_onvif_device_t *device, int timeout_s, int max,
                                nop_onvif_event_msg_t *out);
 
+/* ======================================================================== */
+/* Media capability flags (getDeviceCapabilities mapping)                    */
+/* ======================================================================== */
+
+/** Per-device media capability flags, derived from Media2 GetProfiles'
+ *  ConfigurationSet flags (ProfileCapabilities.ConfigurationsSupported):
+ *   - mic         = any profile carries AudioSource
+ *   - audio_out   = any profile carries AudioOutput (speaker declaration)
+ *   - audio_dec   = any profile carries AudioDecoder (backchannel decode path)
+ *   - ptz         = any profile carries PTZ
+ *   - analytics   = any profile carries Analytics (→ sensor)
+ *  speaker(2-way) is (audio_out && audio_dec): AudioOutput 声明 + backchannel。 */
+typedef struct nop_onvif_media_caps {
+    int mic;
+    int audio_out;
+    int audio_dec;
+    int ptz;
+    int analytics;
+} nop_onvif_media_caps_t;
+
+/** Fill @p out from Media2 GetProfiles ConfigurationSet flags. @return 0 or <0. */
+int nop_onvif_get_media_caps(nop_onvif_device_t *device, nop_onvif_media_caps_t *out);
+
+/** Analytics sensor capabilities, derived from **GetSupportedRules ∪
+ *  GetSupportedAnalyticsModules** (NOPMappingONVIF.md):
+ *   - CellMotionDetector/CellMotionEngine    → motion(pixelChange)
+ *   - ObjectDetection/ObjectInField/…Engine  → objectDetection(+ human/vehicle/animal/face) */
+typedef struct nop_onvif_analytics_caps {
+    int motion;
+    int objdet;
+    int obj_human, obj_vehicle, obj_animal, obj_face;
+    /* ruledDetection(AI_getChannelAICapabilities):越线/区域入侵 */
+    int line_cross;       /* GetSupportedRules 含 tt:LineDetector */
+    int line_max;         /* LineDetector maxInstances(maxLineCount) */
+    int line_max_points;  /* GetRuleOptions:每条线点数(缺省 2) */
+    int field_intrusion;  /* GetSupportedRules 含 tt:FieldDetector */
+    int field_max;        /* FieldDetector maxInstances(maxFieldCount) */
+    int field_max_verts;  /* GetRuleOptions:多边形顶点上限 */
+} nop_onvif_analytics_caps_t;
+
+/** Resolve the analytics config token (media2, else media1 va_cfg), then combine
+ *  GetSupportedRules + GetSupportedAnalyticsModules (+ GetRuleOptions for ClassFilter
+ *  classes / line-field limits) into @p out. @return 0 or <0. */
+int nop_onvif_analytics_get_supported(nop_onvif_device_t *device, nop_onvif_analytics_caps_t *out);
+
 #ifdef __cplusplus
 }
 #endif

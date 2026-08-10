@@ -10,8 +10,10 @@
 #include "nvr_chan_status.h"
 #include "nvr_gui_config.h"
 #include "nvr_defaults.h"
+#include "nvr_display_modes.h"  /* NVR_DISPLAY_MODES 单一档位来源 */
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 char *cmd_GUI_setDeviceDisplayMode(cJSON *a, const nvr_cmd_ctx_t *c)
 {
@@ -78,15 +80,50 @@ char *cmd_GUI_getDeviceDisplayExt(cJSON *a, const nvr_cmd_ctx_t *c)
         cJSON_AddItemToArray(arr, e); }
     return nvr_resp_content(o);
 }
+static int resolution_supported(const char *s)
+{
+    if (!s) return 0;
+#define X(w, h, label) if (strcmp(s, label) == 0) return 1;
+    NVR_DISPLAY_MODES(X)
+#undef X
+    return 0;
+}
 char *cmd_GUI_getSysDisplay(cJSON *a, const nvr_cmd_ctx_t *c)
 {
-    (void)a; (void)c;
-    return NULL;   /* TODO 待实现:查实际显示态(mhal 显示分辨率等)。无业务→返回 NULL→路由统一 501 notSupport */
+    (void)a;
+    char cur[32];
+    if (c->settings)
+        nvr_settings_get_str(c->settings, "display.resolution", cur, sizeof(cur), "1920x1080");
+    else
+        snprintf(cur, sizeof(cur), "1920x1080");
+    cJSON *o = cJSON_CreateObject();
+    cJSON *rl = cJSON_AddArrayToObject(o, "resolutionList");   /* 设备支持的输出档(单一来源) */
+#define X(w, h, label) cJSON_AddItemToArray(rl, cJSON_CreateString(label));
+    NVR_DISPLAY_MODES(X)
+#undef X
+    cJSON_AddStringToObject(o, "resolution", cur);             /* 当前记录/生效分辨率 */
+    cJSON_AddNumberToObject(o, "displayOpacity", 255);
+    cJSON_AddStringToObject(o, "fb", "fb1");
+    return nvr_resp_content(o);
 }
 char *cmd_GUI_setSysDisplay(cJSON *a, const nvr_cmd_ctx_t *c)
 {
-    (void)a; (void)c;
-    return NULL;   /* TODO 待实现:设实际显示。无业务→返回 NULL→路由 501 */
+    const char *res = nvr_jstr(a, "resolution", NULL);
+    cJSON *o = cJSON_CreateObject();
+    if (!res || !resolution_supported(res)) {
+        cJSON_AddStringToObject(o, "result", res ? "unsupported resolution" : "OK");
+        cJSON_AddStringToObject(o, "fb", "fb1");
+        return nvr_resp_content(o);
+    }
+    /* 记录(生效值由热切回调按实际降级回写覆盖) */
+    if (c->settings) nvr_settings_set_str(c->settings, "display.resolution", res);
+    /* 热切:切 HDMI 输出 + 重排出图 + 回写生效值 + 重启 LVGL(由 app 回调实现)。 */
+    int w = 0, h = 0;
+    if (c->on_set_resolution && sscanf(res, "%dx%d", &w, &h) == 2 && w > 0 && h > 0)
+        c->on_set_resolution(c->disp_user, w, h);
+    cJSON_AddStringToObject(o, "result", "OK");
+    cJSON_AddStringToObject(o, "fb", "fb1");
+    return nvr_resp_content(o);
 }
 char *cmd_X_NightOwl_getChannelStatus(cJSON *a, const nvr_cmd_ctx_t *c)
 {
@@ -119,10 +156,43 @@ char *cmd_GUI_longPolling(cJSON *a, const nvr_cmd_ctx_t *c)
     cJSON_AddNumberToObject(o, "RecordStatus", (double)rec);
     return nvr_resp_content(o);
 }
+/* 通道能力对象是否含某能力(capabilities 数组里有 name)。 */
+static int caps_has(cJSON *e, const char *name)
+{
+    cJSON *caps = cJSON_GetObjectItem(e, "capabilities"); cJSON *it;
+    if (!cJSON_IsArray(caps)) return 0;
+    cJSON_ArrayForEach(it, caps) if (cJSON_IsString(it) && strcmp(it->valuestring, name) == 0) return 1;
+    return 0;
+}
 char *cmd_X_NightOwl_getDeviceCapabilities(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     (void)a;
     cJSON *o = cJSON_CreateObject();
+    /* 先建 channels(只含**有真实设备**的通道:status!=0),同时统计设备级 ptz/ai。 */
+    cJSON *chs = cJSON_AddArrayToObject(o, "channels");
+    int any_ptz = 0, any_ai = 0;
+    int list_n = 0; nvr_channel_t list[32];
+    if (c->cm) list_n = nvr_chan_list(c->cm, list, 32);
+    for (int i = 0; i < list_n; i++) {
+        int ch1 = list[i].chn + 1;
+        /* channel没有设备的不进 getDeviceCapabilities(status_code 0 = 空口/未添加)。 */
+        if (!c->cm || nvr_chan_status_code_of(c->cm, list[i].chn) == 0) continue;
+        /* 每通道能力:上线按设备取回(NOP=直接 getDeviceCapabilities;ONVIF=映射)写 DB。
+         * 存的是设备自视角对象 → 聚合时覆盖 channel 为本机通道号。 */
+        char caps_json[2048];
+        cJSON *e = NULL;
+        if (c->settings && nvr_settings_caps_get(c->settings, ch1, caps_json, sizeof(caps_json), NULL, 0) > 0)
+            e = cJSON_Parse(caps_json);
+        if (!e) e = cJSON_CreateObject();
+        cJSON_DeleteItemFromObject(e, "channel");
+        cJSON_AddNumberToObject(e, "channel", ch1);
+        cJSON_DeleteItemFromObject(e, "_ai");   /* 内部 AI 明细不进 getDeviceCapabilities(走 AI_getChannelAICapabilities) */
+        if (!cJSON_GetObjectItem(e, "signal")) cJSON_AddStringToObject(e, "signal", "IPC");
+        if (caps_has(e, "ptz")) any_ptz = 1;
+        if (caps_has(e, "ai"))  any_ai  = 1;
+        cJSON_AddItemToArray(chs, e);
+    }
+    /* device 级能力(NT12-32 实际支持):核心 + BLE + AI;任一通道有 PTZ → 设备级也报 ptz。 */
     cJSON *dev = cJSON_AddObjectToObject(o, "device");
     cJSON *dc = cJSON_AddArrayToObject(dev, "capabilities");
     cJSON_AddItemToArray(dc, cJSON_CreateString("displayMode"));
@@ -130,25 +200,50 @@ char *cmd_X_NightOwl_getDeviceCapabilities(cJSON *a, const nvr_cmd_ctx_t *c)
     cJSON_AddItemToArray(dc, cJSON_CreateString("multiStorage"));
     cJSON_AddItemToArray(dc, cJSON_CreateString("format"));
     cJSON_AddItemToArray(dc, cJSON_CreateString("cloudRecording"));
-    cJSON *chs = cJSON_AddArrayToObject(o, "channels");
-    int list_n = 0; nvr_channel_t list[32];
-    if (c->cm) list_n = nvr_chan_list(c->cm, list, 32);
-    for (int i = 0; i < list_n; i++) {
-        int ch1 = list[i].chn + 1;
-        /* 每通道能力:首次上线探测后写入 DB camera_capability(P2);未探到给安全默认。 */
-        char caps_json[1024];
-        cJSON *e = NULL;
-        if (c->settings && nvr_settings_caps_get(c->settings, ch1, caps_json, sizeof(caps_json), NULL, 0) > 0)
-            e = cJSON_Parse(caps_json);
-        if (!e) e = cJSON_CreateObject();
-        if (!cJSON_GetObjectItem(e, "channel")) cJSON_AddNumberToObject(e, "channel", ch1);
-        if (!cJSON_GetObjectItem(e, "signal"))  cJSON_AddStringToObject(e, "signal", "IPC");
-        if (!cJSON_GetObjectItem(e, "capabilities")) {
-            cJSON *cc = cJSON_AddArrayToObject(e, "capabilities");
-            cJSON_AddItemToArray(cc, cJSON_CreateString("cloudRecording"));
+    cJSON_AddItemToArray(dc, cJSON_CreateString("bluetooth"));   /* BLE 配网 */
+    if (any_ai)  cJSON_AddItemToArray(dc, cJSON_CreateString("ai"));
+    if (any_ptz) cJSON_AddItemToArray(dc, cJSON_CreateString("ptz"));
+    return nvr_resp_content(o);
+}
+/* AI_getChannelAICapabilities:该通道 AI 能力(objectDetection 类别 + ruledDetection 越线/区域入侵)。
+ * ONVIF:取入库 camera_capability 里的内部 _ai(GetRuleOptions/GetSupportedRules 映射);
+ * NOP:从 sensors[] 的 objectDetection.modes 提取类别。 */
+char *cmd_AI_getChannelAICapabilities(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    int ch1 = nvr_jint(a, "channel", -1);
+    if (ch1 < 1) return nvr_resp_err("invalid_param");
+    /* NOP 设备:透传到相机的 AI_getChannelAICapabilities(设备自报,最全);ONVIF:本地映射(下方)。 */
+    if (c->cm) {
+        nvr_channel_t ch;
+        if (nvr_chan_get(c->cm, ch1 - 1, &ch) == 0 && ch.backend == 0) {
+            char *fwd = nvr_chan_dev_post(c->cm, ch1 - 1, "AI_getChannelAICapabilities", NULL);
+            if (fwd) return fwd;   /* 透传应答直接返回 */
         }
-        cJSON_AddItemToArray(chs, e);
     }
+    char caps_json[2048]; cJSON *e = NULL;
+    if (c->settings && nvr_settings_caps_get(c->settings, ch1, caps_json, sizeof(caps_json), NULL, 0) > 0)
+        e = cJSON_Parse(caps_json);
+
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddNumberToObject(o, "channel", ch1);
+    cJSON *ai = e ? cJSON_GetObjectItem(e, "_ai") : NULL;
+
+    /* objectDetection 类别 */
+    cJSON *od = ai ? cJSON_GetObjectItem(ai, "objectDetection") : NULL;
+    if (!od && e) {   /* NOP:从 sensors[] 里的 objectDetection.modes 取 */
+        cJSON *sensors = cJSON_GetObjectItem(e, "sensors"), *s;
+        cJSON_ArrayForEach(s, sensors) {
+            const char *sn = cJSON_GetStringValue(cJSON_GetObjectItem(s, "sensor"));
+            if (sn && strcmp(sn, "objectDetection") == 0) { od = cJSON_GetObjectItem(s, "modes"); break; }
+        }
+    }
+    if (od) cJSON_AddItemToObject(o, "objectDetection", cJSON_Duplicate(od, 1));
+
+    /* ruledDetection(越线/区域入侵) */
+    cJSON *rd = ai ? cJSON_GetObjectItem(ai, "ruledDetection") : NULL;
+    if (rd) cJSON_AddItemToObject(o, "ruledDetection", cJSON_Duplicate(rd, 1));
+
+    if (e) cJSON_Delete(e);
     return nvr_resp_content(o);
 }
 char *cmd_X_NightOwl_setChannelZoomPan(cJSON *a, const nvr_cmd_ctx_t *c)

@@ -10,6 +10,7 @@
 #include "nvr_config.h"
 #include "nvr_gui_config.h"
 #include "nvr_defaults.h"
+#include "nvr_display_modes.h"
 #include "nvr_storage.h"
 #include "nvr_streaming.h"
 #include "mhal_vout.h"
@@ -81,6 +82,26 @@ struct nvr_app {
 static char *app_http_handler(void *ctx, const char *body)
 {
     return nvr_cmd_dispatch((nvr_cmd_router_t *)ctx, body);
+}
+
+/* setSysDisplay 分辨率热切:切 HDMI 输出 + 按生效画布重排出图 + 回写生效值 + 重启 LVGL 进程
+ * (killall <gui_proc>,看护脚本约 2~4s 内在新分辨率重拉 GUI)。 */
+static void app_on_set_resolution(void *user, int w, int h)
+{
+    nvr_app_t *a = user;
+    int ew = w, eh = h;
+    nvr_preview_set_hdmi(a->pv, w, h, &ew, &eh);          /* 切模式+重排,取回实际生效(可能降级) */
+    if (a->settings) {
+        char eff[32]; snprintf(eff, sizeof(eff), "%dx%d", ew, eh);
+        nvr_settings_set_str(a->settings, "display.resolution", eff);
+    }
+    /* 重启 LVGL:进程名默认 nightowl-lvgl,可经 settings(display.gui_proc)/env(NVR_GUI_PROC) 覆盖。 */
+    char gui[64] = "nightowl-lvgl";
+    if (a->settings) nvr_settings_get_str(a->settings, "display.gui_proc", gui, sizeof(gui), "nightowl-lvgl");
+    { const char *e = getenv("NVR_GUI_PROC"); if (e && e[0]) snprintf(gui, sizeof(gui), "%s", e); }
+    char cmd[128]; snprintf(cmd, sizeof(cmd), "killall %s 2>/dev/null", gui);
+    printf("[app] 分辨率热切 %dx%d(生效 %dx%d),重启 LVGL(%s)\n", w, h, ew, eh, gui);
+    int rc = system(cmd); (void)rc;
 }
 
 /* ② 未实现时的弱兜底：返回 -1，onvif_auto 通道保持待定 */
@@ -325,9 +346,30 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
     }
 #endif
 
-    /* 5) 平台显示 */
-    if (mhal_vout_init(MHAL_OUT_HDMI, a->cfg.sys.hdmi_w, a->cfg.sys.hdmi_h) != 0)
+    /* 5) 平台显示:分辨率取**记录值**(display.resolution),无则回退 config→默认;
+     *    mhal_vout_init 按此请求,屏幕不支持则沿阶梯降级到可用者;取回**实际生效**分辨率,
+     *    回写 settings(供 getSysDisplay 报当前) 并用于 preview 布局(避免窗口越界)。 */
+    int disp_w = a->cfg.sys.hdmi_w > 0 ? a->cfg.sys.hdmi_w : NVR_DISPLAY_DEFAULT_W;
+    int disp_h = a->cfg.sys.hdmi_h > 0 ? a->cfg.sys.hdmi_h : NVR_DISPLAY_DEFAULT_H;
+    if (a->settings) {
+        char res[32];
+        if (nvr_settings_get_str(a->settings, "display.resolution", res, sizeof(res), "") > 0 && res[0]) {
+            int w = 0, h = 0;
+            if (sscanf(res, "%dx%d", &w, &h) == 2 && w > 0 && h > 0) { disp_w = w; disp_h = h; }
+        }
+    }
+    if (mhal_vout_init(MHAL_OUT_HDMI, disp_w, disp_h) != 0)
         printf("[app] 警告: 显示初始化失败(非目标机?)\n");
+    else {
+        int ew = disp_w, eh = disp_h;
+        mhal_vout_get_resolution(&ew, &eh);          /* 实际生效(可能已降级) */
+        if (ew > 0 && eh > 0) { disp_w = ew; disp_h = eh; }
+        if (a->settings) {
+            char eff[32]; snprintf(eff, sizeof(eff), "%dx%d", disp_w, disp_h);
+            nvr_settings_set_str(a->settings, "display.resolution", eff);
+        }
+        printf("[app] HDMI 输出生效分辨率 %dx%d\n", disp_w, disp_h);
+    }
 
     /* 6) 拉流管理器 */
     a->cfg.stream.group = a->group;
@@ -347,7 +389,7 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
     nvr_rec_sched_init(&rc, &a->rs);
 
     nvr_preview_cfg_t pc = { .sm = a->sm, .osd_name = 1, .osd_datetime = 1,
-                             .hdmi_w = a->cfg.sys.hdmi_w, .hdmi_h = a->cfg.sys.hdmi_h };
+                             .hdmi_w = disp_w, .hdmi_h = disp_h };
     nvr_preview_init(&pc, &a->pv);
     nvr_preview_set_layout(a->pv, pv_layout_of(a->cfg.sys.default_layout));
 
@@ -431,7 +473,8 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
                                     .stg = a->stg, .sm = a->sm, .group = a->group, .meta = a->meta, .nop = a->nop,
                                     .port = nvr_settings_get_int(a->settings, "system.nop_port", NVR_DEF_NOP_PORT),
                                     .dev_nop_port = 8089,
-                                    .pv = a->pv, .pb = a->pb, .eh = a->eh, .persist = a->persist };
+                                    .pv = a->pv, .pb = a->pb, .eh = a->eh, .persist = a->persist,
+                                    .disp_user = a, .on_set_resolution = app_on_set_resolution };
         if (nvr_cmd_router_start(&rc, &a->router) != 0)
             printf("[app] 警告: 命令路由处理器 初始化失败\n");
     }

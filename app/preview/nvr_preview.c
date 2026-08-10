@@ -107,6 +107,30 @@ static void compose_osd(nvr_preview_t *p, int win)
     mhal_vout_osd(win, line);
 }
 
+/* 热切 HDMI 输出分辨率:切 mhal 输出模式(降级取生效值)→ 按新画布重排当前分屏 + 悬浮块。
+ * 供 setSysDisplay 分辨率热切。eff_w/eff_h 回填实际生效(可能降级)。 */
+int nvr_preview_set_hdmi(nvr_preview_t *p, int w, int h, int *eff_w, int *eff_h)
+{
+    if (!p) return -1;
+    mhal_vout_set_resolution(w, h);              /* 切输出模式 + 清屏(降级同 init) */
+    int ew = w, eh = h;
+    mhal_vout_get_resolution(&ew, &eh);          /* 取实际生效(可能降级) */
+
+    pthread_mutex_lock(&p->lock);
+    p->disp_w = ew; p->disp_h = eh;
+    int mode = p->display_mode, page = p->display_page;
+    nvr_pv_ext_t saved[PV_MAX_WIN]; int sn = p->ext_n;
+    for (int i = 0; i < sn && i < PV_MAX_WIN; i++) saved[i] = p->ext[i];
+    pthread_mutex_unlock(&p->lock);
+
+    if (mode > 0) nvr_preview_set_mode(p, mode, page);   /* 重排分屏(新画布) */
+    if (sn > 0)   nvr_preview_set_ext(p, saved, sn);     /* 重排悬浮块(按新 disp_w/h 换算) */
+
+    if (eff_w) *eff_w = ew;
+    if (eff_h) *eff_h = eh;
+    return 0;
+}
+
 int nvr_preview_set_layout(nvr_preview_t *p, pv_layout_t layout)
 {
     if (!p) return -1;

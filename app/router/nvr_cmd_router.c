@@ -159,6 +159,8 @@ int nvr_cmd_router_start(const nvr_cmd_router_cfg_t *cfg, nvr_cmd_router_t **out
     r->ctx.pb       = cfg->pb;
     r->ctx.eh       = cfg->eh;
     r->ctx.persist  = cfg->persist;
+    r->ctx.disp_user         = cfg->disp_user;
+    r->ctx.on_set_resolution = cfg->on_set_resolution;
     r->ctx.dev_nop_port = r->cfg.dev_nop_port;
     if (cfg->settings)
         nvr_settings_get_str(cfg->settings, "system.sn", r->ctx.nvr_sn, sizeof(r->ctx.nvr_sn), "");

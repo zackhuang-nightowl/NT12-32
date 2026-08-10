@@ -39,6 +39,8 @@ typedef struct {
     struct nvr_playback *pb;       /* 本机回放引擎 */
     struct nvr_evt_hub *eh;        /* 事件中枢(longPolling 事件位图) */
     nvr_chan_persist_t *persist;   /* 通道映射/能力持久化 */
+    void  *disp_user;              /* 分辨率热切回调上下文(app) */
+    void (*on_set_resolution)(void *disp_user, int w, int h);  /* setSysDisplay 热切 */
 } nvr_cmd_router_cfg_t;
 
 int  nvr_cmd_router_start(const nvr_cmd_router_cfg_t *cfg, nvr_cmd_router_t **out);

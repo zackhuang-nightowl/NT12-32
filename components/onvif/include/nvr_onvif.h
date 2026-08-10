@@ -32,6 +32,20 @@ typedef struct {
     char main_uri[300], sub_uri[300];
     int  ptz;             /* PTZ 节点数>0 → 有云台 */
     int  time_set;        /* 已成功把 NVR 时间下发到相机 */
+    /* --- getDeviceCapabilities 映射:通道能力(按 NOPMappingONVIF.md,Media2 ConfigurationSet + Analytics + PTZ) --- */
+    int  cap_mic;         /* AudioSource 存在 → mic */
+    int  cap_speaker;     /* AudioOutput 声明 && AudioDecoder(backchannel) → speaker(双向) */
+    int  cap_sensor;      /* Analytics 配置存在 → sensor */
+    int  cap_motion;      /* Analytics 含 CellMotion → sensor motion(pixelChange) */
+    int  cap_objdet;      /* Analytics 含 ObjectDetection → sensor objectDetection */
+    int  obj_human, obj_vehicle, obj_animal, obj_face;  /* objectDetection 类别 */
+    /* PTZ 子能力(ptz[]) */
+    int  ptz_presets;     /* 支持预置位(nodes) */
+    int  ptz_tours;       /* 支持巡航(patrol) */
+    int  ptz_focus;       /* 支持对焦(Imaging) */
+    /* ruledDetection(AI_getChannelAICapabilities):越线/区域入侵 */
+    int  line_cross, line_max, line_max_points;
+    int  field_intrusion, field_max, field_max_verts;
 } nvr_onvif_info_t;
 
 /* 一次 ONVIF 会话:发现→建设备→GetDeviceInformation/GetServices/GetCapabilities→GetProfiles(主/子 URI)

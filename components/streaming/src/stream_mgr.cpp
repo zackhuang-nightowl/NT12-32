@@ -11,11 +11,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
+#include <unistd.h>   /* usleep:格式化暂停写盘的 drain */
 
 extern "C" int  stream_pull_start(stream_pull_t *p, int conn_to, int rx_to);
 extern "C" void stream_pull_stop (stream_pull_t *p);
 extern "C" int  puller_start(stream_chan_t *c, int conn_to, int rx_to, rsdk_group_t *grp);
 extern "C" void puller_stop (stream_chan_t *c);
+extern "C" void stream_close_writer(stream_chan_t *c);   /* stream_router.c:安全关闭 writer */
 
 struct nvr_stream_mgr {
     nvr_stream_mgr_cfg_t cfg;
@@ -201,6 +203,42 @@ extern "C" rsdk_err_t nvr_stream_mgr_set_group(nvr_stream_mgr_t *m, rsdk_group_t
     }
     NVR_LOGI("stream", "set_group: 更新录像盘组, 补开 %d 路 writer", opened);
     return RSDK_OK;
+}
+
+/* 格式化前:暂停所有写盘并关闭 writer(命令线程调用)。
+ * 机制沿用既有无锁契约:置 cfg.record=0 → puller(stream_route_video)见 !record 即跳过写盘、
+ * 不再触碰 writer;短暂 drain 让已越过 record 检查的在途 write_frame 落地;此后 puller 不碰 writer,
+ * 命令线程关闭全部 writer 安全(无 use-after-free)。返回暂停前处于录像的通道位图,供 resume 恢复。 */
+extern "C" uint32_t nvr_stream_mgr_pause_recording(nvr_stream_mgr_t *m)
+{
+    if (!m) return 0;
+    uint32_t was = 0;
+    for (int i = 0; i < NVR_MAX_CH; i++) {
+        if (!m->used[i]) continue;
+        stream_chan_t *c = &m->ch[i];
+        if (c->cfg.record) was |= (1u << i);
+        c->cfg.record = 0;            /* puller 下一帧起跳过写盘 */
+    }
+    usleep(150 * 1000);               /* drain:等已越过 record 检查的在途 write_frame 完成 */
+    int closed = 0;
+    for (int i = 0; i < NVR_MAX_CH; i++) {
+        if (!m->used[i]) continue;
+        if (m->ch[i].writer) { stream_close_writer(&m->ch[i]); closed++; }
+    }
+    NVR_LOGW("stream", "格式化暂停写盘:置 record=0 + 关闭 %d 路 writer(盘静默)", closed);
+    return was;
+}
+
+/* 格式化后:恢复原录像通道 + 换新盘组补开 writer(免重启即录)。 */
+extern "C" void nvr_stream_mgr_resume_recording(nvr_stream_mgr_t *m, rsdk_group_t *group, uint32_t was)
+{
+    if (!m) return;
+    for (int i = 0; i < NVR_MAX_CH; i++) {
+        if (!m->used[i]) continue;
+        if (was & (1u << i)) m->ch[i].cfg.record = 1;   /* 恢复录像开关 */
+    }
+    nvr_stream_mgr_set_group(m, group);                 /* 对 record 通道在新组补开 writer */
+    NVR_LOGW("stream", "格式化恢复写盘:恢复录像通道位图 0x%x", was);
 }
 
 /* 回放引擎:取某通道某码流的解码尺寸(内部封装 resolve_dim)。 */

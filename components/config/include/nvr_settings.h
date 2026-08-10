@@ -29,6 +29,7 @@ typedef struct nvr_settings nvr_settings_t;
  * json_defaults_dir 可为 NULL(不播种)。成功返回 0。 */
 int  nvr_settings_open(const char *db_path, const char *json_defaults_dir, nvr_settings_t **out);
 void nvr_settings_close(nvr_settings_t *s);
+int  nvr_settings_factory_reset(nvr_settings_t *s);  /* 恢复出厂:清数据表行,保留 meta_kv */
 
 /* ---------- typed KV(点分命名空间,如 "system.device_name" / "cloud.switch") ---------- */
 int  nvr_settings_get_int (nvr_settings_t *s, const char *key, int def);

@@ -122,10 +122,34 @@ char *cmd_reboot(cJSON *a, const nvr_cmd_ctx_t *c)
     NVR_LOGW("router", "收到 reboot"); sync(); reboot(RB_AUTOBOOT);
     return nvr_resp_ok();
 }
+/* 文件拷贝(恢复出厂复位 GUI_CONFIG 用)。 */
+static void copy_file(const char *src, const char *dst)
+{
+    FILE *in = fopen(src, "rb"); if (!in) { NVR_LOGW("router", "默认 %s 缺失,GUI_CONFIG 未复位", src); return; }
+    FILE *out = fopen(dst, "wb"); if (!out) { fclose(in); return; }
+    char buf[4096]; size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) fwrite(buf, 1, n, out);
+    fclose(in); fclose(out);
+}
+/* 恢复出厂:清空设置表(保留 schema_version/seeded)+ 复位界面配置(删 gui_cfg.ini + 覆盖 GUI_CONFIG.json)+ 重启。 */
+char *cmd_X_NightOwl_resetToFactorySettings(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a;
+    NVR_LOGW("router", "恢复出厂:清空设置表 + 复位界面配置 + 重启");
+    if (c->settings) nvr_settings_factory_reset(c->settings);
+    const char *ini = getenv("NVR_GUI_CFG_INI");        if (!ini || !ini[0]) ini = "/mnt/custom/gui_cfg.ini";
+    const char *cfg = getenv("NVR_GUI_CONFIG");         if (!cfg || !cfg[0]) cfg = "/mnt/custom/GUI_CONFIG.json";
+    const char *def = getenv("NVR_GUI_CONFIG_DEFAULT"); if (!def || !def[0]) def = "/dvr/config/defaults/GUI_CONFIG.json";
+    unlink(ini);                 /* 删 gui_cfg.ini(LVGL 会重建) */
+    copy_file(def, cfg);         /* 复位 GUI_CONFIG.json(LVGL 不重建,用自带默认覆盖) */
+    sync(); reboot(RB_AUTOBOOT);
+    return nvr_resp_ok();
+}
 
 char *cmd_X_NightOwl_setOwner(cJSON *a, const nvr_cmd_ctx_t *c)
 {
-    nvr_owner_row_t ow; memset(&ow, 0, sizeof(ow));
+    nvr_owner_row_t ow;
+    if (nvr_settings_owner_get(c->settings, &ow) != 0) memset(&ow, 0, sizeof(ow));  /* 读改写:保留 email/phone/cloud 等 */
     snprintf(ow.owner_id, sizeof(ow.owner_id), "%s", nvr_jstr(a, "owner_id", ""));
     snprintf(ow.username, sizeof(ow.username), "%s", nvr_jstr(a, "username", ""));
     snprintf(ow.stoken,   sizeof(ow.stoken),   "%s", nvr_jstr(a, "stoken", ""));
