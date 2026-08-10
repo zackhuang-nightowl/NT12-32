@@ -40,6 +40,8 @@ struct nvr_playback {
     int                disp_mode;    /* 回放布局(GUI_setPlaybackMode 记录) */
     int                ch_list[16];  /* 1-based 通道 */
     int                ch_count;
+    int                saved_mode, saved_page;  /* 进回放前的 live 布局,stop 时恢复 */
+    int                saved_valid;
 };
 
 static long now_ms(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
@@ -114,6 +116,9 @@ static void *pb_feeder(void *arg)
 static void pb_blackout_locked(nvr_playback_t *pb, int chn0)
 {
     if(chn0<0) return;
+    if(pb->cfg.pv && !pb->saved_valid){                           /* 首次接管:记住 live 布局供 stop 恢复 */
+        if(nvr_preview_get_mode(pb->cfg.pv, &pb->saved_mode, &pb->saved_page)==0) pb->saved_valid=1;
+    }
     if(pb->cfg.pv) nvr_preview_fullscreen(pb->cfg.pv, chn0);       /* 单画面布局(切布局会清黑) */
     if(pb->cfg.sm) nvr_stream_set_display(pb->cfg.sm, chn0, -1);   /* 关 live 解码,不再刷 live */
     mhal_vout_clear_black();                                       /* 清黑,抹掉残留 live 帧 */
@@ -124,7 +129,15 @@ static void pb_blackout_locked(nvr_playback_t *pb, int chn0)
 static void pb_stop_locked(nvr_playback_t *pb)
 {
     if(pb->have_thread){ pb->running=0; pthread_join(pb->th,NULL); pb->have_thread=0; }
-    mhal_vout_clear_black();                                       /* 停止=黑屏(非 live) */
+    /* ★ 归还 live:恢复进回放前布局(nvr_preview_set_mode 对可见格重开解码出图),否则回放接管的
+     * 窗口停在"关解码/黑屏",退出回放后 live 不再出图(实测:playback 后全黑)。 */
+    if(pb->cfg.pv && pb->saved_valid){
+        nvr_preview_set_mode(pb->cfg.pv, pb->saved_mode, pb->saved_page);
+        pb->saved_valid=0;
+    } else {
+        mhal_vout_clear_black();
+    }
+    pb->chn0 = -1;
     snprintf(pb->status,sizeof(pb->status),"stopped");
 }
 

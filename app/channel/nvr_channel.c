@@ -581,15 +581,17 @@ static void tick_slot(nvr_chan_mgr_t *m, slot_t *s, time_t now, int *resolve_bud
 {
     if (s->status == NVR_CHAN_DISABLED) return;
 
-    /* ★ PoE 即插即用 —— ONVIF 发现在场门控(与 LAN 统一走 Discovery):PoE 口通道只有经本网段
-     * ONVIF 广播发现到相机(on_discovered 置 poe_present + 填真实 IP)才解析:
-     *   · 未发现在场:跳过本口(不解析、不占额度)——空口不拖慢在场相机;
-     *   · 在场却曾放弃(url_tries 满):重置 → 立即重解析(后插相机被发现后即连出图)。
-     * LAN 通道(显式添加)不门控,照常解析。 */
+    /* ★ PoE 即插即用门控:
+     *   · onvif_ip 仍是占位(198.18.<seg>.100 = NVR 自身,4th=100)且未发现 → 等 ONVIF 发现(不解析);
+     *   · 一旦发现到真实相机 IP(4th!=100,如 .1)→ 视为已知在场,像 LAN 一样**直接 get_url 重连**,
+     *     不再依赖持续的发现应答(相机 ONVIF/RTSP 掉线后靠退避重连恢复,而非等再次广播命中)。
+     *   · url_tries 满 → 重置重连(掉线恢复)。 */
     if ((!s->url_sub[0] || !s->url_main[0]) && s->d.onvif_auto && s->d.poe_port > 0) {
-        if (!s->poe_present || !s->d.onvif_ip[0])
-            return;                                       /* 未经 ONVIF 发现在场:本口不解析 */
-        if (s->url_tries >= NVR_URL_MAX_TRIES) {          /* 相机(重新)在场却已放弃 → 重置重连 */
+        int last_oct = -1; { int a,b,c,d4; if (sscanf(s->d.onvif_ip,"%d.%d.%d.%d",&a,&b,&c,&d4)==4) last_oct=d4; }
+        int known_cam = (s->d.onvif_ip[0] && last_oct != 100 && last_oct >= 0);  /* 非 .100 占位 = 已知相机 IP */
+        if (!s->poe_present && !known_cam)
+            return;                                       /* 仍占位且未发现在场:本口不解析 */
+        if (s->url_tries >= NVR_URL_MAX_TRIES) {          /* 在场/已知却已放弃 → 重置重连 */
             s->url_tries = 0; s->url_next = 0; s->sub.auth_fail = 0;
             NVR_LOGI("chan", "ch%d 相机在场(ONVIF发现),重置解析重连(即插即用)", s->d.chn);
         }
@@ -833,7 +835,8 @@ void nvr_chan_tick(nvr_chan_mgr_t *m)
         int i = (m->poe_scan_cursor + k) % poe_n;        /* 游标轮询:公平覆盖所有 PoE 口 */
         slot_t *s = &m->slots[i];
         if (!s->in_use || s->d.poe_port <= 0) continue;
-        if (s->url_sub[0] && s->url_main[0]) continue;   /* 已解析出图 → 不再发现 */
+        if (s->status == NVR_CHAN_ONLINE) continue;      /* 真正在线出图才停发现;在线无流(掉线/NOSIGNAL/
+                                                          * 未解析)都继续发现→刷新在场/IP→重连(不只看 url 缓存) */
         if (now < s->poe_disc_next) continue;
         int seg = ip_seg3(s->d.onvif_ip);                /* 网段第3段(VLAN 2001=NVR,口 P→段 P+1) */
         if (seg < 0) continue;
