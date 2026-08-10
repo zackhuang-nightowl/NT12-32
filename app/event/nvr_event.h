@@ -25,9 +25,13 @@ extern "C" {
 
 typedef struct nvr_evt_hub nvr_evt_hub_t;
 
+/* 事件段落盘窗口(秒):mark_event 记录 [start, start+此] 的事件段末。 */
+#define NVR_EVT_POST_RECORD_S 30
+
 typedef struct {
     nop_event_hub_t *nop_hub;      /* 共享事件脊柱（app 创建并传入） */
     nvr_rec_sched_t *rs;           /* borrowed：事件录像触发 */
+    struct nvr_stream_mgr *sm;     /* borrowed：事件录像落盘(nvr_stream_set_event 标记 writer) */
     void *user;
     void (*on_icon)(void *user, int chn, unsigned icon_bits); /* 预览图标（可 NULL） */
 } nvr_evt_cfg_t;

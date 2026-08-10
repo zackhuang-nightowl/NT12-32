@@ -71,6 +71,12 @@ typedef struct stream_chan {
     int              rec_gated_sub; /* 子路录像关键帧门控 */
 
     rsdk_group_t    *grp;           /* 录像盘组:延迟到就绪后开 router 时用 */
+    /* 事件标记(命令/事件线程置,puller 线程 owns writer 时应用,避免并发写 writer):
+     *   pend_event_id != applied_event_id → puller 调 set_event + mark_event 一次;0=清标签。 */
+    volatile uint64_t pend_event_id;    /* 待应用的事件 id(0=清除) */
+    uint64_t          applied_event_id; /* 已应用到 writer 的事件 id */
+    uint8_t           pend_event_rectype;
+    uint32_t          pend_event_start, pend_event_end;
     int              router_open;   /* 1=已开 writer/就绪 */
     int              fed_since_open; /* 开解码后已喂给解码器的帧数(供"出图就绪"判定:切宫格阻塞回复用) */
     int              live_synced;    /* 1=已从一个"实时" IDR 干净起播(其后连续 P 帧参考链有效);

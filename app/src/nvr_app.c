@@ -403,7 +403,7 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
         if (n > 0) nvr_preview_set_mapping(a->pv, map, n);
     }
 
-    nvr_evt_cfg_t ec = { .nop_hub = a->nop_hub, .rs = a->rs, .user = a, .on_icon = on_evt_icon };
+    nvr_evt_cfg_t ec = { .nop_hub = a->nop_hub, .rs = a->rs, .sm = a->sm, .user = a, .on_icon = on_evt_icon };
     nvr_evt_init(&ec, &a->eh);
 
     /* 8) 通道管理器：载入配置 → 起流（回调驱动 rec/preview） */

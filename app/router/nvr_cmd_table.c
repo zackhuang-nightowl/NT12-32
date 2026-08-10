@@ -37,6 +37,9 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
     /* --- system 设备/账户 --- */
     { "setName",                               cmd_setName },
     { "getName",                               cmd_getName },
+    { "X_NightOwl_getInputChannelNames",       cmd_X_NightOwl_getInputChannelNames },
+    { "X_NightOwl_getInputChannelName",        cmd_X_NightOwl_getInputChannelName },
+    { "X_NightOwl_setInputChannelName",        cmd_X_NightOwl_setInputChannelName },
     { "getDeviceInfo",                         cmd_getDeviceInfo },
     { "X_NightOwl_setTimezone",                cmd_X_NightOwl_setTimezone },
     { "X_NightOwl_getTimezone",                cmd_X_NightOwl_getTimezone },

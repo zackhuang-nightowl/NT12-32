@@ -25,6 +25,47 @@ char *cmd_getName(cJSON *a, const nvr_cmd_ctx_t *c)
     cJSON *o = cJSON_CreateObject(); cJSON_AddStringToObject(o, "name", b);
     return nvr_resp_content(o);
 }
+
+/* ---- 通道名(channels.json 持久化;默认 "Channel<N>",1..capacity)---- */
+/* 列出所有通道名(getInputChannelNames):按容量 1..N 全列(有无真机都列)。 */
+char *cmd_X_NightOwl_getInputChannelNames(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a;
+    int cap = c->settings ? nvr_settings_get_int(c->settings, "system.capacity", NVR_PERSIST_MAX_CH) : NVR_PERSIST_MAX_CH;
+    if (cap < 1) cap = NVR_PERSIST_MAX_CH;
+    if (cap > NVR_PERSIST_MAX_CH) cap = NVR_PERSIST_MAX_CH;
+    cJSON *o = cJSON_CreateObject();
+    cJSON *arr = cJSON_AddArrayToObject(o, "names");
+    for (int ch = 1; ch <= cap; ch++) {
+        char nm[64];
+        nvr_chan_persist_get_name(c->persist, ch, nm, sizeof(nm));   /* 未设→默认 ChannelN */
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddStringToObject(e, "name", nm);
+        cJSON_AddNumberToObject(e, "channel", ch);
+        cJSON_AddItemToArray(arr, e);
+    }
+    return nvr_resp_content(o);
+}
+/* 单通道名(getInputChannelName)。 */
+char *cmd_X_NightOwl_getInputChannelName(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    int ch = nvr_jint(a, "channel", -1);
+    if (ch < 1) return nvr_resp_err("invalid_param");
+    char nm[64]; nvr_chan_persist_get_name(c->persist, ch, nm, sizeof(nm));
+    cJSON *o = cJSON_CreateObject(); cJSON_AddStringToObject(o, "name", nm);
+    return nvr_resp_content(o);
+}
+/* 设通道名(setInputChannelName)→ 存 channels.json。 */
+char *cmd_X_NightOwl_setInputChannelName(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    int ch = nvr_jint(a, "channel", -1);
+    const char *name = nvr_jstr(a, "name", NULL);
+    if (ch < 1 || !name) return nvr_resp_err("invalid_param");
+    if (!c->persist || nvr_chan_persist_set_name(c->persist, ch, name) != 0)
+        return nvr_resp_err("persist_failed");
+    NVR_LOGI("router", "setInputChannelName ch%d=\"%s\"", ch, name);
+    return nvr_resp_ok();
+}
 char *cmd_getDeviceInfo(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     (void)a; char nm[64], sn[64], mdl[32];

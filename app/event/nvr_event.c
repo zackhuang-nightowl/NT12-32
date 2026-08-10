@@ -7,6 +7,7 @@
  *  且不触发事件录像;订阅后两者都通。
  ***************************************************************************************/
 #include "nvr_event.h"
+#include "nvr_streaming.h"   /* nvr_stream_set_event:事件录像落盘 */
 #include "nvr_log.h"
 
 #include <stdlib.h>
@@ -92,8 +93,14 @@ static void evt_sink(void *sink_ctx, const nop_event_t *ev)
         pthread_mutex_unlock(&h->lock);
         if (h->cfg.on_icon) h->cfg.on_icon(h->cfg.user, chn, newbits);
     }
-    if (rectype >= 0 && h->cfg.rs)
-        nvr_rec_trigger_event(h->cfg.rs, chn, rectype, (uint32_t)(ev->timestamp_ms / 1000));
+    if (rectype >= 0 && h->cfg.rs) {
+        uint32_t ts = (uint32_t)(ev->timestamp_ms / 1000);
+        uint64_t eid = nvr_rec_trigger_event(h->cfg.rs, chn, rectype, ts);
+        /* ★ 事件录像落盘:把事件打到该通道当前录像段(set_event 帧标签 + mark_event 内联记录),
+         * 供 queryEventList/scan 检索。窗口 [ts, ts+post],puller 过窗口自动清标签。 */
+        if (eid && h->cfg.sm)
+            nvr_stream_set_event(h->cfg.sm, chn, eid, rectype, ts, ts + NVR_EVT_POST_RECORD_S);
+    }
     NVR_LOGI("event", "ch%d AI事件 type=%d → rectype=%d bits=0x%x", chn, (int)ev->type, rectype, newbits);
 }
 

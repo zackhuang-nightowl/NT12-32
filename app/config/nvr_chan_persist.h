@@ -15,6 +15,9 @@ int   nvr_chan_persist_set_caps(nvr_chan_persist_t *, int channel1based, cJSON *
 /* 出图:每通道状态值(GUI 开机先按上次绘制)。get 无记录返回 -1。 */
 int   nvr_chan_persist_set_status(nvr_chan_persist_t *, int channel1based, int status);
 int   nvr_chan_persist_get_status(nvr_chan_persist_t *, int channel1based);
+/* 每通道自定义名(setInputChannelName;未设返回默认 "Channel<ch>")。 */
+int   nvr_chan_persist_set_name(nvr_chan_persist_t *, int channel1based, const char *name);
+int   nvr_chan_persist_get_name(nvr_chan_persist_t *, int channel1based, char *out, int cap);
 /* 出图:每通道主/子显示分辨率("WxH")。 */
 int   nvr_chan_persist_set_res(nvr_chan_persist_t *, int channel1based, const char *main_res, const char *sub_res);
 int   nvr_chan_persist_get_res(nvr_chan_persist_t *, int channel1based, char *main_out, int mcap, char *sub_out, int scap);

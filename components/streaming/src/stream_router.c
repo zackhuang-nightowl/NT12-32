@@ -193,6 +193,26 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
     /* --- 录像:本路写 writer,f.stream 标记主/子,各自关键帧门控。
      * cfg.record=0(录像开关关)→ 跳过写入(不 close writer,避免命令线程/puller 竞态)。 --- */
     if (!c->writer || !c->cfg.record) return;
+
+    /* --- 事件标记(puller 线程 owns writer → 线程安全;命令/事件线程只置 pend_*):
+     *   新事件(pend!=applied)→ set_event 打帧标签 + mark_event 写内联事件记录(供 queryEventList/scan);
+     *   事件窗口结束(过 pend_event_end)→ set_event(0) 清标签。--- */
+    {
+        uint64_t pend = c->pend_event_id;
+        if (pend != c->applied_event_id) {
+            rsdk_rec_set_event(c->writer, pend);
+            if (pend)
+                rsdk_rec_mark_event(c->writer, pend, c->pend_event_rectype,
+                                    c->pend_event_start, c->pend_event_end,
+                                    (uint32_t)(1u << (c->pend_event_rectype & 31)), 0);
+            c->applied_event_id = pend;
+        } else if (c->applied_event_id && c->pend_event_end &&
+                   (uint32_t)time(NULL) > c->pend_event_end) {
+            rsdk_rec_set_event(c->writer, 0);
+            c->applied_event_id = 0; c->pend_event_id = 0;
+        }
+    }
+
     int *gated = (p->stream == NVR_STREAM_SUB) ? &c->rec_gated_sub : &c->rec_gated_main;
     if (!*gated) {
         if (!nc.is_key) return;            /* 未到关键帧,丢前导 P 帧 */

@@ -128,6 +128,23 @@ int nvr_chan_persist_get_status(nvr_chan_persist_t *p, int ch){
     cJSON *e=find_in_arr(arr,ch); if(!e) return -1;
     cJSON *s=cJSON_GetObjectItem(e,"status"); return s?(int)cJSON_GetNumberValue(s):-1;
 }
+/* ---- 每通道自定义名(setInputChannelName)。未设 → 默认 "Channel<ch>"。 ---- */
+int nvr_chan_persist_set_name(nvr_chan_persist_t *p, int ch, const char *name){
+    if(!p) return -1;
+    cJSON *e=upsert_entry(p->root,"channelNames",ch);
+    cJSON_DeleteItemFromObject(e,"name"); cJSON_AddStringToObject(e,"name",name?name:"");
+    return atomic_save(p);
+}
+int nvr_chan_persist_get_name(nvr_chan_persist_t *p, int ch, char *out, int cap){
+    if(!out||cap<=0) return -1;
+    snprintf(out,(size_t)cap,"Channel%d",ch);   /* 默认名 */
+    if(!p) return 0;
+    cJSON *arr=cJSON_GetObjectItem(p->root,"channelNames"); if(!arr) return 0;
+    cJSON *e=find_in_arr(arr,ch); if(!e) return 0;
+    cJSON *n=cJSON_GetObjectItem(e,"name");
+    if(n&&cJSON_IsString(n)&&n->valuestring&&n->valuestring[0]) snprintf(out,(size_t)cap,"%s",n->valuestring);
+    return 0;
+}
 int nvr_chan_persist_set_res(nvr_chan_persist_t *p, int ch, const char *mainr, const char *subr){
     if(!p) return -1;
     cJSON *e=upsert_entry(p->root,"channelResolution",ch);

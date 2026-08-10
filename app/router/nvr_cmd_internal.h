@@ -82,6 +82,9 @@ char *cmd_GUI_LanDelDevice(cJSON *a, const nvr_cmd_ctx_t *c);
 /* --- system 设备/账户(nvr_cmd_system.c) --- */
 char *cmd_setName(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_getName(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_X_NightOwl_getInputChannelNames(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_X_NightOwl_getInputChannelName(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_X_NightOwl_setInputChannelName(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_getDeviceInfo(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_X_NightOwl_setTimezone(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_X_NightOwl_getTimezone(cJSON *a, const nvr_cmd_ctx_t *c);
