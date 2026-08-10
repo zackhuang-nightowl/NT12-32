@@ -89,9 +89,11 @@ static void *pb_feeder(void *arg)
                 continue;
             }
             if(orc!=0 || !vdec){ vdec=NULL; NVR_LOGE("pb","chn%d 开解码失败 %d", chn0+1, orc); break; }
-            /* 视频区:从(0,0)占 0.8×W × 0.8×H(其余留给 GUI 时间轴/控件) */
-            int vw = pb->cfg.hdmi_w>0 ? pb->cfg.hdmi_w*4/5 : 1536;
-            int vh = pb->cfg.hdmi_h>0 ? pb->cfg.hdmi_h*4/5 : 864;
+            /* 视频区:playbackMode==0 → 全屏;否则从(0,0)占 0.8×W × 0.8×H(其余留给 GUI 时间轴/控件)。 */
+            int W = pb->cfg.hdmi_w>0 ? pb->cfg.hdmi_w : 1920;
+            int H = pb->cfg.hdmi_h>0 ? pb->cfg.hdmi_h : 1080;
+            int vw = (pb->disp_mode==0) ? W : W*4/5;
+            int vh = (pb->disp_mode==0) ? H : H*4/5;
             mhal_vout_bind_rect(chn0, 0, 0, vw, vh);
             opened=1; base_ms=now_ms(); base_pts=h.pts;
             NVR_LOGI("pb","chn%d ▶回放 win%d %s @%u", chn0+1, PB_WIN,
