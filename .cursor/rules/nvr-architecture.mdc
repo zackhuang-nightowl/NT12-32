@@ -1,0 +1,66 @@
+---
+description: NT12-32 NVR 固件架构与分层约束（Novatek NT98633/NA51090）
+alwaysApply: true
+---
+
+# NT12-32 NVR 固件 — 架构记忆
+
+**产品**：NightOwl 32 路 PoE NVR（16 PoE + 16 IP）· aarch64 Linux 4.19 · HDMI 出图 · 裸盘录像 · NOP 8089 协议
+
+## 分层（单向依赖，禁止反向/跨层）
+
+```
+app/ → components/ → platform/media_hal → third_party + BSP(hdal)
+```
+
+- **app/**：整机编排（channel/preview/record_sched/event/router/config），模块间不横向调用
+- **components/**：六大功能 + 辅助库（见下表）
+- **platform/media_hal/**：唯一允许调用 na51090 hdal 的地方（mhal_vdec/mhal_vout）
+- **third_party/**：Happytime ONVIF/RTSP · TUTK · cJSON · sqlite3（intact，只经 glue 使用）
+
+## 六大功能模块
+
+| # | 目录 | 职责 | 关键 API |
+|---|------|------|----------|
+| ① | `components/nop` | NOP 2.0 协议核 + cap handler + ONVIF 映射 | `nop_app_create/dispatch` |
+| ② | `components/onvif` | ONVIF 客户端 + 设备三分类 | `nvr_onvif_get_url`, `nvr_dev_classify` |
+| ③ | `components/streaming` | RTSP 拉流 → 硬解上屏 + 旁路录像 | `nvr_stream_mgr_*` |
+| ④ | `components/cloud_tutk` | TUTK P2P 远程 | `nvr_tutk_*` |
+| ⑤ | `components/recorder` | 裸盘录像/索引/回放/导出 MP4 | `rsdk_*` |
+| ⑥ | `components/storage` | 盘发现/格式化/装配/热插拔 | `nvr_storage_*` |
+
+辅助：`config`(SQLite 设置库) · `crypto`(MD5/SHA/AES) · `cloud_uploader`(VSaaS 云存)
+
+## 核心数据流
+
+**出图**：ONVIF 发现(②) → CRtspClient 拉流 → `mhal_vdec` 硬解 → `mhal_vout` HDMI（**禁止 ffmpeg 软解 16 路上屏**）
+
+**录像**：video_cb → `rsdk_rec_write_frame` → storage 裸盘(AES-256-CTR)
+
+**远程**：App → 8089 NOP / TUTK P2P → nop router → app 编排 → streaming/recorder
+
+**界面**：独立 LVGL 进程 → `127.0.0.1:8089/APPJsonCmd` → `nvr_cmd_router`
+
+## 构建
+
+```bash
+# 主机（12 库 + ctest 4/4）
+cmake -S . -B build && cmake --build build -j && ctest --test-dir build
+
+# 目标机（nvr_app 可执行）
+cmake -S . -B build_arm -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64-ca53.cmake \
+  -DNVR_WITH_ONBOARD=ON -DBSP_ROOT=<na51090_linux_sdk>
+```
+
+## 编码约束
+
+- 新功能放对应 layer；app 只做编排与回调连接
+- ONVIF/RTSP 不直接改 third_party 源码，写 glue
+- hdal 调用只在 `platform/media_hal/`
+- 弱符号钩子（如 `nvr_onvif_get_url`）供模块可选接入
+
+## 文档入口
+
+- 架构详情：`docs/ARCHITECTURE.md`
+- 实现状态：`docs/STATUS.md`
+- 文档索引：`docs/INDEX.md`

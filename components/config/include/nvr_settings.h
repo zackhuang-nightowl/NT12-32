@@ -71,6 +71,7 @@ typedef struct {
     int  codec, stream, record;
     char uuid[100], serial[64], manufacturer[64], model[64], firmware[64];
     int  bound, active;
+    char video_source_token[100]; /* 多源:该通道绑定的 ONVIF VideoSourceToken(空=单源/首源) */
 } nvr_camera_row_t;
 
 int  nvr_settings_camera_upsert(nvr_settings_t *s, const nvr_camera_row_t *row);

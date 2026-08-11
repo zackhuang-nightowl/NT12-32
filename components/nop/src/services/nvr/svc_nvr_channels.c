@@ -130,6 +130,47 @@ int nop_nvr_channels_add(nop_nvr_channels_t *channels, const nop_nvr_channel_ent
     return assigned_channel;
 }
 
+nop_status_t nop_nvr_channels_upsert(nop_nvr_channels_t *channels,
+                                     const nop_nvr_channel_entry_t *entry)
+{
+    int slot_index, i;
+
+    if (!channels || !entry || entry->host[0] == '\0' || entry->channel < 0)
+        return NOP_ERR_PARAM;
+
+    osal_mutex_lock(channels->mutex);
+
+    slot_index = find_by_channel_locked(channels, entry->channel);
+    if (slot_index >= 0) {
+        channels->slots[slot_index].entry = *entry;
+        osal_mutex_unlock(channels->mutex);
+        return NOP_OK;
+    }
+
+    if (channel_in_use_locked(channels, entry->channel)) {
+        osal_mutex_unlock(channels->mutex);
+        return NOP_ERR_PARAM;
+    }
+
+    for (i = 0; i < channels->capacity; i++) {
+        if (!channels->slots[i].active) {
+            slot_index = i;
+            break;
+        }
+    }
+    if (slot_index < 0) {
+        osal_mutex_unlock(channels->mutex);
+        return NOP_ERR_NOMEM;
+    }
+
+    channels->slots[slot_index].active        = 1;
+    channels->slots[slot_index].entry         = *entry;
+    channels->slots[slot_index].entry.channel = entry->channel;
+    channels->count++;
+    osal_mutex_unlock(channels->mutex);
+    return NOP_OK;
+}
+
 nop_status_t nop_nvr_channels_remove(nop_nvr_channels_t *channels, int channel)
 {
     int slot_index;

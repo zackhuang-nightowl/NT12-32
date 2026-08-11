@@ -9,10 +9,13 @@
 |------|--------|------|------|
 | `nop/` | `NT12-SDK/nop_sdk/` | 复制 src/include/ports/tests/cmake；**剥离** `third_party/`(onvif/onvif_server/tutk 去重到顶层) 与所有 `build-*/` | 见 `components/nop/NOTE_dedup.md` |
 | `recorder/` | `NT12-SDK/recorder_sdk/` | 整包，去 `build/` | librsdk，独立可编译 |
-| `onvif/` | —（glue 待写） | 新建目录 | 协议实现在 `third_party/happytime_onvif_rtsp/source/onvif/` |
-| `streaming/` | —（glue 待写） | 新建目录 | 拉流用 Happytime `CRtspClient`，解码用 `platform/media_hal` |
-| `cloud_tutk/` | —（glue 待写） | 新建目录 | 库在 `third_party/tutk_sdk/` |
-| `storage/` | —（待补充） | 新建目录 | 落盘方案未定 |
+| `onvif/` | —（glue） | ✅ 已实现 | `nvr_onvif.c` + `nvr_dev_classify.c`；协议在 happytime |
+| `streaming/` | —（glue） | ✅ 已实现 | `nvr_stream_mgr_*`；拉流 CRtspClient + mhal 硬解 |
+| `cloud_tutk/` | —（glue） | ✅ 已实现 | `nvr_tutk.c`；库在 `third_party/tutk_sdk/` |
+| `storage/` | —（glue） | ✅ 已实现 | 裸盘方案 + 盘发现/装配/热插拔 |
+| `config/` | — | ✅ 已实现 | SQLite 设置库 `nvr_settings` |
+| `crypto/` | — | ✅ 已实现 | MD5/SHA/AES256 |
+| `cloud_uploader/` | — | ✅ 已实现 | TS 封装 + VSaaS HTTPS 上传 |
 
 ## third_party/ （intact 上游）
 

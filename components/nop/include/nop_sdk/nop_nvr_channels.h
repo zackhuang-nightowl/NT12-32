@@ -84,6 +84,14 @@ void nop_nvr_channels_destroy(nop_nvr_channels_t *channels);
  */
 int nop_nvr_channels_add(nop_nvr_channels_t *channels, const nop_nvr_channel_entry_t *entry);
 
+/**
+ * Insert or update a binding keyed by @p entry->channel (required, >= 0).
+ * Unlike add(), does not dedupe by host+port — multiple channels may share one
+ * device (multi-video-source). @return NOP_OK, NOP_ERR_PARAM, or NOP_ERR_NOMEM.
+ */
+nop_status_t nop_nvr_channels_upsert(nop_nvr_channels_t *channels,
+                                     const nop_nvr_channel_entry_t *entry);
+
 /** Remove the camera on @p channel. @return NOP_OK or NOP_ERR_NOTFOUND. */
 nop_status_t nop_nvr_channels_remove(nop_nvr_channels_t *channels, int channel);
 

@@ -345,6 +345,10 @@ int nop_onvif_get_profile(nop_onvif_device_t *device, int index, nop_onvif_profi
             strncpy(out->token, p->token, sizeof(out->token) - 1);
             strncpy(out->name, p->name, sizeof(out->name) - 1);
             strncpy(out->stream_uri, p->stream_uri, sizeof(out->stream_uri) - 1);
+            /* 该 profile 归属的物理视频源(多源区分):取 VideoSourceConfiguration.SourceToken */
+            if (p->v_src_cfg)
+                strncpy(out->source_token, p->v_src_cfg->Configuration.SourceToken,
+                        sizeof(out->source_token) - 1);
             return 0;
         }
     }

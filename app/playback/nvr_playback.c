@@ -423,6 +423,12 @@ int nvr_playback_control(nvr_playback_t *pb, const char *action, int chn1,
             pb_blackout_locked(pb, chn0);
             pb_open_decoders_locked(pb);
         }
+        /* ★ 每次 play 都按当前 disp_mode 重绑每格矩形(即使复用解码器):切布局后画面必落到新宫格,
+         *   不残留旧位置(liveView 按序填满,回放也须每次刷新格位)。 */
+        for(int k=0;k<pb->nth;k++){
+            int cx,cy,cw,chh; pb_cell_rect(pb, pb->fctx[k].cell_idx, &cx,&cy,&cw,&chh);
+            mhal_vout_bind_rect(pb->fctx[k].chn0, cx, cy, cw, chh);
+        }
         pb->want_stream = (pb->disp_mode==0)?NVR_STREAM_MAIN:NVR_STREAM_SUB;
         pb->paused = 0; pb->pause_at_ms = 0;
         pb->play_base_ms = now_ms(); pb->play_base_wall = sw;   /* 共享时钟基准(首出帧可能重锚到实际位置) */

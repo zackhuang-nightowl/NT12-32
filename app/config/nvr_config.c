@@ -342,6 +342,10 @@ int nvr_config_overlay_from_settings(nvr_config_t *cfg, nvr_settings_t *settings
         e->kind       = r->kind;
         e->backend    = r->backend;    /* DB 权威(nopOnvif/onvif=1) */
         e->vout_win   = e->chn;
+        /* 多视频源:恢复源序号/类型/token(重启后 get_url 按 token 拉各自源流) */
+        e->dev_chn    = r->dev_chn > 0 ? r->dev_chn : 1;
+        if (r->type[0]) snprintf(e->type, sizeof(e->type), "%s", r->type);
+        snprintf(e->video_source_token, sizeof(e->video_source_token), "%s", r->video_source_token);
     }
     return 0;
 }

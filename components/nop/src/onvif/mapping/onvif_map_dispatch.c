@@ -77,6 +77,12 @@ nop_status_t nop_onvif_map_events_start(nop_onvif_map_backend_t *be, void *hub)
 }
 void nop_onvif_map_events_stop(nop_onvif_map_backend_t *be) { (void)be; }
 
+void nop_onvif_map_invalidate_channel(nop_onvif_map_backend_t *be, int channel,
+                                      const nop_nvr_channel_entry_t *prev)
+{
+    (void)be; (void)channel; (void)prev;
+}
+
 int nop_onvif_map_is_onvif(void *ctx, int channel)
 {
     (void)ctx; (void)channel;

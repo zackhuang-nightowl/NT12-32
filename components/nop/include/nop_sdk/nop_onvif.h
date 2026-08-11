@@ -128,6 +128,8 @@ typedef struct nop_onvif_profile {
     char token[100];
     char name[64];
     char stream_uri[300];   /**< populated if stream URIs were fetched */
+    char source_token[100]; /**< VideoSourceConfiguration.SourceToken = the physical
+                                 video source this profile belongs to (多源区分用;空=未知) */
 } nop_onvif_profile_t;
 
 /** Fetch the media profiles into the handle. @return profile count (>=0). */

@@ -75,6 +75,8 @@ cmake --build build_arm -j
 
 ## 文档
 
-- 架构与数据流：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- 代码级现状（哪些真实接线 / 待接线）：[docs/实际进度_代码审计_2026-08-03.md](docs/实际进度_代码审计_2026-08-03.md)
+- **文档索引**：[docs/INDEX.md](docs/INDEX.md)（按主题分类的全部文档）
+- **架构与数据流**：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- **实现状态**：[docs/STATUS.md](docs/STATUS.md)（✅/🟡/❌）
+- 代码级审计：[docs/实际进度_代码审计_2026-08-03.md](docs/实际进度_代码审计_2026-08-03.md)
 - 来源追溯：[docs/SOURCE_MAP.md](docs/SOURCE_MAP.md)

@@ -68,6 +68,10 @@ nop_status_t nop_onvif_map_events_start(nop_onvif_map_backend_t *backend, void *
 /** Stop the ONVIF event poller. Safe to call when not started. */
 void nop_onvif_map_events_stop(nop_onvif_map_backend_t *backend);
 
+/** Drop cached ONVIF sessions after a channel registry change. See public header. */
+void nop_onvif_map_invalidate_channel(nop_onvif_map_backend_t *backend, int channel,
+                                      const nop_nvr_channel_entry_t *prev);
+
 /* ---- front-door (cap_*.c) ---------------------------------------------- */
 
 /**

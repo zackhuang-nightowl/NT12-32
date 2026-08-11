@@ -28,9 +28,13 @@ typedef enum {
 
 typedef struct nvr_chan_mgr nvr_chan_mgr_t;
 
+typedef struct nop_onvif_map_backend nop_onvif_map_backend_t;
+
 typedef struct {
     nvr_stream_mgr_t *sm;                 /* borrowed：唯一取流管理器 */
     nvr_settings_t   *settings;           /* borrowed：设备落库(camera 表);可空(不持久化) */
+    struct nop_nvr_channels *nop_chans;     /* borrowed：ONVIF 映射注册表；可空(不同步) */
+    nop_onvif_map_backend_t *onvif_be;      /* borrowed：ONVIF 会话缓存；可空(不刷新) */
     int   reconnect_base_s;               /* 重连基础退避秒，默认 5 */
     int   reconnect_max_s;                /* 最大退避秒，默认 30 */
     void *user;                           /* 回调上下文 */
@@ -40,6 +44,10 @@ typedef struct {
 
 int  nvr_chan_mgr_init  (const nvr_chan_mgr_cfg_t *cfg, nvr_chan_mgr_t **out);
 void nvr_chan_mgr_deinit(nvr_chan_mgr_t *m);
+/** 迟绑 nop_nvr_channels（nvr_app 在创建映射后端后注入）。 */
+void nvr_chan_mgr_set_nop_registry(nvr_chan_mgr_t *m, struct nop_nvr_channels *reg);
+/** 迟绑 ONVIF 映射 backend（与 nop_chans 同时注入）。 */
+void nvr_chan_mgr_set_onvif_backend(nvr_chan_mgr_t *m, nop_onvif_map_backend_t *be);
 
 /* 批量载入（替代 nvr_app 内联 add_channel 循环）：把 cfg->ch[] 加入并起流。 */
 int  nvr_chan_load_config(nvr_chan_mgr_t *m, const nvr_config_t *cfg);

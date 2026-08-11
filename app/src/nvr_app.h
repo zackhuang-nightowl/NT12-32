@@ -23,7 +23,7 @@ void nvr_app_request_exit(nvr_app_t *app);                    /* 供信号处理
  * scopes_out(可空):顺带回传发现广播的 scopes(供通道分类 kind/mac);scopes_cap 为其容量。 */
 int  nvr_onvif_get_url(const char *ip, int port, const char *user, const char *pass,
                        const char *stream, char *out, int out_size,
-                       char *scopes_out, int scopes_cap);
+                       char *scopes_out, int scopes_cap, const char *vsrc_token);
 
 #ifdef __cplusplus
 }

@@ -185,7 +185,7 @@ char *cmd_X_NightOwl_getDeviceCapabilities(cJSON *a, const nvr_cmd_ctx_t *c)
          * 存的是设备自视角对象 → 聚合时覆盖 channel 为本机通道号。 */
         char caps_json[2048];
         cJSON *e = NULL;
-        if (c->settings && nvr_settings_caps_get(c->settings, ch1, caps_json, sizeof(caps_json), NULL, 0) > 0)
+        if (c->settings && nvr_settings_caps_get(c->settings, list[i].chn, caps_json, sizeof(caps_json), NULL, 0) > 0)  /* 0-based key */
             e = cJSON_Parse(caps_json);
         if (!e) e = cJSON_CreateObject();
         cJSON_DeleteItemFromObject(e, "channel");
@@ -225,7 +225,7 @@ char *cmd_AI_getChannelAICapabilities(cJSON *a, const nvr_cmd_ctx_t *c)
         }
     }
     char caps_json[2048]; cJSON *e = NULL;
-    if (c->settings && nvr_settings_caps_get(c->settings, ch1, caps_json, sizeof(caps_json), NULL, 0) > 0)
+    if (c->settings && nvr_settings_caps_get(c->settings, ch1 - 1, caps_json, sizeof(caps_json), NULL, 0) > 0)  /* 0-based key */
         e = cJSON_Parse(caps_json);
 
     cJSON *o = cJSON_CreateObject();

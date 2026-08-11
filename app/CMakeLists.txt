@@ -49,6 +49,7 @@ add_library(nvr_app_core STATIC
     config/nvr_config.c
     config/nvr_gui_config.c
     channel/nvr_channel.c
+    channel/nvr_chan_nop_sync.c
     preview/nvr_preview.c
     record_sched/nvr_record_sched.c
     event/nvr_event.c

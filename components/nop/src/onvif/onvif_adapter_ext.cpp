@@ -899,6 +899,23 @@ int nop_onvif_list_sources(nop_onvif_device_t *device, char tokens[][100], int m
 {
     if (!device || !tokens || max <= 0)
         return -1;
+    /* ── 主路径:Media1 tds/media GetVideoSources ──
+     * 直接返回设备的物理视频源(每个 token = 一路物理输入)。CM-EA 系列(disc media2=-1)
+     * 只支持 Media1;GetVideoSources 在 Media1/Media2 设备上都可用,是最可靠的物理源枚举。
+     * 实测 CM-EA-Q4TH-BU 返回 VideoSourceToken_1/_2(2 源)。 */
+    if (GetVideoSources(&device->dev)) {
+        int n = 0;
+        for (VideoSourceList *v = device->dev.v_src; v && n < max; v = v->next) {
+            if (!v->VideoSource.token[0])
+                continue;
+            strncpy(tokens[n], v->VideoSource.token, 99);
+            tokens[n][99] = '\0';
+            n++;
+        }
+        if (n > 0)
+            return n;
+    }
+    /* ── 回退:Media2 tr2 GetProfiles,按 VideoSource.SourceToken 去重 ── */
     tr2_GetProfiles_REQ req;
     tr2_GetProfiles_RES res;
     memset(&req, 0, sizeof(req));

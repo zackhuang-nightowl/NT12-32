@@ -216,6 +216,161 @@ void onvif_session_end(nop_onvif_map_backend_t *be)
         osal_mutex_unlock(be->lock);
 }
 
+/* ------------------------------------------------------------------------ */
+/* Session invalidation (IP / credentials / backend / source token change)  */
+/* ------------------------------------------------------------------------ */
+
+static void session_reset(onvif_session_t *s)
+{
+    int ch;
+    if (!s)
+        return;
+    ch = s->channel;
+    memset(s, 0, sizeof(*s));
+    s->channel = ch;
+}
+
+static int entry_port(const nop_nvr_channel_entry_t *e)
+{
+    return (e && e->port > 0) ? e->port : ONVIF_DEFAULT_PORT;
+}
+
+static int devpool_users(nop_onvif_map_backend_t *be, const char *host, int port)
+{
+    int i, n = 0, p = port > 0 ? port : ONVIF_DEFAULT_PORT;
+    nop_nvr_channel_entry_t e;
+
+    if (!be || !be->channels || !host || !host[0])
+        return 0;
+    for (i = 0; i < ONVIF_MAX_SESSIONS; i++) {
+        if (!nop_nvr_channels_get(be->channels, i, &e))
+            continue;
+        if (e.backend != NOP_BACKEND_ONVIF)
+            continue;
+        if (strcmp(e.host, host) == 0 && entry_port(&e) == p)
+            n++;
+    }
+    return n;
+}
+
+static void devpool_drop(nop_onvif_map_backend_t *be, const char *host, int port)
+{
+    int i, p = port > 0 ? port : ONVIF_DEFAULT_PORT;
+
+    if (!be || !host || !host[0])
+        return;
+    for (i = 0; i < ONVIF_MAX_SESSIONS; i++) {
+        if (!be->devpool[i].dev)
+            continue;
+        if (be->devpool[i].port == p && strcmp(be->devpool[i].host, host) == 0) {
+            nop_onvif_device_destroy(be->devpool[i].dev);
+            memset(&be->devpool[i], 0, sizeof(be->devpool[i]));
+        }
+    }
+}
+
+static void sessions_reset_for_device(nop_onvif_map_backend_t *be,
+                                      const char *host, int port)
+{
+    int i, p = port > 0 ? port : ONVIF_DEFAULT_PORT;
+    nop_nvr_channel_entry_t e;
+
+    if (!be || !host || !host[0])
+        return;
+    for (i = 0; i < ONVIF_MAX_SESSIONS; i++) {
+        if (!nop_nvr_channels_get(be->channels, i, &e)) {
+            session_reset(&be->sessions[i]);
+            continue;
+        }
+        if (e.backend == NOP_BACKEND_ONVIF &&
+            strcmp(e.host, host) == 0 && entry_port(&e) == p)
+            session_reset(&be->sessions[i]);
+    }
+}
+
+static void poll_drop_channel(nop_onvif_map_backend_t *be, int ch)
+{
+    if (!be || ch < 0 || ch >= ONVIF_MAX_SESSIONS)
+        return;
+    if (be->poll_dev[ch]) {
+        nop_onvif_events_unsubscribe(be->poll_dev[ch]);
+        nop_onvif_device_destroy(be->poll_dev[ch]);
+        be->poll_dev[ch] = NULL;
+    }
+    be->poll_vsct[ch][0] = '\0';
+}
+
+static void poll_drop_device(nop_onvif_map_backend_t *be, const char *host, int port)
+{
+    int ch, p = port > 0 ? port : ONVIF_DEFAULT_PORT;
+    nop_nvr_channel_entry_t e;
+
+    if (!be || !host || !host[0])
+        return;
+    for (ch = 0; ch < ONVIF_MAX_SESSIONS; ch++) {
+        if (!nop_nvr_channels_get(be->channels, ch, &e)) {
+            poll_drop_channel(be, ch);
+            continue;
+        }
+        if (e.backend == NOP_BACKEND_ONVIF &&
+            strcmp(e.host, host) == 0 && entry_port(&e) == p)
+            poll_drop_channel(be, ch);
+    }
+}
+
+static int entry_device_connect_changed(const nop_nvr_channel_entry_t *prev,
+                                        const nop_nvr_channel_entry_t *cur,
+                                        int have_cur)
+{
+    if (!prev)
+        return 1;
+    if (!have_cur)
+        return 1;
+    return strcmp(prev->host, cur.host) != 0 ||
+           entry_port(prev) != entry_port(cur) ||
+           strcmp(prev->username, cur.username) != 0 ||
+           strcmp(prev->password, cur.password) != 0 ||
+           prev->backend != cur.backend ||
+           strcmp(prev->video_source_token, cur.video_source_token) != 0;
+}
+
+void nop_onvif_map_invalidate_channel(nop_onvif_map_backend_t *be, int channel,
+                                      const nop_nvr_channel_entry_t *prev)
+{
+    nop_nvr_channel_entry_t cur;
+    int                     have_cur = 0;
+    int                     dev_changed;
+
+    if (!be || channel < 0 || channel >= ONVIF_MAX_SESSIONS)
+        return;
+
+    osal_mutex_lock(be->lock);
+
+    have_cur = be->channels &&
+               nop_nvr_channels_get(be->channels, channel, &cur);
+    dev_changed = entry_device_connect_changed(prev, have_cur ? &cur : NULL, have_cur);
+
+    session_reset(&be->sessions[channel]);
+    poll_drop_channel(be, channel);
+
+    if (prev && prev->host[0] && dev_changed) {
+        int pp = entry_port(prev);
+        sessions_reset_for_device(be, prev->host, pp);
+        poll_drop_device(be, prev->host, pp);
+        if (devpool_users(be, prev->host, pp) == 0)
+            devpool_drop(be, prev->host, pp);
+    }
+
+    if (have_cur && cur.backend == NOP_BACKEND_ONVIF && cur.host[0] && dev_changed) {
+        int cp = entry_port(&cur);
+        sessions_reset_for_device(be, cur.host, cp);
+        poll_drop_device(be, cur.host, cp);
+        devpool_drop(be, cur.host, cp);
+    }
+
+    osal_mutex_unlock(be->lock);
+}
+
 nop_onvif_device_t *onvif_session_dev(onvif_session_t *s) { return s ? s->dev : NULL; }
 /* PTZ/stream profile: prefer this channel's bound-source profile (§10 per-source
  * PTZ); fall back to the default Media1 profile when the source is unresolved. */

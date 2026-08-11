@@ -40,6 +40,10 @@ void mhal_vdec_close(mhal_vdec_t *d);
 /* 当前活跃解码器数(供回放确认全局无残留 live 解码器竞争硬件)。 */
 int  mhal_vdec_active_count(void);
 
+/* 批量送流:多路解码器帧一次 send_list 送(按 SDK,避免逐路 send 并发竞争 → DEC_HW_TIMEOUT)。 */
+int  mhal_vdec_send_multi(mhal_vdec_t **ds, const uint8_t **bufs,
+                          const uint32_t *lens, const uint32_t *tss, int n);
+
 #ifdef __cplusplus
 }
 #endif

@@ -6,6 +6,7 @@
  *  参照 hdal 样例 playback_1div_to_4div.c 的 open/bind/set_module_param/send 流程。
  *  ⚠️ 仅在 na51090 BSP 交叉环境编译。
  ***************************************************************************************/
+#include <pthread.h>
 #include "mhal_internal.h"
 #include "mhal_budget.h"
 #include "nvr_log.h"
@@ -247,6 +248,10 @@ fail:
     return -1;
 }
 
+/* ★ send_list 序列化锁:多路回放各自线程送流时,hd_videodec_send_list **不可并发**
+ *   (SDK 用单线程一次送多路);并发会 DEC_HW_TIMEOUT。此锁保证任一时刻只有一个 send。 */
+static pthread_mutex_t g_send_lock = PTHREAD_MUTEX_INITIALIZER;
+
 int mhal_vdec_send(mhal_vdec_t *d, const uint8_t *annexb, uint32_t len, uint32_t ts)
 {
     if (!d || !d->opened || !annexb || len == 0) return -1;
@@ -260,7 +265,9 @@ int mhal_vdec_send(mhal_vdec_t *d, const uint8_t *annexb, uint32_t len, uint32_t
     item.user_bs.bs_buf_size= len;
     item.user_bs.timestamp  = (UINT64)ts * 1000;   /* 90kHz→us 的换算按需精化 */
 
+    pthread_mutex_lock(&g_send_lock);
     HD_RESULT ret = hd_videodec_send_list(&item, 1, 200 /*wait_ms*/);
+    pthread_mutex_unlock(&g_send_lock);
     if (ret < 0 || item.user_bs.retval < 0) {
         /* 送流失败诊断:按通道计数(节流)。看是否 ch16(8K)大帧/超窗口/DIN 满 → 定位丢图根因。 */
         static int fail_cnt[MHAL_MAX_CH];
@@ -272,6 +279,29 @@ int mhal_vdec_send(mhal_vdec_t *d, const uint8_t *annexb, uint32_t len, uint32_t
         return -1;
     }
     return 0;
+}
+
+/* ★ 批量送流(按 SDK playback_1div_to_4div:多路解码器的帧**一次** send_list 送,避免逐路分别 send
+ *   并发竞争硬件 → DEC_HW_TIMEOUT)。ds/bufs/lens/tss 各 n 个,一一对应;返回 0/负。 */
+int mhal_vdec_send_multi(mhal_vdec_t **ds, const uint8_t **bufs,
+                         const uint32_t *lens, const uint32_t *tss, int n)
+{
+    if (n <= 0) return -1;
+    HD_VIDEODEC_SEND_LIST items[MHAL_MAX_CH];
+    int m = 0;
+    for (int i = 0; i < n && m < MHAL_MAX_CH; i++) {
+        if (!ds[i] || !ds[i]->opened || !bufs[i] || lens[i] == 0) continue;
+        memset(&items[m], 0, sizeof(items[m]));
+        items[m].path_id             = ds[i]->dec_path;
+        items[m].user_bs.sign        = MAKEFOURCC('V', 'S', 'T', 'M');
+        items[m].user_bs.p_bs_buf    = (CHAR *)bufs[i];
+        items[m].user_bs.bs_buf_size = lens[i];
+        items[m].user_bs.timestamp   = (UINT64)tss[i] * 1000;
+        m++;
+    }
+    if (m == 0) return 0;
+    HD_RESULT ret = hd_videodec_send_list(items, m, 200 /*wait_ms*/);
+    return (ret < 0) ? -1 : 0;
 }
 
 /* 当前活跃解码器数(g_disp.ch[] 非空)。供回放确认"全局单一使用者"(无残留 live 解码器竞争 HW)。 */

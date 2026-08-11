@@ -33,6 +33,7 @@
 #include "nvr_cmd_router.h"
 #include "nop_sdk/nop_http_server.h"
 #include "nvr_chan_persist.h"
+#include "nvr_chan_nop_sync.h"
 #include "cJSON.h"
 #include <time.h>
 #include <sys/stat.h>
@@ -110,9 +111,10 @@ static void app_on_set_resolution(void *user, int w, int h)
 __attribute__((weak))
 int nvr_onvif_get_url(const char *ip, int port, const char *user, const char *pass,
                       const char *stream, char *out, int out_size,
-                      char *scopes_out, int scopes_cap)
+                      char *scopes_out, int scopes_cap, const char *vsrc_token)
 {
     (void)ip; (void)port; (void)user; (void)pass; (void)stream; (void)out; (void)out_size;
+    (void)vsrc_token;
     if (scopes_out && scopes_cap > 0) scopes_out[0] = 0;
     return -1;
 }
@@ -442,24 +444,16 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
      *     并启动 ONVIF 事件轮询 → nop_event_hub（AI 事件进事件中枢）。 */
     if (a->nop) {
         a->nop_chans = nop_nvr_channels_create(NVR_MAX_CH);
-        nvr_channel_t clist[NVR_MAX_CH]; int cn = nvr_chan_list(a->cm, clist, NVR_MAX_CH);
-        for (int i = 0; i < cn; i++) {
-            nop_nvr_channel_entry_t e; memset(&e, 0, sizeof(e));
-            e.channel = clist[i].chn; e.enabled = clist[i].enabled ? 1 : (clist[i].chn >= 0);
-            snprintf(e.host, sizeof(e.host), "%s", clist[i].onvif_ip);
-            e.port = clist[i].onvif_port > 0 ? clist[i].onvif_port : 80;
-            snprintf(e.username, sizeof(e.username), "%s", clist[i].user[0] ? clist[i].user : "admin");
-            snprintf(e.password, sizeof(e.password), "%s", clist[i].pass);
-            snprintf(e.name, sizeof(e.name), "%s", clist[i].name);
-            e.backend = (clist[i].kind == 2 /*ONVIF*/) ? NOP_BACKEND_ONVIF : NOP_BACKEND_NOP;
-            if (e.host[0]) nop_nvr_channels_add(a->nop_chans, &e);
-        }
         nop_app_set_nvr_channels(a->nop, a->nop_chans);
+        nvr_chan_mgr_set_nop_registry(a->cm, a->nop_chans);
         a->onvif_backend = nop_onvif_map_backend_create(a->nop_chans);
+        nvr_chan_mgr_set_onvif_backend(a->cm, a->onvif_backend);
+        nvr_chan_nop_sync_all(a->nop_chans, a->cm);
         if (a->onvif_backend) {
             nop_app_set_onvif_backend(a->nop, a->onvif_backend);
             nop_onvif_map_events_start(a->onvif_backend, a->nop_hub);  /* ONVIF 事件→事件中枢 */
-            printf("[app] ONVIF 映射后端就绪(%d 通道注册, 事件轮询启动)\n", cn);
+            printf("[app] ONVIF 映射后端就绪(%d 通道注册, 事件轮询启动)\n",
+                   nop_nvr_channels_count(a->nop_chans));
         }
     }
 

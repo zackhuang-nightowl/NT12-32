@@ -21,9 +21,11 @@ void nvr_onvif_cleanup(void);
 
 /* 取流 URL（= app/src/nvr_app.h 声明的钩子；stream: "main"/"sub"）。成功填 out 返 0。
  * scopes_out(可空):顺带回传发现广播 scopes(供通道 nvr_dev_classify 分类 kind/mac)。 */
+/* vsrc_token:多源设备该通道绑定的 VideoSourceToken(空=单源/首源)。解析时只在归属该源的
+ * profile 里挑主/子,保证多源各通道拉到各自的源流。 */
 int  nvr_onvif_get_url(const char *ip, int port, const char *user, const char *pass,
                        const char *stream, char *out, int out_size,
-                       char *scopes_out, int scopes_cap);
+                       char *scopes_out, int scopes_cap, const char *vsrc_token);
 
 /* 设备探测结果(首次上线一次会话拿全:身份 + 主/子流 + 能力标识)。 */
 typedef struct {

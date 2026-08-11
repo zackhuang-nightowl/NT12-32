@@ -54,13 +54,27 @@ static void local_ip_for(const char *ip, char *out, size_t cap)
         snprintf(out, cap, "198.18.%d.100", c);
 }
 
-/* 从若干 profile 里挑一个并取 RTSP 流 URL。media2=1 走 tr2，否则 trt。成功填 out 返 0。 */
+/* 从若干 profile 里挑一个并取 RTSP 流 URL。media2=1 走 tr2，否则 trt。成功填 out 返 0。
+ * vsrc_token 非空(多源设备)时:只在归属该 VideoSource 的 profile 里挑 主(第1个)/子(第2个)。 */
 static int pick_stream_uri(nop_onvif_device_t *dev, int media2, int n, int want_sub,
-                           char *out, int out_size)
+                           const char *vsrc_token, char *out, int out_size)
 {
     if (n <= 0) return -1;
     nop_onvif_profile_t p;
-    int idx = (want_sub && n > 1) ? 1 : 0;
+    int idx;
+    if (vsrc_token && vsrc_token[0]) {
+        int first = -1, second = -1;
+        for (int i = 0; i < n; i++) {
+            int r = media2 ? nop_onvif_get_profile2(dev, i, &p)
+                           : nop_onvif_get_profile(dev, i, &p);
+            if (r != 0 || strcmp(p.source_token, vsrc_token) != 0) continue;
+            if (first < 0) first = i; else { second = i; break; }
+        }
+        if (first < 0) return -1;                      /* 指定源无 profile */
+        idx = (want_sub && second >= 0) ? second : first;
+    } else {
+        idx = (want_sub && n > 1) ? 1 : 0;             /* 单源:全局主/子 */
+    }
     int gp = media2 ? nop_onvif_get_profile2(dev, idx, &p)
                     : nop_onvif_get_profile(dev, idx, &p);
     if (gp != 0) return -1;
@@ -79,7 +93,7 @@ static int pick_stream_uri(nop_onvif_device_t *dev, int media2, int n, int want_
  * 只一次尝试（有账号带鉴权，否则匿名）；上层限次+退避护 IPC 5 次错误上限。 */
 int nvr_onvif_get_url(const char *ip, int port, const char *user, const char *pass,
                       const char *stream, char *out, int out_size,
-                      char *scopes_out, int scopes_cap)
+                      char *scopes_out, int scopes_cap, const char *vsrc_token)
 {
     if (!ip || !out || out_size <= 0) return -1;
     if (nvr_onvif_init() != 0) return -1;
@@ -115,13 +129,14 @@ int nvr_onvif_get_url(const char *ip, int port, const char *user, const char *pa
     /* ④ media1(trt) 优先；无果再 media2(tr2, Profile T)。均按各自 service 链接。 */
     int want_sub = (stream && strcmp(stream, "sub") == 0);
     int n1 = nop_onvif_get_profiles(dev);
-    int rc = pick_stream_uri(dev, 0, n1, want_sub, out, out_size);
+    int rc = pick_stream_uri(dev, 0, n1, want_sub, vsrc_token, out, out_size);
     int n2 = -1;
     if (rc != 0) { out[0] = 0; n2 = nop_onvif_get_profiles2(dev);
-                   rc = pick_stream_uri(dev, 1, n2, want_sub, out, out_size); }
+                   rc = pick_stream_uri(dev, 1, n2, want_sub, vsrc_token, out, out_size); }
 
-    NVR_ONVIF_LOG("[onvif] get_url %s: disc(host=%s port=%d url=%s) services=%d(err=%d) media1=%d media2=%d -> %s",
-                  ip, f.host, f.port, f.service_url, svc, err, n1, n2, rc == 0 ? out : "(FAIL)");
+    NVR_ONVIF_LOG("[onvif] get_url %s%s%s: disc(host=%s port=%d url=%s) services=%d(err=%d) media1=%d media2=%d -> %s",
+                  ip, (vsrc_token && vsrc_token[0]) ? " src=" : "", (vsrc_token && vsrc_token[0]) ? vsrc_token : "",
+                  f.host, f.port, f.service_url, svc, err, n1, n2, rc == 0 ? out : "(FAIL)");
     nop_onvif_device_destroy(dev);
     return rc;
 }
@@ -200,11 +215,11 @@ int nvr_onvif_probe(const char *ip, int port, const char *user, const char *pass
 
     /* 主/子流 URI:media1 优先,空则 media2 */
     int n1 = nop_onvif_get_profiles(dev);
-    int have_main = (pick_stream_uri(dev, 0, n1, 0, out->main_uri, sizeof(out->main_uri)) == 0);
-    pick_stream_uri(dev, 0, n1, 1, out->sub_uri, sizeof(out->sub_uri));
+    int have_main = (pick_stream_uri(dev, 0, n1, 0, NULL, out->main_uri, sizeof(out->main_uri)) == 0);
+    pick_stream_uri(dev, 0, n1, 1, NULL, out->sub_uri, sizeof(out->sub_uri));
     if (!have_main) { int n2 = nop_onvif_get_profiles2(dev);
-        pick_stream_uri(dev, 1, n2, 0, out->main_uri, sizeof(out->main_uri));
-        pick_stream_uri(dev, 1, n2, 1, out->sub_uri, sizeof(out->sub_uri)); }
+        pick_stream_uri(dev, 1, n2, 0, NULL, out->main_uri, sizeof(out->main_uri));
+        pick_stream_uri(dev, 1, n2, 1, NULL, out->sub_uri, sizeof(out->sub_uri)); }
 
     /* setTime 走 ONVIF:把 NVR 当前时间下发相机(所有设备统一) */
     out->time_set = (nop_onvif_set_system_datetime_now(dev) == 0) ? 1 : 0;

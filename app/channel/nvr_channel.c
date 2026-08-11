@@ -5,6 +5,7 @@
 #include "nvr_defaults.h"     /* PoE 内网段宏 NVR_POE_NET_A/B */
 #include "nvr_onvif.h"        /* nvr_onvif_get_url（弱兜底在 app/onvif 提供强符号） */
 #include "nvr_dev_classify.h" /* nvr_dev_classify */
+#include "nvr_chan_nop_sync.h"
 #include "nvr_log.h"
 
 #include <stdio.h>
@@ -183,6 +184,28 @@ int nvr_chan_mgr_init(const nvr_chan_mgr_cfg_t *cfg, nvr_chan_mgr_t **out)
 
 void nvr_chan_mgr_deinit(nvr_chan_mgr_t *m) { if (m) free(m); }
 
+void nvr_chan_mgr_set_nop_registry(nvr_chan_mgr_t *m, struct nop_nvr_channels *reg)
+{
+    if (m) m->cfg.nop_chans = reg;
+}
+
+void nvr_chan_mgr_set_onvif_backend(nvr_chan_mgr_t *m, nop_onvif_map_backend_t *be)
+{
+    if (m) m->cfg.onvif_be = be;
+}
+
+static void sync_nop_registry(nvr_chan_mgr_t *m, const nvr_channel_t *d)
+{
+    if (m && m->cfg.nop_chans)
+        nvr_chan_nop_sync_upsert(m->cfg.nop_chans, d, m->cfg.onvif_be);
+}
+
+static void unsync_nop_registry(nvr_chan_mgr_t *m, int chn)
+{
+    if (m && m->cfg.nop_chans)
+        nvr_chan_nop_sync_remove(m->cfg.nop_chans, chn, m->cfg.onvif_be);
+}
+
 /* 解析取流 URL：显式 url 优先；否则 onvif_auto+ip → nvr_onvif_get_url。成功写 cc.url。 */
 static int resolve_url(const nvr_channel_t *d, char *url, int cap, char *scopes, int scap)
 {
@@ -190,7 +213,8 @@ static int resolve_url(const nvr_channel_t *d, char *url, int cap, char *scopes,
     if (d->url[0]) { snprintf(url, cap, "%s", d->url); return 0; }
     if (d->onvif_auto && d->onvif_ip[0]) {
         const char *st = (d->stream == NVR_STREAM_SUB) ? "sub" : "main";
-        if (nvr_onvif_get_url(d->onvif_ip, d->onvif_port, d->user, d->pass, st, url, cap, scopes, scap) == 0)
+        if (nvr_onvif_get_url(d->onvif_ip, d->onvif_port, d->user, d->pass, st, url, cap, scopes, scap,
+                              d->video_source_token) == 0)
             return 0;
     }
     url[0] = 0;
@@ -312,8 +336,11 @@ static void persist_camera(nvr_chan_mgr_t *m, nvr_channel_t *d)
     snprintf(r.source,   sizeof(r.source),   "%s", d->poe_port > 0 ? "POE" : "LAN");
     snprintf(r.protocol, sizeof(r.protocol), "%s", d->kind == NVR_DEV_KIND_NOP ? "nop" : "onvif");
     r.kind = d->kind; r.backend = d->backend;
-    snprintf(r.type, sizeof(r.type), "single");
-    r.dev_chn = 1;                                      /* 从机单目:设备侧 channel=1 */
+    /* 多视频源:type/dev_chn/token 按 channel 实际值落库(额外源 type=multi、dev_chn=源序号、
+     * token=VideoSourceToken);重启后 get_url 按 token 拉各自的源流。 */
+    snprintf(r.type, sizeof(r.type), "%s", d->type[0] ? d->type : "single");
+    r.dev_chn = d->dev_chn > 0 ? d->dev_chn : 1;
+    snprintf(r.video_source_token, sizeof(r.video_source_token), "%s", d->video_source_token);
     snprintf(r.ip,       sizeof(r.ip),       "%s", d->onvif_ip);
     snprintf(r.mac,      sizeof(r.mac),      "%s", d->mac);
     snprintf(r.username, sizeof(r.username), "%s", d->user);
@@ -341,6 +368,7 @@ int nvr_chan_add(nvr_chan_mgr_t *m, const nvr_channel_t *desc)
     /* 落库用已装入的 slot(persist_camera 会用 ARP mac 覆盖并回写 s->d.mac,须传可变 slot) */
     if (rc >= 0) {
         persist_camera(m, &s->d);                       /* 有 ip+mac(ARP 优先)才真正写库 */
+        sync_nop_registry(m, &s->d);
         /* ★ 运行时加设备(LanAddDevice/setLanDevice)必须**激活**该通道,否则 set_url 因 active=0
          * 只存 URL 不起 puller → 永不出图(开机 start_all 覆盖不到运行时新加的)。 */
         nvr_stream_start(m->cfg.sm, s->d.chn);
@@ -354,6 +382,7 @@ int nvr_chan_remove(nvr_chan_mgr_t *m, int chn)
     if (!s || !s->in_use) return -1;
     nvr_stream_stop(m->cfg.sm, chn);
     if (s->notified_online && m->cfg.on_offline) m->cfg.on_offline(m->cfg.user, chn);
+    unsync_nop_registry(m, chn);
     forget_camera(m, chn);                              /* 删设备连带清 DB 行(级联清配置) */
     memset(s, 0, sizeof(*s));
     return 0;
@@ -394,6 +423,7 @@ int nvr_chan_apply_discovery(nvr_chan_mgr_t *m, int chn, const char *scopes)
              c.backend == NVR_BACKEND_NOP ? "NOP透传" : "ONVIF翻译",
              c.mac[0] ? " mac=" : "", c.mac);
     persist_camera(m, &s->d);       /* 分类/mac 更新后回写(有 ip+mac 才写) */
+    sync_nop_registry(m, &s->d);
     return 0;
 }
 
@@ -446,6 +476,7 @@ static void on_discovered(const nvr_onvif_cam_t *cam, void *user)
         if (cls.mac[0]) snprintf(s->d.mac, sizeof(s->d.mac), "%s", cls.mac);
         s->sub.inactive = (cls.kind == NVR_DEV_KIND_NOPONVIF && !cls.active) ? 1 : 0;
         persist_camera(m, &s->d);
+        sync_nop_registry(m, &s->d);
         return;
     }
 
@@ -459,6 +490,7 @@ static void on_discovered(const nvr_onvif_cam_t *cam, void *user)
         s->d.url[0] = 0; s->url_tries = 0; s->url_next = 0;
         s->status = NVR_CHAN_BOUND; s->notified_online = 0;
         persist_camera(m, &s->d);
+        sync_nop_registry(m, &s->d);
         return;
     }
 
@@ -482,6 +514,7 @@ static void on_discovered(const nvr_onvif_cam_t *cam, void *user)
                     s->url_tries = 0; s->url_next = 0; s->sub.auth_fail = 0;
                     s->status = NVR_CHAN_BOUND; s->notified_online = 0;
                     persist_camera(m, &s->d);
+                    sync_nop_registry(m, &s->d);
                     NVR_LOGI("chan", "PoE 段198.18.%d 发现相机 %s → ch%d(口%d)绑定/更新重解析",
                              seg, cam->host, s->d.chn, s->d.poe_port);
                 }
@@ -554,7 +587,7 @@ static int resolve_stream_url(nvr_chan_mgr_t *m, slot_t *s, int stream)
     char url[256], scopes[512]; scopes[0] = 0;
     const char *st = (stream == NVR_STREAM_SUB) ? "sub" : "main";
     if (nvr_onvif_get_url(s->d.onvif_ip, s->d.onvif_port, s->d.user, s->d.pass,
-                          st, url, sizeof(url), scopes, sizeof(scopes)) != 0)
+                          st, url, sizeof(url), scopes, sizeof(scopes), s->d.video_source_token) != 0)
         return -1;
     if (stream == NVR_STREAM_SUB) {
         if (scopes[0]) {
@@ -564,6 +597,7 @@ static int resolve_stream_url(nvr_chan_mgr_t *m, slot_t *s, int stream)
                 if (c.mac[0])   snprintf(s->d.mac,   sizeof(s->d.mac),   "%s", c.mac);
                 if (c.model[0]) snprintf(s->d.model, sizeof(s->d.model), "%s", c.model);
                 s->sub.inactive = (c.kind == NVR_DEV_KIND_NOPONVIF && !c.active) ? 1 : 0;
+                sync_nop_registry(m, &s->d);
             }
         }
         snprintf(s->url_sub, sizeof(s->url_sub), "%s", url);
@@ -699,7 +733,7 @@ static void tick_slot(nvr_chan_mgr_t *m, slot_t *s, time_t now, int *resolve_bud
                     char *cj = cJSON_PrintUnformatted(ch0);
                     if (cj) {
                         const char *sig = cJSON_GetStringValue(cJSON_GetObjectItem(ch0, "signal"));
-                        if (nvr_settings_caps_set(m->cfg.settings, s->d.chn + 1, cj, sig ? sig : "POE") == 0) {
+                        if (nvr_settings_caps_set(m->cfg.settings, s->d.chn, cj, sig ? sig : "POE") == 0) {  /* 0-based:与 camera 表/级联删除一致 */
                             stored = 1;
                             NVR_LOGI("chan", "ch%d NOP 能力入库(signal=%s)", s->d.chn, sig ? sig : "POE");
                         } else NVR_LOGW("chan", "ch%d NOP 能力入库失败(DB busy?),下次重试", s->d.chn);
@@ -792,7 +826,7 @@ static void tick_slot(nvr_chan_mgr_t *m, slot_t *s, time_t now, int *resolve_bud
                 if (info.firmware[0]) cJSON_AddStringToObject(e, "firmware", info.firmware);
                 char *cj = cJSON_PrintUnformatted(e);
                 if (cj) {
-                    if (nvr_settings_caps_set(m->cfg.settings, s->d.chn + 1, cj, "IPC") == 0) {
+                    if (nvr_settings_caps_set(m->cfg.settings, s->d.chn, cj, "IPC") == 0) {  /* 0-based:与 camera 表/级联删除一致 */
                         stored = 1;
                         NVR_LOGI("chan", "ch%d ONVIF 能力入库: %s", s->d.chn, cj);
                     } else NVR_LOGW("chan", "ch%d ONVIF 能力入库失败(DB busy?),下次重试", s->d.chn);
