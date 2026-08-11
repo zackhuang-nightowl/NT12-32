@@ -1,46 +1,38 @@
 # ④ TUTK P2P (cloud_tutk)
 
-手机 App 经 TUTK P2P 远程访问 NVR（穿透）。SDK intact 于 `third_party/tutk_sdk`，本目录放 glue。
+手机 App 经 **P2PTunnel 端口映射** 远程访问 NVR（非 AV 裸推流）。
 
-## 依赖
-
-- 库：`third_party/tutk_sdk/Lib/Linux/ArmCortexA53_NT98633_8.4.0/`（本机 SoC 精确匹配）。
-- 头：`third_party/tutk_sdk/Include/`（IOTCAPIs / AVAPIs）。
-- NOP 侧已有 `components/nop/src/business/caps/cap_cloud.c`（云能力入口）+ `third_party/tutk`(原 glue)。
-
-## 角色
+## 架构
 
 ```
-手机 App ──TUTK P2P(UID/40633)──► tutk_cloud_agent(本模块)
-                                      │  IOTC 会话 + AV 通道
-                                      ├─ 控制信令 → components/nop (NOP over TUTK transport)
-                                      └─ 音视频 → 复用 streaming/recorder 的码流
-```
-原机对应进程：`tutk_cloud_agent` / `AVAPIs_Server`（端口 40633，`getIotcAuthKey`/IOTC 登录）。
-
-## glue 待写
-
-```
-cloud_tutk/
-├── tutk_agent.{c,h}     IOTC 初始化 / 登录 / 会话管理
-├── tutk_av.{c,h}        AV 通道：拉 streaming 码流推给 App
-└── tutk_transport.{c,h} 把 NOP 协议挂到 TUTK 通道（对接 nop_transport_if）
+App ──P2PTunnel(UID + IOTC authkey)──► nvr_tutk (IOTC_Listen + P2PTunnelServer_Listen)
+         │ PortMapping(remote=8089) ──► localhost:8089  NOP 命令路由
+         │ PortMapping(remote=554)  ──► localhost:554   nvr_rtsp_live (子码流 RTP)
 ```
 
----
+## 文件
 
-## ✅ glue 已实现
+| 文件 | 职责 |
+|------|------|
+| `src/nvr_tutk.c` | IOTC 登录(authkey) + P2PTunnel 会话 + 端口白名单 |
+| `src/nvr_rtsp_live.c` | 本地 RTSP/RTP 服务(供隧道映射推 live) |
+| `include/nvr_tutk.h` | 设备端 API + `nvr_tutk_cfg_t` |
 
-| 文件 | 内容 | 校验 |
-|------|------|------|
-| `include/nvr_tutk.h` | 设备端 P2P API | ✅ |
-| `src/nvr_tutk.c` | IOTC 登录→监听→AV server→推流 | ✅ **对真实 TUTK 头编译通过** |
+## 设置库 KV
 
-流程：`IOTC_Initialize2 → IOTC_Device_LoginEx(uid,auth_key) → 监听线程{IOTC_Listen→avServStart2} →
-nvr_tutk_send_video 对每在线会话 avSendFrameData`。
+| Key | 说明 |
+|-----|------|
+| `tutk.uid` | TUTK UID |
+| `tutk.authkey` | 8 字符 IOTC key（`getIotcAuthKey` / `setIotcAuthKey`） |
+| `tutk.license_key` | 可选 `TUTK_SDK_Set_License_Key` |
+| `tutk.max_sessions` | 最大并发 P2P 会话，默认 8 |
 
-### 集成点 / TODO
-- **码流来源**：由 ③ streaming 旁路调 `nvr_tutk_send_video(chn,data,len,codec,is_key,ts)`（app 注册 remote sink）。
-- **鉴权**：`avServStart2` 的 `authFn` 现传 NULL（免鉴权占位），需接 App 账号校验。
-- `avServStart2` 已废弃提示 → 生产可换 `avServStart3`；会话断开清理、多 AV 通道映射待补。
-- **云存**：TUTK 另有 **VSaaS**（`third_party/tutk_sdk/Include/VSaaS.h`）云录像服务，见根 README 云存说明。
+## NOP 命令
+
+- `getIotcAuthKey` → 读 `tutk.authkey`
+- `setIotcAuthKey` → 写 `tutk.authkey`（8 位字母数字），触发 `nvr_app` 热更新或重启 TUTK
+- `GUI_getUID` → `tutk.uid` + `system.sn` + `system.mac`
+
+## 构建
+
+目标机需 `third_party/tutk_sdk/Lib/.../libIOTCAPIs.so`；主机无库时编 stub（`NVR_HAVE_TUTK=0`）。
