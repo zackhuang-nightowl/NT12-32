@@ -101,6 +101,7 @@ static nop_status_t handle_get_channel_ai_capabilities(const nop_request_t *requ
                                                        nop_response_t *response,
                                                        void *handler_context)
 {
+    int channel = clamp_channel((int)nop_json_num(request->args, "channel", 1));
     nop_json_t *object_detection;
     nop_json_t *ruled_detection;
     nop_json_t *line_cross;
@@ -108,7 +109,9 @@ static nop_status_t handle_get_channel_ai_capabilities(const nop_request_t *requ
     nop_json_t *direction;
     nop_json_t *field_intrusion;
     nop_json_t *field_class_filter;
-    (void)request; (void)handler_context;
+
+    if (nop_onvif_map_is_onvif(handler_context, channel))
+        return nop_onvif_map_dispatch(handler_context, request, response);
 
     response->content = nop_json_obj();
 

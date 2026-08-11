@@ -46,7 +46,11 @@ const onvif_map_entry_t g_onvif_map_table[] = {
     { "GUI_getChannelMediaProfiles", onvif_map_GUI_getChannelMediaProfiles }, /* -> GetVideoEncoderConfigurations(+Options) */
     { "GUI_setChannelMediaProfiles", onvif_map_GUI_setChannelMediaProfiles }, /* -> SetVideoEncoderConfiguration */
 
-    /* ---- §9 Smart AI: line-cross / field-intrusion (Analytics rules) --- */
+    /* ---- §1/§4 Device capabilities (single ONVIF camera) --------------- */
+    { "X_NightOwl_getDeviceCapabilities", onvif_map_X_NightOwl_getDeviceCapabilities }, /* -> GetProfiles(flags)+GetNode(s)+PTZ caps */
+
+    /* ---- §9 Smart AI: capabilities + line-cross / field-intrusion (Analytics rules) --- */
+    { "AI_getChannelAICapabilities",       onvif_map_AI_getChannelAICapabilities },       /* -> GetSupportedRules+GetRuleOptions */
     { "AI_getChannelLineCrossDetect",      onvif_map_AI_getChannelLineCrossDetect },      /* -> GetRules(LineDetector)  */
     { "AI_setChannelLineCrossDetect",      onvif_map_AI_setChannelLineCrossDetect },      /* -> Create/DeleteRules      */
     { "AI_getChannelFieldIntrusionDetect", onvif_map_AI_getChannelFieldIntrusionDetect }, /* -> GetRules(FieldDetector) */

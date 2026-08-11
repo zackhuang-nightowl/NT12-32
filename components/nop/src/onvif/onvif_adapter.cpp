@@ -560,6 +560,27 @@ int nop_onvif_ptz_goto_home(nop_onvif_device_t *device, const char *profile_toke
     return onvif_ptz_GotoHomePosition(&device->dev, &req, &res) ? 0 : -2;
 }
 
+int nop_onvif_ptz_goto_home_speed(nop_onvif_device_t *device,
+                                  const char *profile_token, float speed)
+{
+    if (!device || !profile_token) return -1;
+    ptz_GotoHomePosition_REQ req;
+    ptz_GotoHomePosition_RES res;
+    memset(&req, 0, sizeof(req));
+    memset(&res, 0, sizeof(res));
+    strncpy(req.ProfileToken, profile_token, sizeof(req.ProfileToken) - 1);
+    if (speed > 0.0f) {
+        if (speed > 1.0f) speed = 1.0f;
+        req.SpeedFlag       = 1;
+        req.Speed.PanTiltFlag = 1;
+        req.Speed.PanTilt.x = speed;
+        req.Speed.PanTilt.y = speed;
+        req.Speed.ZoomFlag  = 1;
+        req.Speed.Zoom.x    = speed;
+    }
+    return onvif_ptz_GotoHomePosition(&device->dev, &req, &res) ? 0 : -2;
+}
+
 int nop_onvif_ptz_goto_preset(nop_onvif_device_t *device, const char *profile_token,
                               const char *preset_token)
 {

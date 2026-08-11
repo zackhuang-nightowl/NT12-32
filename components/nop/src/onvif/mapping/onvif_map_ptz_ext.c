@@ -42,7 +42,7 @@ nop_status_t onvif_map_ptzFocusByStep(nop_onvif_map_backend_t *be, int ch,
 
     s = onvif_session_begin(be, ch);
     if (!s) return NOP_ERR_IO;
-    if (nop_onvif_media2_video_source_token(onvif_session_dev(s), vs, sizeof(vs)) != 0) {
+    if (onvif_session_vsc(s, vs, sizeof(vs)) != 0) {
         onvif_session_end(be); return NOP_ERR_IO;
     }
     rc = onvif_map_rc(nop_onvif_img_focus_move(onvif_session_dev(s), vs, speed));
@@ -60,7 +60,7 @@ nop_status_t onvif_map_ptzFocusStop(nop_onvif_map_backend_t *be, int ch,
 
     s = onvif_session_begin(be, ch);
     if (!s) return NOP_ERR_IO;
-    if (nop_onvif_media2_video_source_token(onvif_session_dev(s), vs, sizeof(vs)) != 0) {
+    if (onvif_session_vsc(s, vs, sizeof(vs)) != 0) {
         onvif_session_end(be); return NOP_ERR_IO;
     }
     rc = onvif_map_rc(nop_onvif_img_focus_stop(onvif_session_dev(s), vs));
@@ -184,12 +184,17 @@ nop_status_t onvif_map_gotoPtzHome(nop_onvif_map_backend_t *be, int ch,
                                    const nop_request_t *req, nop_response_t *resp)
 {
     onvif_session_t *s;
+    float            speed;
     nop_status_t     rc;
-    (void)req; (void)resp;
+    (void)resp;
+
+    /* NOP gotoPtzHome.speed 1..10 -> ONVIF 0.1..1.0 (nop 1 == onvif 0.1). */
+    speed = onvif_map_level_to_unit(nop_json_num(req->args, "speed", 0), 10.0);
 
     s = onvif_session_begin(be, ch);
     if (!s) return NOP_ERR_IO;
-    rc = onvif_map_rc(nop_onvif_ptz_goto_home(onvif_session_dev(s), onvif_session_profile(s)));
+    rc = onvif_map_rc(nop_onvif_ptz_goto_home_speed(onvif_session_dev(s),
+                                                    onvif_session_profile(s), speed));
     onvif_session_end(be);
     return rc;
 }
@@ -299,14 +304,31 @@ nop_status_t onvif_map_modifyPtzPatrol(nop_onvif_map_backend_t *be, int ch,
     token = nop_json_str(req->args, "token", NULL);
     if (!token)
         return NOP_ERR_PARAM;
-    memset(&tour, 0, sizeof(tour));
-    snprintf(tour.token, sizeof(tour.token), "%s", token);
-    snprintf(tour.name, sizeof(tour.name), "%s", nop_json_str(req->args, "name", ""));
-    tour.auto_start = nop_json_bool(req->args, "autoStart", false) ? 1 : 0;
-    parse_spots(nop_json_get(req->args, "spots"), &tour);
 
     s = onvif_session_begin(be, ch);
     if (!s) return NOP_ERR_IO;
+
+    /* Seed from the current tour so absent name/autoStart/spots keep their
+     * present values (NOPMappingONVIF.md §2:缺席则保持现值). ONVIF
+     * ModifyPresetTour is a full overwrite, so unchanged fields must be
+     * resent verbatim rather than cleared. */
+    memset(&tour, 0, sizeof(tour));
+    {
+        nop_onvif_tour_t cur[PTZ_MAX_TOURS];
+        int nt = nop_onvif_ptz_get_tours(onvif_session_dev(s),
+                                         onvif_session_profile(s), cur, PTZ_MAX_TOURS);
+        int i;
+        for (i = 0; i < nt; i++)
+            if (!strcmp(cur[i].token, token)) { tour = cur[i]; break; }
+    }
+    snprintf(tour.token, sizeof(tour.token), "%s", token);
+    if (nop_json_has(req->args, "name"))
+        snprintf(tour.name, sizeof(tour.name), "%s", nop_json_str(req->args, "name", ""));
+    if (nop_json_has(req->args, "autoStart"))
+        tour.auto_start = nop_json_bool(req->args, "autoStart", false) ? 1 : 0;
+    if (nop_json_has(req->args, "spots"))
+        parse_spots(nop_json_get(req->args, "spots"), &tour);
+
     rc = onvif_map_rc(nop_onvif_ptz_modify_tour(onvif_session_dev(s),
                                                 onvif_session_profile(s), &tour));
     onvif_session_end(be);
@@ -317,23 +339,33 @@ nop_status_t onvif_map_modifyPtzPatrol(nop_onvif_map_backend_t *be, int ch,
     return rc;
 }
 
+/* NOP `op` is lowercase (start/stop/pause); the ONVIF OperatePresetTour
+ * Operation enum is capitalized (Start/Stop/Pause) and the adapter matches it
+ * case-sensitively — translate so stop/pause are not silently taken as Start. */
+static const char *nop_op_to_onvif(const char *op)
+{
+    if (op && !strcmp(op, "stop"))  return "Stop";
+    if (op && !strcmp(op, "pause")) return "Pause";
+    return "Start";                            /* start / default */
+}
+
 nop_status_t onvif_map_operatePtzPatrol(nop_onvif_map_backend_t *be, int ch,
                                         const nop_request_t *req, nop_response_t *resp)
 {
     onvif_session_t *s;
-    const char      *token, *op;
+    const char      *token;
     nop_status_t     rc;
     (void)resp;
 
     token = nop_json_str(req->args, "token", NULL);
     if (!token)
         return NOP_ERR_PARAM;
-    op = nop_json_str(req->args, "op", "Start");
 
     s = onvif_session_begin(be, ch);
     if (!s) return NOP_ERR_IO;
-    rc = onvif_map_rc(nop_onvif_ptz_operate_tour(onvif_session_dev(s),
-                                                 onvif_session_profile(s), token, op));
+    rc = onvif_map_rc(nop_onvif_ptz_operate_tour(
+            onvif_session_dev(s), onvif_session_profile(s), token,
+            nop_op_to_onvif(nop_json_str(req->args, "op", "start"))));
     onvif_session_end(be);
     return rc;
 }

@@ -253,6 +253,31 @@ typedef struct nop_onvif_rule {
 /** Resolve the profile's VideoAnalyticsConfiguration token. @return 0 or <0. */
 int nop_onvif_analytics_config_token(nop_onvif_device_t *device, char *out, int size);
 
+/* ---- §10 Multi video source — per-source token resolution -------------- */
+
+/** Upper bound on video sources per physical device (NVRs are well under this). */
+#define NOP_ONVIF_MAX_SOURCES 16
+
+/** The set of ONVIF tokens that belong to one physical video source, grouped
+ *  from GetProfiles by VideoSourceConfiguration.SourceToken. */
+typedef struct nop_onvif_source_tokens {
+    char source_token[100];   /**< VideoSourceToken (physical input; the key)  */
+    char profile[100];        /**< a Media2 ProfileToken of this source (PTZ)  */
+    char vsc_token[100];      /**< VideoSourceConfiguration token (OSD/Mask)   */
+    char analytics_cfg[100];  /**< VideoAnalyticsConfiguration token (rules)   */
+    char main_venc[100];      /**< VideoEncoderConfiguration token, main (max res) */
+    char sub_venc[100];       /**< VideoEncoderConfiguration token, sub         */
+} nop_onvif_source_tokens_t;
+
+/** Resolve the token set for @p source_token (""/NULL = the first source).
+ *  Groups GetProfiles by VSC.SourceToken. @return 0 or negative. */
+int nop_onvif_resolve_source(nop_onvif_device_t *device, const char *source_token,
+                             nop_onvif_source_tokens_t *out);
+
+/** List distinct VideoSourceTokens the device exposes (one channel per source).
+ *  @return count (>=0) or negative. */
+int nop_onvif_list_sources(nop_onvif_device_t *device, char tokens[][100], int max);
+
 /**
  * GetRules, keeping only those whose ONVIF Type contains @p type_substr
  * (e.g. "LineDetector"; NULL = all). @return count (>=0) or negative.
@@ -270,6 +295,65 @@ int nop_onvif_analytics_modify_rule(nop_onvif_device_t *device, const char *conf
 /** DeleteRules by name. */
 int nop_onvif_analytics_delete_rule(nop_onvif_device_t *device, const char *config_token,
                                     const char *name);
+
+/**
+ * Analytics AI capabilities distilled from GetSupportedRules (rule presence +
+ * maxInstances) and GetRuleOptions (Segments/Field point ranges, ClassFilter /
+ * Direction StringLists), per requirement/nightow_onvif_RuleDescription.md.
+ * Class/direction lists are comma-joined ONVIF names ("Human,Vehicle" /
+ * "Left,Right,Any"); a *_max_instances / *_max_* of 0 means the device did not
+ * advertise a limit. Fields left 0/empty when the option is absent.
+ */
+typedef struct nop_onvif_ai_caps {
+    int  line_present;          /**< tt:LineDetector advertised            */
+    int  line_max_instances;    /**< LineDetector @maxInstances            */
+    int  line_max_points;       /**< Segments IntRange Max                 */
+    char line_classes[128];     /**< LineDetector ClassFilter StringList   */
+    char line_directions[64];   /**< Direction StringList (Left,Right,Any) */
+    int  field_present;         /**< tt:FieldDetector advertised           */
+    int  field_max_instances;   /**< FieldDetector @maxInstances           */
+    int  field_max_vertices;    /**< Field IntRange Max                    */
+    char field_classes[128];    /**< FieldDetector ClassFilter StringList  */
+    int  object_present;        /**< tt:ObjectDetection advertised         */
+    int  object_max_instances;  /**< ObjectDetection @maxInstances         */
+    char object_classes[128];   /**< ObjectDetection ClassFilter StringList*/
+    int  motion_present;        /**< tt:CellMotionDetector advertised      */
+} nop_onvif_ai_caps_t;
+
+/** GetSupportedRules + GetRuleOptions -> @p out. @return 0 or negative. */
+int nop_onvif_analytics_get_ai_caps(nop_onvif_device_t *device,
+                                    const char *config_token,
+                                    nop_onvif_ai_caps_t *out);
+
+/**
+ * Per-camera capabilities for X_NightOwl_getDeviceCapabilities, distilled from
+ * the Media2 profile ConfigurationSet flags (ptz/mic/speaker/analytics/metadata)
+ * and the PTZ Node + PTZ service capabilities (preset/home/patrol/hdTrack +
+ * pan/tilt/zoom motion). Booleans are 0/1; *_max_* are 0 when not advertised.
+ */
+typedef struct nop_onvif_dev_caps {
+    int has_ptz;          /**< profile has a PTZConfiguration            */
+    int has_mic;          /**< AudioSource (mic)                         */
+    int has_speaker;      /**< AudioOutput (speaker)                     */
+    int has_analytics;    /**< Analytics (sensor)                        */
+    int has_metadata;     /**< Metadata stream                           */
+    int ptz_pan;          /**< continuous pan supported                  */
+    int ptz_tilt;         /**< continuous tilt supported                 */
+    int ptz_zoom;         /**< continuous zoom supported                 */
+    int ptz_preset;       /**< MaximumNumberOfPresets > 0                */
+    int ptz_max_presets;  /**< MaximumNumberOfPresets                    */
+    int ptz_home;         /**< HomeSupported                             */
+    int ptz_patrol;       /**< SupportedPresetTour present               */
+    int ptz_max_tours;    /**< MaximumNumberOfPresetTours                */
+    int ptz_hdtrack;      /**< PTZ Capabilities MoveAndTrack advertised  */
+} nop_onvif_dev_caps_t;
+
+/** Capabilities of ONE video source: OR of that source's Media2 profile
+ *  ConfigurationSet flags + PTZ node/service caps. @p source_token ""/NULL =
+ *  first source. @return 0 or negative. */
+int nop_onvif_get_device_caps(nop_onvif_device_t *device,
+                              const char *source_token,
+                              nop_onvif_dev_caps_t *out);
 
 /* ---- §8 Motion — CellMotion detector (ActiveCells bitmap) --------------- */
 
@@ -305,9 +389,16 @@ int nop_onvif_analytics_set_cellmotion(nop_onvif_device_t *device, const char *c
 /* §1 Events — structured PullMessages                                      */
 /* ======================================================================== */
 
-/** One pulled notification: its ONVIF topic (e.g. tns1:RuleEngine/...). */
+/** One pulled notification. `topic` gives the rule kind (tns1:RuleEngine/...);
+ *  `source_vsct` is the Source's VideoSourceConfigurationToken (§10: routes the
+ *  event to the NVR channel bound to that source); `class_types` is the Data's
+ *  ClassTypes (Human/Vehicle/... — the object class, needed because the
+ *  ObjectDetection topic itself carries no class). Empty when absent. */
 typedef struct nop_onvif_event_msg {
     char topic[256];
+    char source_vsct[100];   /**< Source: VideoSourceConfigurationToken */
+    char class_types[64];    /**< Data: ClassTypes (space/comma separated) */
+    char direction[16];      /**< Data: Direction (Left/Right) for line-cross */
 } nop_onvif_event_msg_t;
 
 /**

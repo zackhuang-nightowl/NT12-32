@@ -111,7 +111,8 @@ nop_status_t onvif_map_X_NightOwl_setOSD(nop_onvif_map_backend_t *be, int ch,
     onvif_session_t *s;
     nop_onvif_osd_t  osds[OSD_MAX], target;
     const char      *token, *pos_name;
-    int              is_image, text_type, n, i, found = -1;
+    char             myvsc[100];
+    int              is_image, text_type, n, i, found = -1, has_vsc;
     int              enable;
     nop_status_t     rc = NOP_OK;
 
@@ -125,12 +126,18 @@ nop_status_t onvif_map_X_NightOwl_setOSD(nop_onvif_map_backend_t *be, int ch,
     if (!s)
         return NOP_ERR_IO;
 
+    /* This source's VSC token: restricts match/create to THIS source's OSDs
+     * (§10 — GetOSDs returns every source's OSDs on a multi-source device). */
+    has_vsc = (onvif_session_vsc(s, myvsc, sizeof(myvsc)) == 0);
+
     n = nop_onvif_media2_get_osds(onvif_session_dev(s), osds, OSD_MAX);
     if (n < 0) { onvif_session_end(be); return NOP_ERR_IO; }
 
-    /* Match the existing OSD carrying this osdToken's identity. */
+    /* Match the existing OSD carrying this osdToken's identity on THIS source. */
     for (i = 0; i < n; i++) {
         int same;
+        if (has_vsc && strcmp(osds[i].config_token, myvsc) != 0)
+            continue;                        /* OSD belongs to another source */
         if (is_image)
             same = osds[i].is_image;
         else if (text_type == NOP_OSD_TEXT_PLAIN)
@@ -166,12 +173,12 @@ nop_status_t onvif_map_X_NightOwl_setOSD(nop_onvif_map_backend_t *be, int ch,
         snprintf(target.img_path, sizeof(target.img_path), "%s", osds[found].img_path);
         rc = (nop_onvif_media2_set_osd(onvif_session_dev(s), &target) == 0) ? NOP_OK : NOP_ERR_IO;
     } else {
-        /* Create new: needs a video-source config token. */
-        if (n > 0)
+        /* Create new on THIS source's VSC (fall back to an existing OSD's config
+         * token only when the source VSC is unresolved). */
+        if (has_vsc)
+            snprintf(target.config_token, sizeof(target.config_token), "%s", myvsc);
+        else if (n > 0)
             snprintf(target.config_token, sizeof(target.config_token), "%s", osds[0].config_token);
-        else
-            nop_onvif_media2_video_source_token(onvif_session_dev(s),
-                                                target.config_token, sizeof(target.config_token));
         rc = (nop_onvif_media2_create_osd(onvif_session_dev(s), &target) == 0) ? NOP_OK : NOP_ERR_IO;
     }
 

@@ -57,6 +57,12 @@ typedef struct nop_nvr_channel_entry {
     char                name[48];            /**< display name */
     char                mac[20];             /**< from the ONVIF ProbeMatch scope */
     char                model[48];
+    /* Multi-video-source (§10): the ONVIF VideoSourceToken this channel is bound
+     * to on its (shared) device. A physical device with N video sources is added
+     * as N channels sharing host/port, each pinned to one source token. Empty =
+     * first/only source (single-source cameras and NOP backends). All per-source
+     * ONVIF tokens (VSC / analytics / profile) are resolved from this. */
+    char                video_source_token[100];
 } nop_nvr_channel_entry_t;
 
 /** Opaque registry. */

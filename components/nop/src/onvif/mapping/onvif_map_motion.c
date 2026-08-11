@@ -53,7 +53,7 @@ nop_status_t onvif_map_X_NightOwl_getChannelTriggerActivityZone(nop_onvif_map_ba
 
     s = onvif_session_begin(be, ch);
     if (!s) return NOP_ERR_IO;
-    if (nop_onvif_analytics_config_token(onvif_session_dev(s), cfg, sizeof(cfg)) != 0) {
+    if (onvif_session_analytics_cfg(s, cfg, sizeof(cfg)) != 0) {
         onvif_session_end(be); return NOP_ERR_IO;
     }
     memset(&cm, 0, sizeof(cm));
@@ -116,7 +116,7 @@ nop_status_t onvif_map_X_NightOwl_setChannelTriggerActivityZone(nop_onvif_map_ba
 
     s = onvif_session_begin(be, ch);
     if (!s) return NOP_ERR_IO;
-    if (nop_onvif_analytics_config_token(onvif_session_dev(s), cfg, sizeof(cfg)) != 0) {
+    if (onvif_session_analytics_cfg(s, cfg, sizeof(cfg)) != 0) {
         onvif_session_end(be); return NOP_ERR_IO;
     }
     /* Replace: drop existing CellMotion rules, then create the new one. */

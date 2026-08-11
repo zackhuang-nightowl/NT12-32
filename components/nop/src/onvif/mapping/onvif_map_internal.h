@@ -42,6 +42,25 @@ const char *onvif_session_media2_profile(onvif_session_t *session);
 /** First video-source token (imaging). "" if none. */
 const char *onvif_session_video_source(onvif_session_t *session);
 
+/** Copy this channel's bound-source VideoSourceConfiguration token (OSD/Mask
+ *  scope). @return 0 on success (0-on-success mirrors the ABI it replaces), -1
+ *  when unresolved. */
+int onvif_session_vsc(onvif_session_t *session, char *out, unsigned size);
+
+/** Copy this channel's bound-source VideoAnalyticsConfiguration token (rules
+ *  scope). @return 0 on success, -1 when unresolved. */
+int onvif_session_analytics_cfg(onvif_session_t *session, char *out, unsigned size);
+
+/** This channel's bound-source main/sub VideoEncoderConfiguration tokens (media
+ *  scope). "" when unresolved (caller falls back to device-wide order). */
+const char *onvif_session_main_venc(onvif_session_t *session);
+const char *onvif_session_sub_venc(onvif_session_t *session);
+
+/** Reverse-map a device's VideoSourceToken to the NVR channel bound to it (same
+ *  host:port as @p ref_channel). @return channel index, or -1 if none. */
+int onvif_backend_channel_for_source(nop_onvif_map_backend_t *be, int ref_channel,
+                                     const char *source_token);
+
 /* ======================================================================== */
 /* Domain mappers                                                           */
 /* ======================================================================== */
@@ -133,7 +152,13 @@ nop_status_t onvif_map_GUI_getChannelMediaProfiles(nop_onvif_map_backend_t *be, 
 nop_status_t onvif_map_GUI_setChannelMediaProfiles(nop_onvif_map_backend_t *be, int ch,
                                                    const nop_request_t *req, nop_response_t *resp);
 
+/* §1/§4 device capabilities — onvif_map_ai.c */
+nop_status_t onvif_map_X_NightOwl_getDeviceCapabilities(nop_onvif_map_backend_t *be, int ch,
+                                                        const nop_request_t *req, nop_response_t *resp);
+
 /* §9 Smart AI line/field — onvif_map_ai.c */
+nop_status_t onvif_map_AI_getChannelAICapabilities(nop_onvif_map_backend_t *be, int ch,
+                                                   const nop_request_t *req, nop_response_t *resp);
 nop_status_t onvif_map_AI_getChannelLineCrossDetect(nop_onvif_map_backend_t *be, int ch,
                                                     const nop_request_t *req, nop_response_t *resp);
 nop_status_t onvif_map_AI_setChannelLineCrossDetect(nop_onvif_map_backend_t *be, int ch,

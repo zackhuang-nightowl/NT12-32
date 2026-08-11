@@ -681,6 +681,248 @@ static void parse_classes(const char *xml, char *out, int size)
     }
 }
 
+/* Read the integer inside the first "...Max>NN</...Max>" of an IntRange frag. */
+static int parse_range_max(const char *xml)
+{
+    const char *p;
+    if (!xml) return 0;
+    p = strstr(xml, "Max>");
+    return p ? atoi(p + 4) : 0;
+}
+
+/* Append known direction tokens found in a Direction StringList to a CSV. */
+static void parse_directions(const char *xml, char *out, int size)
+{
+    static const char *k[] = { "Left", "Right", "Any", NULL };
+    int i, first = 1;
+    out[0] = '\0';
+    if (!xml) return;
+    for (i = 0; k[i]; i++) {
+        if (strstr(xml, k[i])) {
+            int off = (int)strlen(out);
+            snprintf(out + off, size - off, "%s%s", first ? "" : ",", k[i]);
+            first = 0;
+        }
+    }
+}
+
+int nop_onvif_analytics_get_ai_caps(nop_onvif_device_t *device,
+                                    const char *config_token,
+                                    nop_onvif_ai_caps_t *out)
+{
+    if (!device || !config_token || !out)
+        return -1;
+    memset(out, 0, sizeof(*out));
+
+    /* GetSupportedRules -> presence + @maxInstances per rule type. */
+    {
+        tan_GetSupportedRules_REQ req;
+        tan_GetSupportedRules_RES res;
+        memset(&req, 0, sizeof(req));
+        memset(&res, 0, sizeof(res));
+        strncpy(req.ConfigurationToken, config_token, sizeof(req.ConfigurationToken) - 1);
+        if (!onvif_tan_GetSupportedRules(&device->dev, &req, &res))
+            return -2;
+        for (ConfigDescriptionList *l = res.SupportedRules.RuleDescription; l; l = l->next) {
+            onvif_ConfigDescription *d = &l->ConfigDescription;
+            const char *nm = strip_ns(d->Name);
+            int mi = d->maxInstancesFlag ? d->maxInstances : 0;
+            if (!strcmp(nm, "LineDetector"))        { out->line_present = 1;   out->line_max_instances = mi; }
+            else if (!strcmp(nm, "FieldDetector"))  { out->field_present = 1;  out->field_max_instances = mi; }
+            else if (!strcmp(nm, "ObjectDetection")){ out->object_present = 1; out->object_max_instances = mi; }
+            else if (!strcmp(nm, "CellMotionDetector")) out->motion_present = 1;
+        }
+        onvif_free_ConfigDescriptions(&res.SupportedRules.RuleDescription);
+    }
+
+    /* GetRuleOptions -> option ranges/lists, parsed from Options.any raw XML. */
+    {
+        tan_GetRuleOptions_REQ req;
+        tan_GetRuleOptions_RES res;
+        memset(&req, 0, sizeof(req));
+        memset(&res, 0, sizeof(res));
+        strncpy(req.ConfigurationToken, config_token, sizeof(req.ConfigurationToken) - 1);
+        if (onvif_tan_GetRuleOptions(&device->dev, &req, &res)) {
+            for (ConfigOptionsList *l = res.RuleOptions; l; l = l->next) {
+                onvif_ConfigOptions *o = &l->Options;
+                const char *rt  = strip_ns(o->RuleType);
+                const char *nm  = o->Name;
+                const char *any = o->any;
+                if (!strcmp(rt, "LineDetector")) {
+                    if (!strcmp(nm, "Segments"))         out->line_max_points = parse_range_max(any);
+                    else if (!strcmp(nm, "Direction"))   parse_directions(any, out->line_directions, sizeof(out->line_directions));
+                    else if (!strcmp(nm, "ClassFilter")) parse_classes(any, out->line_classes, sizeof(out->line_classes));
+                } else if (!strcmp(rt, "FieldDetector")) {
+                    if (!strcmp(nm, "Field"))            out->field_max_vertices = parse_range_max(any);
+                    else if (!strcmp(nm, "ClassFilter")) parse_classes(any, out->field_classes, sizeof(out->field_classes));
+                } else if (!strcmp(rt, "ObjectDetection")) {
+                    if (!strcmp(nm, "ClassFilter"))      parse_classes(any, out->object_classes, sizeof(out->object_classes));
+                }
+            }
+            onvif_free_ConfigOptions(&res.RuleOptions);
+        }
+    }
+    return 0;
+}
+
+int nop_onvif_get_device_caps(nop_onvif_device_t *device, const char *source_token,
+                              nop_onvif_dev_caps_t *out)
+{
+    if (!device || !out)
+        return -1;
+    memset(out, 0, sizeof(*out));
+
+    /* OR the ConfigurationSet flags across all Media2 profiles of this source
+     * (main may carry PTZ while sub carries Analytics, etc.). source_token ""
+     * locks onto the first source. */
+    {
+        tr2_GetProfiles_REQ req;
+        tr2_GetProfiles_RES res;
+        char target[100] = "";
+        memset(&req, 0, sizeof(req));
+        memset(&res, 0, sizeof(res));
+        if (source_token && source_token[0])
+            strncpy(target, source_token, sizeof(target) - 1);
+        if (!onvif_tr2_GetProfiles(&device->dev, &req, &res))
+            return -2;
+        for (MediaProfileList *p = res.Profiles; p; p = p->next) {
+            onvif_MediaProfile *mp = &p->MediaProfile;
+            if (!mp->Configurations.VideoSourceFlag)
+                continue;
+            const char *src = mp->Configurations.VideoSource.SourceToken;
+            if (target[0] == '\0')
+                strncpy(target, src, sizeof(target) - 1);
+            if (strcmp(src, target) != 0)
+                continue;
+            if (mp->Configurations.PTZFlag)         out->has_ptz = 1;
+            if (mp->Configurations.AudioSourceFlag) out->has_mic = 1;
+            if (mp->Configurations.AudioOutputFlag) out->has_speaker = 1;
+            if (mp->Configurations.AnalyticsFlag)   out->has_analytics = 1;
+            if (mp->Configurations.MetadataFlag)    out->has_metadata = 1;
+        }
+        onvif_free_MediaProfiles(&res.Profiles);
+    }
+
+    if (!out->has_ptz)
+        return 0;   /* no PTZ on this profile -> nothing more to probe */
+
+    /* PTZ Node -> pan/tilt/zoom, preset, home, patrol. */
+    if (GetNodes(&device->dev) && device->dev.ptz_node) {
+        onvif_PTZNode   *nd = &device->dev.ptz_node->PTZNode;
+        onvif_PTZSpaces *sp = &nd->SupportedPTZSpaces;
+        out->ptz_pan  = out->ptz_tilt = sp->ContinuousPanTiltVelocitySpaceFlag ? 1 : 0;
+        out->ptz_zoom = sp->ContinuousZoomVelocitySpaceFlag ? 1 : 0;
+        if (!out->ptz_pan && !out->ptz_zoom)   /* device omitted spaces -> basic move */
+            out->ptz_pan = out->ptz_tilt = out->ptz_zoom = 1;
+        out->ptz_max_presets = nd->MaximumNumberOfPresets;
+        out->ptz_preset      = nd->MaximumNumberOfPresets > 0 ? 1 : 0;
+        out->ptz_home        = nd->HomeSupported ? 1 : 0;
+        if (nd->Extension.SupportedPresetTourFlag &&
+            nd->Extension.SupportedPresetTour.MaximumNumberOfPresetTours > 0) {
+            out->ptz_patrol    = 1;
+            out->ptz_max_tours = nd->Extension.SupportedPresetTour.MaximumNumberOfPresetTours;
+        }
+    }
+
+    /* hdTrack: PTZ service capabilities MoveAndTrack. */
+    {
+        ptz_GetServiceCapabilities_REQ req;
+        ptz_GetServiceCapabilities_RES res;
+        memset(&req, 0, sizeof(req));
+        memset(&res, 0, sizeof(res));
+        if (onvif_ptz_GetServiceCapabilities(&device->dev, &req, &res))
+            out->ptz_hdtrack = res.Capabilities.MoveAndTrack[0] ? 1 : 0;
+    }
+    return 0;
+}
+
+int nop_onvif_resolve_source(nop_onvif_device_t *device, const char *source_token,
+                             nop_onvif_source_tokens_t *out)
+{
+    if (!device || !out)
+        return -1;
+    memset(out, 0, sizeof(*out));
+
+    tr2_GetProfiles_REQ req;
+    tr2_GetProfiles_RES res;
+    memset(&req, 0, sizeof(req));
+    memset(&res, 0, sizeof(res));
+    if (!onvif_tr2_GetProfiles(&device->dev, &req, &res))
+        return -2;
+
+    /* Target source: given token, or lock onto the first profile's source. */
+    char target[100] = "";
+    if (source_token && source_token[0])
+        strncpy(target, source_token, sizeof(target) - 1);
+
+    int found = 0, main_area = -1, sub_area = -1;
+    for (MediaProfileList *p = res.Profiles; p; p = p->next) {
+        onvif_MediaProfile *mp = &p->MediaProfile;
+        if (!mp->Configurations.VideoSourceFlag)
+            continue;
+        const char *src = mp->Configurations.VideoSource.SourceToken;
+        if (target[0] == '\0')
+            strncpy(target, src, sizeof(target) - 1);     /* lock to first source */
+        if (strcmp(src, target) != 0)
+            continue;                                     /* only this source's profiles */
+        if (!found) {
+            strncpy(out->source_token, src, sizeof(out->source_token) - 1);
+            strncpy(out->profile, mp->token, sizeof(out->profile) - 1);
+            strncpy(out->vsc_token, mp->Configurations.VideoSource.token,
+                    sizeof(out->vsc_token) - 1);
+            found = 1;
+        }
+        /* analytics config often lives on the sub-stream profile of the source */
+        if (mp->Configurations.AnalyticsFlag && out->analytics_cfg[0] == '\0')
+            strncpy(out->analytics_cfg, mp->Configurations.Analytics.token,
+                    sizeof(out->analytics_cfg) - 1);
+        /* rank this source's encoders by resolution -> main (largest) / sub. */
+        if (mp->Configurations.VideoEncoderFlag) {
+            const onvif_VideoEncoder2Configuration *ve = &mp->Configurations.VideoEncoder;
+            int area = ve->Resolution.Width * ve->Resolution.Height;
+            if (area > main_area) {
+                strncpy(out->sub_venc, out->main_venc, sizeof(out->sub_venc) - 1);
+                sub_area = main_area;
+                strncpy(out->main_venc, ve->token, sizeof(out->main_venc) - 1);
+                main_area = area;
+            } else if (area > sub_area && strcmp(ve->token, out->main_venc) != 0) {
+                strncpy(out->sub_venc, ve->token, sizeof(out->sub_venc) - 1);
+                sub_area = area;
+            }
+        }
+    }
+    onvif_free_MediaProfiles(&res.Profiles);
+    return found ? 0 : -3;
+}
+
+int nop_onvif_list_sources(nop_onvif_device_t *device, char tokens[][100], int max)
+{
+    if (!device || !tokens || max <= 0)
+        return -1;
+    tr2_GetProfiles_REQ req;
+    tr2_GetProfiles_RES res;
+    memset(&req, 0, sizeof(req));
+    memset(&res, 0, sizeof(res));
+    if (!onvif_tr2_GetProfiles(&device->dev, &req, &res))
+        return -2;
+    int n = 0;
+    for (MediaProfileList *p = res.Profiles; p && n < max; p = p->next) {
+        if (!p->MediaProfile.Configurations.VideoSourceFlag)
+            continue;
+        const char *src = p->MediaProfile.Configurations.VideoSource.SourceToken;
+        int seen = 0, i;
+        for (i = 0; i < n; i++)
+            if (!strcmp(tokens[i], src)) { seen = 1; break; }
+        if (!seen) {
+            strncpy(tokens[n], src, 99);
+            tokens[n][99] = '\0';
+            n++;
+        }
+    }
+    onvif_free_MediaProfiles(&res.Profiles);
+    return n;
+}
+
 int nop_onvif_analytics_config_token(nop_onvif_device_t *device, char *out, int size)
 {
     if (!device || !out || size <= 0)
@@ -936,8 +1178,23 @@ int nop_onvif_events_pull_msgs(nop_onvif_device_t *device, int timeout_s, int ma
 
     int n = 0;
     for (NotificationMessageList *m = res.NotifyMessages; m && n < max; m = m->next) {
-        strncpy(out[n].topic, m->NotificationMessage.Topic, sizeof(out[n].topic) - 1);
-        out[n].topic[sizeof(out[n].topic) - 1] = '\0';
+        onvif_NotificationMessage *nm = &m->NotificationMessage;
+        memset(&out[n], 0, sizeof(out[n]));
+        strncpy(out[n].topic, nm->Topic, sizeof(out[n].topic) - 1);
+        /* Source: which video source produced it (multi-source routing) + Rule. */
+        for (SimpleItemList *si = nm->Message.Source.SimpleItem; si; si = si->next) {
+            if (!strcmp(si->SimpleItem.Name, "VideoSourceConfigurationToken"))
+                strncpy(out[n].source_vsct, si->SimpleItem.Value, sizeof(out[n].source_vsct) - 1);
+        }
+        /* Data: object class(es) + crossing direction. The ObjectDetection topic
+         * carries no class; line-cross events report the exact Direction here. */
+        for (SimpleItemList *di = nm->Message.Data.SimpleItem; di; di = di->next) {
+            if (!strcmp(di->SimpleItem.Name, "ClassTypes") ||
+                !strcmp(di->SimpleItem.Name, "ClassType"))
+                strncpy(out[n].class_types, di->SimpleItem.Value, sizeof(out[n].class_types) - 1);
+            else if (!strcmp(di->SimpleItem.Name, "Direction"))
+                strncpy(out[n].direction, di->SimpleItem.Value, sizeof(out[n].direction) - 1);
+        }
         n++;
     }
     onvif_free_NotificationMessages(&res.NotifyMessages);

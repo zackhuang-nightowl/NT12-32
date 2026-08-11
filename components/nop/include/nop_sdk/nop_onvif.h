@@ -173,6 +173,10 @@ int nop_onvif_ptz_relative_move(nop_onvif_device_t *device, const char *profile_
 int nop_onvif_ptz_absolute_move(nop_onvif_device_t *device, const char *profile_token,
                                 float pan, float tilt, float zoom);
 int nop_onvif_ptz_goto_home(nop_onvif_device_t *device, const char *profile_token);
+/* GotoHomePosition with a requested speed (0..1). @p speed<=0 uses the device
+ * default (no Speed sent). Maps NOP gotoPtzHome.speed (1..10 -> 0.1..1.0). */
+int nop_onvif_ptz_goto_home_speed(nop_onvif_device_t *device,
+                                  const char *profile_token, float speed);
 int nop_onvif_ptz_goto_preset(nop_onvif_device_t *device, const char *profile_token,
                               const char *preset_token);
 int nop_onvif_ptz_set_preset(nop_onvif_device_t *device, const char *profile_token,

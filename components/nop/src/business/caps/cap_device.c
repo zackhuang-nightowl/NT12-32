@@ -5,6 +5,7 @@
  */
 #include "business/business.h"
 #include "base/nop_json.h"
+#include "onvif/mapping/nop_onvif_map.h"
 #include "nop_sdk/nop_version.h"
 #include "nop_sdk/hal/hal_registry.h"
 #include "nop_sdk/hal/hal_system.h"
@@ -46,7 +47,11 @@ static nop_status_t handle_get_device_capabilities(const nop_request_t *request,
     nop_business_context_t *business = (nop_business_context_t *)handler_context;
     const hal_video_if     *video = (const hal_video_if *)hal_registry_get(HAL_VIDEO);
     int                     channel_count = 0;
-    (void)request;
+
+    /* If a specific ONVIF-camera channel is requested, return just that camera's
+     * capabilities via the ONVIF mapping (device-level aggregation stays native). */
+    if (nop_onvif_map_is_onvif(handler_context, (int)nop_json_num(request->args, "channel", 0)))
+        return nop_onvif_map_dispatch(handler_context, request, response);
 
     if (video && video->channel_count)
         channel_count = video->channel_count(video->ctx);
