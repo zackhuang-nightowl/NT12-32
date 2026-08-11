@@ -35,6 +35,9 @@ void mhal_vout_defer_end(void);
 int  mhal_vout_is_deferred(void);   /* 1=当前在批量提交中(解码器已开但未 start) */
 int  mhal_vout_bind(int win_idx, int decoder_chn);            /* 某分屏窗口绑某解码通道 */
 int  mhal_vout_bind_rect(int decoder_chn, int x, int y, int w, int h); /* 任意像素矩形 */
+/* 按布局算第 idx 格在 disp_w×disp_h 区域内的矩形(与 liveView 同一套排布;回放缩到 0.8 视频区复用)。 */
+void mhal_layout_rect(mhal_layout_t layout, int idx, int disp_w, int disp_h,
+                      int *x, int *y, int *w, int *h);
 int  mhal_vout_unbind(int decoder_chn);                                /* 隐藏该通道窗口 */
 void mhal_vout_clear_black(void);                                      /* 整屏(视频层)清稳定黑;回放进入时黑屏用 */
 void mhal_vout_enable_auto_clearwin(void);                            /* 开启 AUTO_CLEARWIN:空/停 vo 路窗口自动黑(SDK 方式) */

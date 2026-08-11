@@ -188,21 +188,21 @@ int mhal_vdec_open(int chn, mhal_codec_t codec, int w, int h, int fps,
         break;
     }
 
-    HD_RESULT ret;
+    HD_RESULT ret; int step = 0;
     /* 1) 开 dec/proc/vout 三段路径（dev 0, id=chn） */
-    if ((ret = hd_videodec_open(HD_VIDEODEC_IN(0, chn), HD_VIDEODEC_OUT(0, chn), &d->dec_path)) != HD_OK) goto fail;
-    if ((ret = hd_videoproc_open(HD_VIDEOPROC_IN(chn, 0), HD_VIDEOPROC_OUT(chn, 0), &d->proc_path)) != HD_OK) goto fail;
+    step=1; if ((ret = hd_videodec_open(HD_VIDEODEC_IN(0, chn), HD_VIDEODEC_OUT(0, chn), &d->dec_path)) != HD_OK) goto fail;
+    step=2; if ((ret = hd_videoproc_open(HD_VIDEOPROC_IN(chn, 0), HD_VIDEOPROC_OUT(chn, 0), &d->proc_path)) != HD_OK) goto fail;
 
-    if (bind_vout_win >= 0 &&
+    step=3; if (bind_vout_win >= 0 &&
         (ret = hd_videoout_open(HD_VIDEOOUT_IN(0, chn), HD_VIDEOOUT_OUT(0, 0), &d->vout_path)) != HD_OK) goto fail;
 
     /* 2) 绑定 dec→proc→(vout) */
-    if ((ret = hd_videodec_bind(HD_VIDEODEC_OUT(0, chn), HD_VIDEOPROC_IN(chn, 0))) != HD_OK) goto fail;
-    if (bind_vout_win >= 0 &&
+    step=4; if ((ret = hd_videodec_bind(HD_VIDEODEC_OUT(0, chn), HD_VIDEOPROC_IN(chn, 0))) != HD_OK) goto fail;
+    step=5; if (bind_vout_win >= 0 &&
         (ret = hd_videoproc_bind(HD_VIDEOPROC_OUT(chn, 0), HD_VIDEOOUT_IN(0, chn))) != HD_OK) goto fail;
 
     /* 3) 配置解码路径（内存/codec）；8K 路再给 videoproc 设 sub-yuv 采用阈值(令 VPE 收下采样小图) */
-    if ((ret = cfg_dec_path(d)) != HD_OK) goto fail;
+    step=6; if ((ret = cfg_dec_path(d)) != HD_OK) goto fail;
     cfg_proc_subyuv_thld(d);
 
     /* 4) 登记 + 应用分屏窗口矩形（proc_out.rect + videoout win） */
@@ -230,7 +230,7 @@ int mhal_vdec_open(int chn, mhal_codec_t codec, int w, int h, int fps,
     return 0;
 
 fail:
-    NVR_LOGE("mhal", "vdec_open chn%d fail %d", chn, ret);
+    NVR_LOGE("mhal", "vdec_open chn%d fail %d (step%d: 1dec_open/2proc_open/3vout_open/4dec_bind/5proc_bind/6cfg)", chn, ret, step);
     d->opened = 0;
     g_disp.ch[chn] = NULL;
     /* ★ 关键:关掉本次已开的 dec/proc/vout 路径。否则任一步失败后路径泄漏 → 同号(IN/OUT)下次
@@ -274,6 +274,14 @@ int mhal_vdec_send(mhal_vdec_t *d, const uint8_t *annexb, uint32_t len, uint32_t
     return 0;
 }
 
+/* 当前活跃解码器数(g_disp.ch[] 非空)。供回放确认"全局单一使用者"(无残留 live 解码器竞争 HW)。 */
+int mhal_vdec_active_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < MHAL_MAX_CH; i++) if (g_disp.ch[i]) n++;
+    return n;
+}
+
 int mhal_vdec_recv(mhal_vdec_t *d, void *yuv_buf, uint32_t *inout_len, uint32_t timeout_ms)
 {
     /* 抓拍/二次处理用：拉解码后 YUV。预览走 bind 直连 vout，无需 recv。 */
@@ -310,7 +318,10 @@ void mhal_vdec_close(mhal_vdec_t *d)
     if (!d) return;
     mhal_lock();
     int chn = d->chn;
-    int was_display = (d->opened && d->vout_win >= 0);
+    /* ★ 是否"在显路径"(需走 commit 的 stop_list 停 dec+proc+vout 后再拆,否则 proc/vout 未停就 close
+     *   → 下次 open 同通道 proc 报 ALREADY_OPEN(-25)/失败)。vout_win:≥0=宫格窗、-2=自由矩形(bind_rect,
+     *   回放各格用),二者都在屏上且都在 started 集合,必须走 commit 收;-1=已隐藏(unbind)才算非在显。 */
+    int was_display = (d->opened && (d->vout_win >= 0 || d->vout_win == -2));
 
     /* 先从在显集合摘除本路。 */
     if (chn >= 0 && chn < MHAL_MAX_CH) g_disp.ch[chn] = NULL;

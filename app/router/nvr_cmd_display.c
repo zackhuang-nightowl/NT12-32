@@ -11,6 +11,7 @@
 #include "nvr_gui_config.h"
 #include "nvr_defaults.h"
 #include "nvr_display_modes.h"  /* NVR_DISPLAY_MODES 单一档位来源 */
+#include "nvr_playback.h"       /* setDeviceDisplayMode 切回 live 前先停回放 */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -19,6 +20,9 @@ char *cmd_GUI_setDeviceDisplayMode(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     int mode = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(a, "displayMode"));
     int page = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(a, "displayPage"));
+    /* ★ 切回 liveView:先**停回放**(关回放独占解码器),再按 mode 重开 live 解码。
+     *   回放模式期间 live 一直不解码,只有这里收到 setDeviceDisplayMode 才恢复 live。 */
+    if (c->pb) nvr_playback_control(c->pb, "stop", 0, 0, NULL, NULL);
     nvr_preview_set_mode(c->pv, mode, page);
     /* 持久化到 GUI_CONFIG.json(开机据此出图);mode==0 为退出 Liveview 瞬时态,helper 内部不写。 */
     nvr_gui_config_set_display(mode, page);

@@ -37,6 +37,9 @@ int  mhal_vdec_recv(mhal_vdec_t *d, void *yuv_buf, uint32_t *inout_len, uint32_t
 
 void mhal_vdec_close(mhal_vdec_t *d);
 
+/* 当前活跃解码器数(供回放确认全局无残留 live 解码器竞争硬件)。 */
+int  mhal_vdec_active_count(void);
+
 #ifdef __cplusplus
 }
 #endif

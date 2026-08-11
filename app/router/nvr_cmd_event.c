@@ -9,6 +9,7 @@
 #include <time.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 /* 本地 年月日[时分秒] → epoch(用当前时区;isdst=-1 让 libc 判夏令)。 */
 static uint32_t local_ymd_epoch(int y, int mo, int d, int h, int mi, int s)
@@ -25,15 +26,21 @@ static int days_in_month(int y, int mo)
     if (mo == 2 && ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0)) d = 29;
     return d;
 }
-/* args.channels[0](1-based)→ chn0(0-based);无则 0。 */
-static int first_chn0(cJSON *a)
+/* args.channels[](1-based)→ 0-based 过滤列表(日历/时间轴是**合并**:选中任一通道那天/那小时
+ * 有录像即计入)。无 channels 数组 → 单元素 -1(全通道)。返回个数(≤max)。 */
+static int chan_list0(cJSON *a, int *out, int max)
 {
     cJSON *chs = cJSON_GetObjectItem(a, "channels");
-    if (cJSON_IsArray(chs) && cJSON_GetArraySize(chs) > 0) {
-        int c1 = (int)cJSON_GetNumberValue(cJSON_GetArrayItem(chs, 0));
-        return (c1 > 0) ? c1 - 1 : 0;
+    int n = 0;
+    if (cJSON_IsArray(chs)) {
+        int sz = cJSON_GetArraySize(chs);
+        for (int i = 0; i < sz && n < max; i++) {
+            int c1 = (int)cJSON_GetNumberValue(cJSON_GetArrayItem(chs, i));
+            if (c1 > 0) out[n++] = c1 - 1;   /* 1-based → 0-based */
+        }
     }
-    return 0;
+    if (n == 0 && max > 0) out[n++] = -1;   /* 无选择 → 全通道(-1) */
+    return n;
 }
 
 char *cmd_X_NightOwl_queryEventList(cJSON *a, const nvr_cmd_ctx_t *c)
@@ -59,27 +66,29 @@ char *cmd_X_NightOwl_queryContinuousCalendar(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     const char *res = nvr_jstr(a, "resolution", "day");
     int year = nvr_jint(a, "year", 0), month = nvr_jint(a, "month", 0);
-    int ch0 = first_chn0(a);
+    int chs0[64]; int nch = chan_list0(a, chs0, 64);   /* 合并所有选中通道 */
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "resolution", res);
     cJSON *list = cJSON_AddArrayToObject(o, "list");
     if (c->group && year > 0) {
         if (strcmp(res, "month") == 0) {
-            /* 单次年范围查询 + 按月分桶(避免 12 次索引扫描超时)。cap 1024 段;超长留存可能截断
-             * → 只影响“哪些月有录像”的完整性,日分辨率(下面 else)用单月查询不受影响。 */
+            /* 每通道单次年范围查询 + 按月分桶(避免 12 次索引扫描超时)。cap 1024 段/通道;
+             * 超长留存可能截断 → 只影响“哪些月有录像”的完整性,日分辨率(下面 else)不受影响。 */
             uint32_t y0 = local_ymd_epoch(year, 1, 1, 0, 0, 0);
             uint32_t y1 = local_ymd_epoch(year, 12, 31, 23, 59, 59);
             rsdk_index_slot_t *sl = (rsdk_index_slot_t *)malloc(sizeof(rsdk_index_slot_t) * 1024);
             if (sl) {
-                int n = rsdk_group_query(c->group, y0, y1, ch0, RSDK_REC_CONTINUOUS, sl, 1024);
                 char mhit[13] = { 0 }; uint32_t nowt = (uint32_t)time(NULL);
-                for (int i = 0; i < n; i++) {
-                    uint32_t s0 = sl[i].start_time;
-                    uint32_t s1 = (sl[i].end_time == 0xFFFFFFFFu) ? nowt : sl[i].end_time;
-                    for (int mo = 1; mo <= 12; mo++) {
-                        uint32_t m0 = local_ymd_epoch(year, mo, 1, 0, 0, 0);
-                        uint32_t m1 = local_ymd_epoch(year, mo, days_in_month(year, mo), 23, 59, 59);
-                        if (s0 <= m1 && s1 >= m0) mhit[mo] = 1;
+                for (int ci = 0; ci < nch; ci++) {   /* 合并:任一通道命中即计入 */
+                    int n = rsdk_group_query(c->group, y0, y1, chs0[ci], RSDK_REC_CONTINUOUS, sl, 1024);
+                    for (int i = 0; i < n; i++) {
+                        uint32_t s0 = sl[i].start_time;
+                        uint32_t s1 = (sl[i].end_time == 0xFFFFFFFFu) ? nowt : sl[i].end_time;
+                        for (int mo = 1; mo <= 12; mo++) {
+                            uint32_t m0 = local_ymd_epoch(year, mo, 1, 0, 0, 0);
+                            uint32_t m1 = local_ymd_epoch(year, mo, days_in_month(year, mo), 23, 59, 59);
+                            if (s0 <= m1 && s1 >= m0) mhit[mo] = 1;
+                        }
                     }
                 }
                 for (int mo = 1; mo <= 12; mo++) if (mhit[mo]) cJSON_AddItemToArray(list, cJSON_CreateNumber(mo));
@@ -90,15 +99,17 @@ char *cmd_X_NightOwl_queryContinuousCalendar(cJSON *a, const nvr_cmd_ctx_t *c)
             uint32_t mt0 = local_ymd_epoch(year, month, 1, 0, 0, 0);
             uint32_t mt1 = local_ymd_epoch(year, month, dim, 23, 59, 59);
             rsdk_index_slot_t sl[256];
-            int n = rsdk_group_query(c->group, mt0, mt1, ch0, RSDK_REC_CONTINUOUS, sl, 256);
             char dayhit[32] = { 0 };
             uint32_t nowt = (uint32_t)time(NULL);
-            for (int i = 0; i < n; i++) {
-                uint32_t s0 = sl[i].start_time;
-                uint32_t s1 = (sl[i].end_time == 0xFFFFFFFFu) ? nowt : sl[i].end_time;
-                for (int d = 1; d <= dim; d++) {
-                    uint32_t d0 = local_ymd_epoch(year, month, d, 0, 0, 0), d1 = d0 + 86400;
-                    if (s0 < d1 && s1 >= d0) dayhit[d] = 1;
+            for (int ci = 0; ci < nch; ci++) {   /* 合并:任一通道那天有录像即计入 */
+                int n = rsdk_group_query(c->group, mt0, mt1, chs0[ci], RSDK_REC_CONTINUOUS, sl, 256);
+                for (int i = 0; i < n; i++) {
+                    uint32_t s0 = sl[i].start_time;
+                    uint32_t s1 = (sl[i].end_time == 0xFFFFFFFFu) ? nowt : sl[i].end_time;
+                    for (int d = 1; d <= dim; d++) {
+                        uint32_t d0 = local_ymd_epoch(year, month, d, 0, 0, 0), d1 = d0 + 86400;
+                        if (s0 < d1 && s1 >= d0) dayhit[d] = 1;
+                    }
                 }
             }
             for (int d = 1; d <= dim; d++) if (dayhit[d]) cJSON_AddItemToArray(list, cJSON_CreateNumber(d));
@@ -107,29 +118,42 @@ char *cmd_X_NightOwl_queryContinuousCalendar(cJSON *a, const nvr_cmd_ctx_t *c)
     return nvr_resp_content(o);
 }
 
-/* 日内录像时间轴:返回 24 元素数组,list[h]=1 表示当天第 h 小时有连续录像,否则 0。 */
+/* 日内录像时间轴:返回 24 元素 Int64 数组,list[h] 的每一位表示第 h 小时内的 1 分钟——
+ * 分钟 m(0..59)→ 位 (m+4)(低 4 位不用),置位=该分钟有连续录像。整点全录=0xFFFFFFFFFFFFFFF0=-16。
+ * 合并:选中任一通道那分钟有录像即置位。Int64 用 cJSON_CreateRaw 原样输出(避免 double 丢精度)。 */
 char *cmd_X_NightOwl_queryRecordingInterval(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     int year = nvr_jint(a, "year", 0), month = nvr_jint(a, "month", 0), day = nvr_jint(a, "day", 0);
-    int ch0 = first_chn0(a);
-    int hour[24] = { 0 };
+    int chs0[64]; int nch = chan_list0(a, chs0, 64);   /* 合并所有选中通道 */
+    uint64_t mask[24] = { 0 };
     if (c->group && year > 0 && month > 0 && day > 0) {
         uint32_t d0 = local_ymd_epoch(year, month, day, 0, 0, 0), d1 = d0 + 86400;
         rsdk_index_slot_t sl[256];
-        int n = rsdk_group_query(c->group, d0, d1, ch0, RSDK_REC_CONTINUOUS, sl, 256);
         uint32_t nowt = (uint32_t)time(NULL);
-        for (int i = 0; i < n; i++) {
-            uint32_t s0 = sl[i].start_time;
-            uint32_t s1 = (sl[i].end_time == 0xFFFFFFFFu) ? nowt : sl[i].end_time;
-            if (s0 < d0) s0 = d0;
-            if (s1 > d1) s1 = d1;
-            if (s1 <= s0) continue;
-            int h0 = (int)((s0 - d0) / 3600), h1 = (int)((s1 - 1 - d0) / 3600);
-            for (int h = h0; h <= h1 && h < 24; h++) if (h >= 0) hour[h] = 1;
+        for (int ci = 0; ci < nch; ci++) {
+            int n = rsdk_group_query(c->group, d0, d1, chs0[ci], RSDK_REC_CONTINUOUS, sl, 256);
+            for (int i = 0; i < n; i++) {
+                uint32_t s0 = sl[i].start_time;
+                uint32_t s1 = (sl[i].end_time == 0xFFFFFFFFu) ? nowt : sl[i].end_time;
+                if (s0 < d0) s0 = d0;
+                if (s1 > d1) s1 = d1;
+                if (s1 <= s0) continue;
+                int m0 = (int)((s0 - d0) / 60);          /* 起始分钟(含) */
+                int m1 = (int)((s1 - 1 - d0) / 60);      /* 结束分钟(含) */
+                for (int m = m0; m <= m1 && m < 1440; m++) {
+                    if (m < 0) continue;
+                    int h = m / 60, mm = m % 60;         /* 分钟 mm → 位 mm+4 */
+                    mask[h] |= (1ULL << (mm + 4));
+                }
+            }
         }
     }
     cJSON *o = cJSON_CreateObject(); cJSON *list = cJSON_AddArrayToObject(o, "list");
-    for (int h = 0; h < 24; h++) cJSON_AddItemToArray(list, cJSON_CreateNumber(hour[h]));
+    for (int h = 0; h < 24; h++) {
+        char buf[24];
+        snprintf(buf, sizeof(buf), "%lld", (long long)(int64_t)mask[h]);  /* Int64 原样 */
+        cJSON_AddItemToArray(list, cJSON_CreateRaw(buf));
+    }
     return nvr_resp_content(o);
 }
 
@@ -139,7 +163,7 @@ char *cmd_X_NightOwl_queryEventCalendar(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     const char *res = nvr_jstr(a, "resolution", "day");
     int year = nvr_jint(a, "year", 0), month = nvr_jint(a, "month", 0);
-    int ch0 = first_chn0(a);
+    int chs0[64]; int nch = chan_list0(a, chs0, 64);   /* 合并所有选中通道 */
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "resolution", res);
     cJSON *list = cJSON_AddArrayToObject(o, "list");
@@ -150,16 +174,18 @@ char *cmd_X_NightOwl_queryEventCalendar(cJSON *a, const nvr_cmd_ctx_t *c)
             uint32_t y1 = local_ymd_epoch(year, 12, 31, 23, 59, 59);
             rsdk_index_slot_t *sl = (rsdk_index_slot_t *)malloc(sizeof(rsdk_index_slot_t) * 1024);
             if (sl) {
-                int n = rsdk_group_query(c->group, y0, y1, ch0, -1, sl, 1024);
                 char mhit[13] = { 0 };
-                for (int i = 0; i < n; i++) {
-                    if (!(sl[i].flags & RSDK_SLOT_EVENT)) continue;   /* 只算事件段 */
-                    uint32_t s0 = sl[i].start_time;
-                    uint32_t s1 = (sl[i].end_time == 0xFFFFFFFFu) ? nowt : sl[i].end_time;
-                    for (int mo = 1; mo <= 12; mo++) {
-                        uint32_t m0 = local_ymd_epoch(year, mo, 1, 0, 0, 0);
-                        uint32_t m1 = local_ymd_epoch(year, mo, days_in_month(year, mo), 23, 59, 59);
-                        if (s0 <= m1 && s1 >= m0) mhit[mo] = 1;
+                for (int ci = 0; ci < nch; ci++) {   /* 合并:任一通道那月有事件即计入 */
+                    int n = rsdk_group_query(c->group, y0, y1, chs0[ci], -1, sl, 1024);
+                    for (int i = 0; i < n; i++) {
+                        if (!(sl[i].flags & RSDK_SLOT_EVENT)) continue;   /* 只算事件段 */
+                        uint32_t s0 = sl[i].start_time;
+                        uint32_t s1 = (sl[i].end_time == 0xFFFFFFFFu) ? nowt : sl[i].end_time;
+                        for (int mo = 1; mo <= 12; mo++) {
+                            uint32_t m0 = local_ymd_epoch(year, mo, 1, 0, 0, 0);
+                            uint32_t m1 = local_ymd_epoch(year, mo, days_in_month(year, mo), 23, 59, 59);
+                            if (s0 <= m1 && s1 >= m0) mhit[mo] = 1;
+                        }
                     }
                 }
                 for (int mo = 1; mo <= 12; mo++) if (mhit[mo]) cJSON_AddItemToArray(list, cJSON_CreateNumber(mo));
@@ -170,15 +196,17 @@ char *cmd_X_NightOwl_queryEventCalendar(cJSON *a, const nvr_cmd_ctx_t *c)
             uint32_t mt0 = local_ymd_epoch(year, month, 1, 0, 0, 0);
             uint32_t mt1 = local_ymd_epoch(year, month, dim, 23, 59, 59);
             rsdk_index_slot_t sl[256];
-            int n = rsdk_group_query(c->group, mt0, mt1, ch0, -1, sl, 256);
             char dayhit[32] = { 0 };
-            for (int i = 0; i < n; i++) {
-                if (!(sl[i].flags & RSDK_SLOT_EVENT)) continue;   /* 只算事件段 */
-                uint32_t s0 = sl[i].start_time;
-                uint32_t s1 = (sl[i].end_time == 0xFFFFFFFFu) ? nowt : sl[i].end_time;
-                for (int d = 1; d <= dim; d++) {
-                    uint32_t d0 = local_ymd_epoch(year, month, d, 0, 0, 0), d1 = d0 + 86400;
-                    if (s0 < d1 && s1 >= d0) dayhit[d] = 1;
+            for (int ci = 0; ci < nch; ci++) {   /* 合并:任一通道那天有事件即计入 */
+                int n = rsdk_group_query(c->group, mt0, mt1, chs0[ci], -1, sl, 256);
+                for (int i = 0; i < n; i++) {
+                    if (!(sl[i].flags & RSDK_SLOT_EVENT)) continue;   /* 只算事件段 */
+                    uint32_t s0 = sl[i].start_time;
+                    uint32_t s1 = (sl[i].end_time == 0xFFFFFFFFu) ? nowt : sl[i].end_time;
+                    for (int d = 1; d <= dim; d++) {
+                        uint32_t d0 = local_ymd_epoch(year, month, d, 0, 0, 0), d1 = d0 + 86400;
+                        if (s0 < d1 && s1 >= d0) dayhit[d] = 1;
+                    }
                 }
             }
             for (int d = 1; d <= dim; d++) if (dayhit[d]) cJSON_AddItemToArray(list, cJSON_CreateNumber(d));

@@ -65,6 +65,7 @@ char *cmd_X_NightOwl_getChannelStatus(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_GUI_longPolling(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_GUI_playbackControl(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_GUI_setPlaybackMode(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getPlaybackCapabilities(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_GUI_getPlaybackMode(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_X_NightOwl_getDeviceCapabilities(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_AI_getChannelAICapabilities(cJSON *a, const nvr_cmd_ctx_t *c);

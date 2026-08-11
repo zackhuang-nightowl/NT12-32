@@ -21,6 +21,7 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
     { "GUI_playbackControl",                   cmd_GUI_playbackControl },
     { "GUI_setPlaybackMode",                   cmd_GUI_setPlaybackMode },
     { "GUI_getPlaybackMode",                   cmd_GUI_getPlaybackMode },
+    { "getPlaybackCapabilities",               cmd_getPlaybackCapabilities },
     { "X_NightOwl_getDeviceCapabilities",      cmd_X_NightOwl_getDeviceCapabilities },
     { "AI_getChannelAICapabilities",           cmd_AI_getChannelAICapabilities },
     { "X_NightOwl_setChannelZoomPan",          cmd_X_NightOwl_setChannelZoomPan },
