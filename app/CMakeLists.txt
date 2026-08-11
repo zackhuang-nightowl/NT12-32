@@ -66,6 +66,9 @@ add_library(nvr_app_core STATIC
     router/nvr_cmd_record.c
     router/nvr_cmd_ota.c
     router/nvr_cmd_event.c
+    router/nvr_cmd_account.c
+    router/nvr_cmd_network.c
+    router/nvr_cmd_misc.c
     config/nvr_chan_persist.c
     channel/nvr_chan_status.c
     ota/nvr_ota.c

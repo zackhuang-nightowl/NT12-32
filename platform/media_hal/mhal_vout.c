@@ -180,7 +180,9 @@ int mhal_vout_commit(void)
     int n = 0, rc = 0;
     for (int i = 0; i < MHAL_MAX_CH; i++) {
         struct mhal_vdec *d = g_disp.ch[i];
-        if (d && d->opened && d->vout_win >= 0 && d->vout_path && d->proc_path && d->dec_path) {
+        /* vout_win≥0=宫格窗; -2=自由矩形(bind_rect,回放 0.8 区/displayExt)。二者都在显,须进 start_list。 */
+        if (d && d->opened && (d->vout_win >= 0 || d->vout_win == -2) &&
+            d->vout_path && d->proc_path && d->dec_path) {
             dec[n] = d->dec_path; proc[n] = d->proc_path; vout[n] = d->vout_path;
             n++;
         }

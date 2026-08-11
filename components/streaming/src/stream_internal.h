@@ -3,7 +3,7 @@
  * ★ 双流架构:每通道**主+子两路常拉**。
  *   · 主码流(pmain):录像(高质量) + 单宫格显示。
  *   · 子码流(psub) :录像 + 多宫格显示。
- *   录像:主+子**两路都录**(同一 writer,按 f.stream 标记)。
+ *   录像:主/子**各一 writer**(独立段索引 slot.stream=0/1);音频挂主流。
  *   显示:单个硬件解码器,由 decode_stream(单宫格=主/多宫格=子)那一路喂;切换只改 decode_stream,
  *        两路都在拉 → **瞬时切换、不重连**。show_win<0 则不解码(门控)。
  */
@@ -65,8 +65,9 @@ typedef struct stream_chan {
     int              decode_denied; /* 1=解码预算超限被拒(只录不显) */
     int              show_win;      /* 显示目标格:-1=隐藏(只拉+录,不解码);>=0=可见格号 */
 
-    /* 录像写入器(盘组;主+子两路都写此 writer,按 f.stream 区分)。 */
-    rsdk_writer_t   *writer;
+    /* 录像:主/子各一 writer(独立段;slot.stream 区分)。音频写主流。 */
+    rsdk_writer_t   *writer_main;
+    rsdk_writer_t   *writer_sub;
     int              rec_gated_main;/* 主路录像关键帧门控(从 IDR 起) */
     int              rec_gated_sub; /* 子路录像关键帧门控 */
 

@@ -50,6 +50,8 @@
 | [videoRecorder功能对照.md](videoRecorder功能对照.md) | 录像功能对照 |
 | [回归_录像与NOP响应_2026-08-07.md](回归_录像与NOP响应_2026-08-07.md) | 录像回归测试 |
 | [需你确认_回放与能力_2026-08-10.md](需你确认_回放与能力_2026-08-10.md) | 回放与能力确认项 |
+| [实现_回放顺畅与双轨录像_2026-08-11.md](实现_回放顺畅与双轨录像_2026-08-11.md) | 墙钟回放 + 主/子双 writer 实现说明 |
+| [实现_Playback协议对齐_2026-08-12.md](实现_Playback协议对齐_2026-08-12.md) | 事件检索 / Control / Audio / USB Backup |
 | [../components/recorder/README.md](../components/recorder/README.md) | librsdk API 文档 |
 
 ---

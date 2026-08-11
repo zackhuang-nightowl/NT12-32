@@ -150,3 +150,21 @@ char *cmd_setCurrentStorage(cJSON *a, const nvr_cmd_ctx_t *c)
     nvr_settings_set_str(c->settings, "storage.current", value);
     return nvr_resp_ok();
 }
+
+char *cmd_GUI_getHddConfig(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a;
+    char mode[32];
+    nvr_settings_get_str(c->settings, "storage.hdd_full", mode, sizeof(mode), "overwrite");
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddBoolToObject(o, "overWrite", strcmp(mode, "overwrite") == 0);
+    return nvr_resp_content(o);
+}
+
+char *cmd_GUI_setHddConfig(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    if (!nvr_jhas(a, "overWrite")) return nvr_resp_err("invalid_param");
+    nvr_settings_set_str(c->settings, "storage.hdd_full",
+                         nvr_jbool(a, "overWrite", 1) ? "overwrite" : "stop");
+    return nvr_resp_ok();
+}

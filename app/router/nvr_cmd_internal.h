@@ -29,6 +29,7 @@ typedef struct {
     nvr_storage_t      *stg;          /* 存储信息/格式化/健康 */
     struct nvr_stream_mgr *sm;        /* 拉流/录像管理器:格式化后重组装盘组→补开 writer 用 */
     rsdk_group_t       *group;        /* 事件/录像 查询 */
+    void               *meta;         /* rsdk_meta ctx(事件列表/日历);可 NULL */
     nop_app_t          *nop;          /* 回落 nopcore(dispatch 用) */
     nvr_preview_t      *pv;           /* 出图:显示指令驱动 */
     struct nvr_playback *pb;          /* 本机回放引擎(GUI_playbackControl) */
@@ -98,10 +99,69 @@ char *cmd_X_NightOwl_setOwner(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_X_NightOwl_getOwner(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_GUI_getRemoteAccessState(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_GUI_setRemoteAccessState(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_getFeatureList(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getIotcAuthKey(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_setIotcAuthKey(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_getUID(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_getAutoRebootSetting(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_setAutoRebootSetting(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_getSystemLog(cJSON *a, const nvr_cmd_ctx_t *c);
+
+/* --- account 鉴权(nvr_cmd_account.c) --- */
+char *cmd_GUI_login(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_logout(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_LoginPage(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_getLoginStatus(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_createUser(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_deleteUser(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_getUsers(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_getUserGroupPermissions(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_forgetPassword(cJSON *a, const nvr_cmd_ctx_t *c);
+
+/* --- misc 通道聚合(nvr_cmd_misc.c) --- */
+char *cmd_getChannelsStatus(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getChannelStats(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getChannelLoading(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getEnhancedSecurity(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_setEnhancedSecurity(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_X_NightOwl_getDeviceActive(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_X_NightOwl_setDeviceActive(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getCurrentClouds(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getCloudStatusHistory(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getChannelCloudRecordStats(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getChannelCloudRecordStatsSwitch(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_setChannelCloudRecordStatsSwitch(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getChannelRecordingContent(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getReportServer(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getEnvironment(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getLog(cJSON *a, const nvr_cmd_ctx_t *c);
+
+/* --- network 网络(nvr_cmd_network.c) --- */
+char *cmd_GUI_getLocalLink(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_setLocalLink(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_getLanInterface(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_getWanInterface(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getWanInterface(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_getNetPort(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_setNetPort(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_getNTP(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_setNTP(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_getDDNS(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_setDDNS(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_getUPnP(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_setUPnP(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_getFTP(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_setFTP(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_getEmailAlert(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_setEmailAlert(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_testEmailAlert(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_getPoE(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_setPoE(cJSON *a, const nvr_cmd_ctx_t *c);
 
 /* --- cloud 云存(nvr_cmd_cloud.c) --- */
 char *cmd_X_NightOwl_setCloudRecordSwitch(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_X_NightOwl_getCloudRecordSwitch(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getCloudRecordSwitch(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_setCloudRecordConfigs(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_getCloudRecordConfigs(cJSON *a, const nvr_cmd_ctx_t *c);
 
@@ -123,6 +183,19 @@ char *cmd_formatStorage(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_getAllDisksHealth(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_getCurrentStorage(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_setCurrentStorage(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_getHddConfig(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_setHddConfig(cJSON *a, const nvr_cmd_ctx_t *c);
+
+/* --- playback 回放(nvr_cmd_playback.c) --- */
+char *cmd_GUI_getPlaybackAudio(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_setPlaybackAudio(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_getFileList(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_ChannelBackupFiles(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_GetChannelBackupStatus(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_StopChannelBackup(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_getChannelEventRecordingSchedule(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_setChannelEventRecordingSchedule(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getChannelRecordingTime(cJSON *a, const nvr_cmd_ctx_t *c);
 
 /* --- ota 升级(nvr_cmd_ota.c) --- */
 char *cmd_upgradeFirmware(cJSON *a, const nvr_cmd_ctx_t *c);

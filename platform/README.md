@@ -12,16 +12,22 @@ hd_videodec ──bind──► hd_videoproc(VPE 缩放) ──bind──► hd_
 
 | 封装 | 底层 hdal | 用途 | 文件 |
 |------|-----------|------|------|
-| `mhal_vdec_*` | `hd_videodec` + `hd_videoproc` | ③拉流的 H.264/265 硬解 + 送分屏 | `mhal_vdec.c` |
-| `mhal_vout_*` | `hd_videoout` | HDMI/CVBS 设备 + 分屏布局(1/4/9/16) | `mhal_vout.c` |
+| `mhal_vdec_*` | `hd_videodec` + `hd_videoproc` | 硬解 + 送分屏 | `mhal_vdec.c` |
+| `mhal_vout_*` | `hd_videoout` | HDMI/CVBS + 分屏布局 | `mhal_vout.c` |
+| `mhal_aout_*` | `hd_audiodec` + `hd_audioout` | 回放 AAC/G711 → 喇叭 | `mhal_aout.c` |
+| `mhal_budget_*` | (纯 C) | 746 Mpix/s 解码预算 | `mhal_budget.c` |
 
-### 数据流对接（③ streaming）
+### 数据流对接（③ streaming / 回放音频）
 
 ```
 streaming: CRtspClient.video_cb(Annex-B)
    → mhal_vdec_send(d, annexb, len, ts)     // hd_videodec_send_list
    → hd_videodec 硬解 → hd_videoproc 缩放到窗口 → hd_videoout 上屏
 mhal_vout_set_layout(4/9/16) 决定每通道落哪个分屏窗口。
+
+playback audio: 盘上 AAC(stream=2)
+   → mhal_aout_send(AAC, ...)               // hd_audiodec_send_list
+   → hd_audiodec ──bind──► hd_audioout(喇叭/HDMI)
 ```
 
 ### 编译校验状态

@@ -41,8 +41,8 @@ rsdk_err_t rsdk_index_write(rsdk_dev_t *d, const rsdk_index_slot_t *in)
     return RSDK_OK;
 }
 
-int rsdk_index_query(rsdk_dev_t *d, uint32_t t0, uint32_t t1, int chn,
-                     int rectype, rsdk_index_slot_t *out, int cap)
+int rsdk_index_query_stream(rsdk_dev_t *d, uint32_t t0, uint32_t t1, int chn,
+                            int rectype, int stream, rsdk_index_slot_t *out, int cap)
 {
     if (!d || !out || cap <= 0) return 0;
     rsdk_systab_t *st = rsdk_dev_systab(d);
@@ -57,12 +57,19 @@ int rsdk_index_query(rsdk_dev_t *d, uint32_t t0, uint32_t t1, int chn,
         if (e < t0 || s.start_time > t1) continue;             /* 时间不相交 */
         if (chn >= 0 && s.chn != chn) continue;
         if (rectype >= 0 && s.rectype != rectype) continue;
+        if (stream >= 0 && (int)s.stream != stream) continue;
         out[found++] = s;
     }
     /* 简单按 start_time 升序 */
     for (int a = 0; a < found; a++) for (int b = a+1; b < found; b++)
         if (out[b].start_time < out[a].start_time) { rsdk_index_slot_t t=out[a]; out[a]=out[b]; out[b]=t; }
     return found;
+}
+
+int rsdk_index_query(rsdk_dev_t *d, uint32_t t0, uint32_t t1, int chn,
+                     int rectype, rsdk_index_slot_t *out, int cap)
+{
+    return rsdk_index_query_stream(d, t0, t1, chn, rectype, -1, out, cap);
 }
 
 /* 判断 chunk 是否落在段 [start_chunk, end_chunk] 内, 处理环绕(start > end) */

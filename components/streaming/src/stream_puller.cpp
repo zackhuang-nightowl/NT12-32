@@ -2,7 +2,7 @@
  *  stream_puller.cpp — 每通道**主+子两路** nop::NopRtspClient 拉流封装（C++）
  *
  *  每路(stream_pull_t)一个 NopRtspClient;回调 ctx = stream_pull_t*,把裸帧转交
- *  stream_route_video(p,...)（纯 C）。主+子都录;显示由 decode_stream 那路喂解码器。
+ *  stream_route_video(p,...)（纯 C）。主/子分 writer 各录;显示由 decode_stream 那路喂解码器。
  *  统一 RTSP SDK：NT12-SDK/OnvifClientLibrary(libonvifclient.a)，仅需 nop_rtsp.h。
  ***************************************************************************************/
 #include "stream_internal.h"

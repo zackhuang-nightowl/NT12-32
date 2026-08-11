@@ -29,6 +29,9 @@ RSDK_API void       rsdk_group_close(rsdk_group_t *g);
  * 返回的 slot.start_disk 被重写为「盘组内数组下标」, 供 group_play 定位到具体盘。 */
 RSDK_API int rsdk_group_query(rsdk_group_t *g, uint32_t t0, uint32_t t1, int chn,
                               int rectype, rsdk_index_slot_t *out, int cap);
+/* 同 rsdk_group_query; stream>=0 只取该码流段(0主/1子); stream<0 不限。 */
+RSDK_API int rsdk_group_query_stream(rsdk_group_t *g, uint32_t t0, uint32_t t1, int chn,
+                                      int rectype, int stream, rsdk_index_slot_t *out, int cap);
 
 /* 跨盘连续回放器: 顺序播放一组(可跨盘)段, 到段尾自动切到下一段所在盘。 */
 typedef struct rsdk_group_player rsdk_group_player_t;

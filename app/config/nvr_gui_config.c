@@ -67,6 +67,42 @@ int nvr_gui_config_get_channels(int *poe_n, int *lan_n)
     return 0;
 }
 
+int nvr_gui_config_get_playback_modes(int *out, int cap)
+{
+    static const int kdef[] = { 1, 4, 9, 16 };
+    int n = 0;
+    cJSON *r = read_root();
+    if (r) {
+        cJSON *arr = cJSON_GetObjectItem(r, "allPlaybackDisplayModes");
+        if (!cJSON_IsArray(arr)) arr = cJSON_GetObjectItem(r, "allDisplayModes");
+        if (cJSON_IsArray(arr)) {
+            int sz = cJSON_GetArraySize(arr);
+            for (int i = 0; i < sz && n < cap; i++) {
+                cJSON *it = cJSON_GetArrayItem(arr, i);
+                if (cJSON_IsNumber(it)) out[n++] = (int)it->valuedouble;
+            }
+        }
+        cJSON_Delete(r);
+    }
+    if (n == 0) {
+        for (int i = 0; i < (int)(sizeof(kdef)/sizeof(kdef[0])) && n < cap; i++)
+            out[n++] = kdef[i];
+    }
+    return n;
+}
+
+int nvr_gui_config_max_playback_channels(void)
+{
+    int modes[32]; int nm = nvr_gui_config_get_playback_modes(modes, 32);
+    int mx = 1;
+    for (int i = 0; i < nm; i++) if (modes[i] > mx) mx = modes[i];
+    int poe = 16, lan = 16; nvr_gui_config_get_channels(&poe, &lan);
+    int cap = poe + lan; if (cap < 1) cap = 32;
+    if (mx > cap) mx = cap;
+    if (mx < 1) mx = 1;
+    return mx;
+}
+
 int nvr_gui_config_set_display(int mode, int page)
 {
     if (mode == 0) return 0;   /* 0=退出 Liveview 的瞬时态,不持久化 */

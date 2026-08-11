@@ -15,8 +15,57 @@
 extern "C" {
 #endif
 
-/* 应用网络配置（读设置库；调用 busybox ip/udhcpc/udhcpd）。返回 0。 */
+/* 应用网络配置（读设置库；调用 BusyBox ifconfig/route/vconfig/udhcpc/udhcpd）。返回 0。 */
 int  nvr_net_apply(nvr_settings_t *s);
+
+/* eth0 管理口:读 Linux 实时状态 + 设置库合并 → out; 返回 0/-1。 */
+int  nvr_net_local_link_fill(nvr_settings_t *s, nvr_local_link_t *out);
+
+/* 持久化 local_link + 同步 eth0 KV + 应用 eth0/DNS(不碰 eth1 PoE)。返回 0/-1。 */
+int  nvr_net_local_link_apply(nvr_settings_t *s, const nvr_local_link_t *in);
+
+/* 仅应用 eth0(DHCP/静态 + 默认路由);供开机 nvr_net_apply 与 setLocalLink 共用。 */
+int  nvr_net_apply_eth0(nvr_settings_t *s);
+
+/* 读 eth0 链路速率(Mbps);失败返回 -1。 */
+int  nvr_net_eth0_link_mbps(void);
+
+#define NVR_WAN_IF_MAX 4
+
+typedef struct {
+    char value[8];                         /* 当前 WAN 类型: "eth" | "wifi" */
+    const char *list[NVR_WAN_IF_MAX];      /* 可用类型列表 */
+    int list_n;
+    const char *connected[NVR_WAN_IF_MAX]; /* 已连接类型 */
+    int conn_n;
+} nvr_wan_if_info_t;
+
+/* 读 Linux /sys/class/net 填充 WAN 接口(value/list/connected)。返回 0/-1。 */
+int  nvr_net_wan_fill(nvr_wan_if_info_t *out);
+
+/* LAN 物理/最大接收带宽(Mbps, eth0);失败 -1。 */
+int  nvr_net_lan_bandwidth_mbps(int *total_mbps, int *max_rx_mbps);
+
+struct nvr_chan_mgr;
+
+typedef struct {
+    int  enable;
+    int  http_port;
+    int  tcp_port;
+    int  running;                 /* Linux 上 miniupnpd 是否在跑(只读) */
+} nvr_upnp_cfg_t;
+
+/* UPnP:读设置库 + 探测 miniupnpd; apply 启停服务。返回 0/-1。 */
+int  nvr_net_upnp_fill(nvr_settings_t *s, nvr_upnp_cfg_t *out);
+int  nvr_net_upnp_apply(nvr_settings_t *s);
+
+/* PoE 口 channel=1..16:读 Linux VLAN 状态 + 通道在线估算功耗; set 启停 VLAN。 */
+int  nvr_net_poe_fill(struct nvr_chan_mgr *cm, nvr_settings_t *s, int channel,
+                      int *enable, int *power_used);
+int  nvr_net_poe_apply(nvr_settings_t *s, int channel, int enable);
+
+/* SMTP 测试邮件(明文 AUTH;465/SSL 暂不支持)。成功 0,失败 -1。 */
+int  nvr_net_email_test(const nvr_email_cfg_t *cfg, const char *receiver);
 
 /* 应用时区 + 触发一次 NTP 同步（UTC 系统时钟）。返回 0。 */
 int  nvr_time_apply(nvr_settings_t *s);

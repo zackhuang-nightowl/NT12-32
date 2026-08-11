@@ -179,6 +179,19 @@ static void seed_from_json(nvr_settings_t *s, const char *dir)
             }
             cJSON *e1 = cJSON_GetObjectItem(net, "eth1");
             if (e1) nvr_settings_set_int(s, "network.eth1.vlan_base", jint(e1, "vlan_base", 2000));
+            /* 种子 local_link(与 eth0 KV 对齐,供 GUI_getLocalLink) */
+            {
+                nvr_local_link_t lk;
+                memset(&lk, 0, sizeof(lk));
+                int dhcp = nvr_settings_get_int(s, "network.eth0.dhcp", 1);
+                snprintf(lk.network_type, sizeof(lk.network_type), "%s", dhcp ? "DHCP" : "Static");
+                nvr_settings_get_str(s, "network.eth0.ip",   lk.ip,          sizeof(lk.ip),          "192.168.1.100");
+                nvr_settings_get_str(s, "network.eth0.mask", lk.subnet_mask, sizeof(lk.subnet_mask), "255.255.255.0");
+                nvr_settings_get_str(s, "network.eth0.gw",   lk.gateway,     sizeof(lk.gateway),     "");
+                snprintf(lk.dns1, sizeof(lk.dns1), "8.8.8.8");
+                snprintf(lk.dns2, sizeof(lk.dns2), "8.8.4.4");
+                nvr_settings_local_link_set(s, &lk);
+            }
         }
         cJSON *ch = cJSON_GetObjectItem(sys, "channels");
         if (ch) {

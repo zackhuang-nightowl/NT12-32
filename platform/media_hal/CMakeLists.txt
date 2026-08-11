@@ -27,10 +27,11 @@ add_library(mhal STATIC
     mhal_vout.c
     mhal_vdec.c
     mhal_budget.c
+    mhal_aout.c
 )
 
 target_include_directories(mhal PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}          # mhal_vdec.h / mhal_vout.h / mhal_budget.h
+    ${CMAKE_CURRENT_SOURCE_DIR}          # mhal_vdec.h / mhal_vout.h / mhal_budget.h / mhal_aout.h
 )
 target_include_directories(mhal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../common/include)  # nvr_log.h
 target_include_directories(mhal PRIVATE

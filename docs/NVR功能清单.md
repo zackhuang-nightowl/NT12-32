@@ -110,6 +110,7 @@
 | **云上传(VSaaS)** | `uploader.c`、`ts_mux.c`、`http_vsaas.c` | 录像→TS 切片→HTTP 上云 | ✅ |
 | **事件中枢** | [nvr_event.c](../app/event/nvr_event.c) | init/tick/deinit 已接 | 🟡 **无检测源喂 `nvr_evt_ingest`**,事件驱动录像不可达 |
 | **NTP 校时** | [nvr_netime.c](../app/netime/nvr_netime.c) | 周期校时,维护 `synced` 态 | ✅ |
+| **网络配置(eth0/eth1/PoE/UPnP)** | [nvr_netime.c](../app/netime/nvr_netime.c)、[nvr_cmd_network.c](../app/router/nvr_cmd_network.c) | Linux 读 + BusyBox 写；LOCAL 命令见 §A7 | ✅(NetPort 热切换、SMTP 465 待做) |
 | **OTA 引擎** | [nvr_ota.c](../app/ota/nvr_ota.c) | 下载/写入/进度 | ✅ |
 | **设备激活/加密** | [nvr_crypto.c](../components/crypto/src/nvr_crypto.c) | 子设备激活密码 | 🟡 走**明文**激活;AES/增强为空 key 桩 |
 | **MP4 备份导出** | `rsdk_backup.c` | 录像导出 MP4 | 🟡 muxer 无真实调用(仅 examples) |
@@ -136,10 +137,10 @@ NVR 用两个 SQLite 库。建库 DDL 均为 `CREATE TABLE IF NOT EXISTS`(不重
 | `push_config` | chn(PK), switch_on, dnd_enable, dnd_start/end, dnd_weekdays, time_unit | 每通道推送+免打扰 | `set/getChannelsPushNotificationSwitch` | ✅ |
 | `cloud_channel` | chn(PK), stream_type, triggers, enable | 每通道云存配置 | `set/getCloudRecordConfigs` | ✅ |
 | `schedule` | chn, domain, sensor, rule_id, weekdays, start/end_hms | 排程规则(连续/事件+云存) | — | 🟡 **有表无命令**(排程未接) |
-| `local_link` | id=1, network_type, mac, ip, mask, gateway, dns1/2 | 网络配置 | — | 🟡 **有表无命令**(网络配置未接) |
-| `email_alert` | id=1, enable, receiver1-5, smtp_*, use_ssl, interval | 邮件告警 | — | 🟡 **有表无命令**(邮件告警未接) |
-| `ftp` | id=1, enable, server, port, user, password, remote_dir | FTP 上传 | — | 🟡 **有表无命令**(FTP 未接) |
-| `ddns` | idx(PK), domain, enable, hostname, ddns_key, user, password | DDNS | — | 🟡 **有表无命令**(DDNS 未接) |
+| `local_link` | id=1, network_type, mac, ip, mask, gateway, dns1/2 | eth0 网络配置 | `GUI_get/setLocalLink` | ✅ |
+| `email_alert` | id=1, enable, receiver1-5, smtp_*, use_ssl, interval | 邮件告警 | `GUI_get/setEmailAlert`、`GUI_testEmailAlert` | ✅(SMTP 465 待做) |
+| `ftp` | id=1, enable, server, port, user, password, remote_dir | FTP 上传 | `GUI_get/setFTP` | ✅ |
+| `ddns` | idx(PK), domain, enable, hostname, ddns_key, user, password | DDNS | `GUI_get/setDDNS` | ✅ |
 
 ### 库 B · 录像元数据索引库 `meta.db`
 路径:`<config_dir>/meta.db`([nvr_app.c:325](../app/src/nvr_app.c#L325);默认 `/config/meta.db`) · WAL · 实现:[rsdk_meta.c](../components/recorder/src/rsdk_meta.c) · DDL:[sql/meta_schema.sql](../components/recorder/sql/meta_schema.sql)
@@ -167,10 +168,8 @@ NVR 用两个 SQLite 库。建库 DDL 均为 `CREATE TABLE IF NOT EXISTS`(不重
 | 8 | **AES 激活口令**(可选) | 空 key 桩,现走明文 | nvr_crypto.c、nvr_cmd_lan.c |
 | 9 | **MP4 备份导出**(可选) | muxer 未接命令/UI | rsdk_backup.c |
 | 10 | **排程录像/云存** | `schedule` 表有 API 无命令 | nvr_settings.c、record_sched |
-| 11 | **网络配置** | `local_link` 表有 API 无命令 | nvr_settings.c |
-| 12 | **邮件告警** | `email_alert` 表有 DDL,无 API/命令 | nvr_settings.c |
-| 13 | **FTP 上传** | `ftp` 表有 API 无命令 | nvr_settings.c |
-| 14 | **DDNS** | `ddns` 表有 API 无命令 | nvr_settings.c |
+| 11 | **NetPort 热切换** | `setNetPort` 仅落库，8089/RTSP 监听未随改口重启 | nvr_app、nop_http_server |
+| 12 | **SMTP SSL/465** | `GUI_testEmailAlert` 仅 25/587 明文 | nvr_netime.c + OpenSSL |
 
 ---
 

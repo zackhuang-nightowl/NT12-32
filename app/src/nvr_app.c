@@ -155,6 +155,9 @@ static void on_storage_evt(nvr_stg_evt_t e, const nvr_disk_t *d, void *user)
 }
 
 static void apply_remote_access(nvr_app_t *a);   /* 前置声明（下方定义） */
+static void start_tutk(nvr_app_t *a);
+static void stop_tutk(nvr_app_t *a);
+static void restart_tutk(nvr_app_t *a);
 
 /* 设置库变更 → 云存开关/stoken + 远程访问门控（cloud.* / nop_owner / service.remote_access） */
 static void on_settings_change(void *user, const char *key)
@@ -171,6 +174,17 @@ static void on_settings_change(void *user, const char *key)
     }
     if (strncmp(key, "service.remote_access", 21) == 0)
         apply_remote_access(a);   /* 本地 admin 运行时开关 */
+    if (strncmp(key, "tutk.authkey", 12) == 0 || strncmp(key, "tutk.uid", 8) == 0) {
+        if (a->tutk_on) {
+            char ak[NVR_TUTK_AUTH_KEY_LEN + 4];
+            nvr_settings_get_str(a->settings, "tutk.authkey", ak, sizeof(ak), "");
+            if (ak[0] && nvr_tutk_update_authkey(ak) == 0)
+                printf("[app] TUTK authkey 已热更新\n");
+            else
+                restart_tutk(a);
+        } else if (remote_access_effective(a))
+            start_tutk(a);
+    }
 }
 
 /* 有盘 + meta + udid 就绪 → 启动云存上传器，初值取自设置库 */
@@ -227,14 +241,28 @@ static char *ble_dispatch_bridge(void *ud, const char *json, int enc)
 static void start_tutk(nvr_app_t *a)
 {
     if (a->tutk_on) return;
-    char uid[64], authkey[64];
+    char uid[64], authkey[NVR_TUTK_AUTH_KEY_LEN + 4], license[128];
     nvr_settings_get_str(a->settings, "tutk.uid", uid, sizeof(uid), "");
     nvr_settings_get_str(a->settings, "tutk.authkey", authkey, sizeof(authkey), "");
-    if (!uid[0]) return;                                   /* 无 UID：无法启 P2P */
-    if (nvr_tutk_init(uid, authkey[0] ? authkey : NULL) == 0 && nvr_tutk_start() == 0) {
+    nvr_settings_get_str(a->settings, "tutk.license_key", license, sizeof(license), "");
+    if (!uid[0]) return;
+
+    int nop_port = nvr_settings_get_int(a->settings, "system.nop_port", NVR_DEF_NOP_PORT);
+    int rtsp_port = nvr_settings_get_int(a->settings, "network.port.rtsp", 554);
+
+    nvr_tutk_cfg_t tc = {
+        .uid         = uid,
+        .auth_key    = authkey,
+        .license_key = license[0] ? license : NULL,
+        .nop_port    = nop_port,
+        .rtsp_port   = rtsp_port,
+        .max_sessions = nvr_settings_get_int(a->settings, "tutk.max_sessions", 8),
+    };
+    if (nvr_tutk_init(&tc) == 0 && nvr_tutk_start() == 0) {
         a->tutk_on = 1;
-        printf("[app] TUTK P2P 已启动(UID=%s)\n", uid);
+        printf("[app] TUTK P2P 已启动(UID=%s tunnel→:%d/%d)\n", uid, nop_port, rtsp_port);
     } else {
+        nvr_tutk_deinit();
         printf("[app] 警告: TUTK P2P 启动失败\n");
     }
 }
@@ -243,6 +271,12 @@ static void stop_tutk(nvr_app_t *a)
     if (!a->tutk_on) return;
     nvr_tutk_stop(); nvr_tutk_deinit(); a->tutk_on = 0;
     printf("[app] TUTK P2P 已停止\n");
+}
+
+static void restart_tutk(nvr_app_t *a)
+{
+    stop_tutk(a);
+    start_tutk(a);
 }
 
 static void start_ble(nvr_app_t *a)
@@ -513,6 +547,8 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
     }
     nvr_settings_subscribe(a->settings, "nop_owner",             on_settings_change, a);
     nvr_settings_subscribe(a->settings, "service.remote_access", on_settings_change, a);
+    nvr_settings_subscribe(a->settings, "tutk.authkey", on_settings_change, a);
+    nvr_settings_subscribe(a->settings, "tutk.uid", on_settings_change, a);
     apply_remote_access(a);
 
     a->running = 1;

@@ -1,15 +1,16 @@
 /***************************************************************************************
  *  nvr_playback.c — 本机录像回放引擎(见 nvr_playback.h)。
- *  单通道全屏回放:rsdk_group_query 找段 → rsdk_group_play_next2 取解密 Annex-B 帧
- *  →(按 hdr.stream 过滤 + 跳音频 + I 帧起播)→ mhal_vdec_send 解码到全屏窗口。
- *  接管窗口0:play 前 nvr_preview_fullscreen + 关 live 解码;stop 后归还 live。
+ *  墙钟主时钟 + 多路 feeder; >4X 只解 I; backward=I 帧倒放; 宫格音频 enable[];
+ *  PlaybackMsgNotify 按设备实际能力上报。
  ***************************************************************************************/
 #include "nvr_playback.h"
 #include "nvr_streaming.h"
-#include "stream_nal.h"     /* 与 liveView 同一套 NAL 分类(参数集/关键帧判定) */
+#include "stream_nal.h"
 #include "nvr_preview.h"
+#include "nvr_gui_config.h"
 #include "mhal_vdec.h"
 #include "mhal_vout.h"
+#include "mhal_aout.h"
 #include "mhal_budget.h"
 #include "rsdk_balance.h"
 #include "rsdk_types.h"
@@ -23,366 +24,656 @@
 #include <time.h>
 
 #define PB_MAX_SEGS  512
-#define PB_MAX_FEED  16       /* 同屏最多回放通道数 */
-#define PB_AU_MAX    (3*1024*1024)  /* access unit 组装缓冲上限(8K IDR ~300KB,留足) */
-#define PB_MAX_CH    32       /* 通道数(黑屏时关全部 live 解码) */
+#define PB_MAX_FEED  16
+#define PB_MAX_CH    32
+#define PB_IKEY_MAX  4096
 
-/* 每通道回放线程上下文(feeder 只读,起播前填好,避免竞态)。
- * vdec 在起播时于 defer 批中**统一开好并绑格**(一次成图,避免逐路 commit 触发"can't extend"),
- * feeder 只负责喂帧;vdec 由 stop 时统一关闭。 */
+typedef struct { uint32_t wall; uint64_t pts; } pb_ikey_t;
+
 typedef struct pb_feeder_ctx {
     struct nvr_playback *pb;
-    int          chn0;        /* 该路回放通道(0-based) */
-    int          cell_idx;    /* 在回放宫格中的格位(= 在 ch_list 中的序号) */
-    int          want_stream; /* 本路码流(主/子) */
-    mhal_vdec_t *vdec;        /* 预开的解码器(绑好本格;跨 seek 复用,由 close_decoders 关) */
-    int          thread_ok;   /* feeder 线程已起(join 依据;解码器复用后 vdec 常驻不能当存活标志) */
+    int          chn0;
+    int          cell_idx;
+    int          want_stream;
+    mhal_vdec_t *vdec;
+    int          thread_ok;
 } pb_feeder_ctx_t;
 
 struct nvr_playback {
     nvr_playback_cfg_t cfg;
     pthread_mutex_t    lock;
-    pthread_t          th[PB_MAX_FEED];       /* 每通道一个 feeder */
+    pthread_t          th[PB_MAX_FEED];
     pb_feeder_ctx_t    fctx[PB_MAX_FEED];
-    int                nth;                    /* 活跃 feeder 数 */
-    volatile int       running;      /* feeder 存活(全体共享) */
+    int                nth;
+    volatile int       running;
     volatile int       paused;
-    volatile int       chn0;         /* 主回放通道(0-based),-1=无;供 enter/blackout */
-    volatile int       want_stream;  /* NVR_STREAM_MAIN/SUB(超预算回退子) */
-    volatile int       speed_num;    /* 1/2/4/8:倍速(节奏) */
-    uint32_t           start_wall;   /* 起播 epoch(全通道共享起点) */
+    volatile int       chn0;
+    volatile int       want_stream;
+    volatile int       speed_milli;  /* 125=0.125X … 8000=8X; frame→frame_step */
+    volatile int       frame_step;   /* 1=逐帧:显示一帧后自动 pause */
+    volatile int       i_only;       /* >4X 或 backward */
+    uint32_t           start_wall;
+    uint32_t           day_end_wall; /* 起播日本地 23:59:59,到则停 */
     int                backward;
     char               status[16], speed[16], direction[16];
-    volatile uint32_t  cur_wall;     /* 当前回放位置(共享时钟算出,见 get_status) */
-    int                disp_mode;    /* 回放布局(GUI_setPlaybackMode 记录) */
-    int                ch_list[16];  /* 1-based 通道 */
+    char               notify[160];
+    volatile uint32_t  cur_wall;
+    int                disp_mode;
+    int                ch_list[NVR_PB_MAX_CELLS];
     int                ch_count;
-    /* --- 共享回放时钟(全通道同步 + 时间轴平滑,不再取各 feeder 最大 wall) --- */
-    long               play_base_ms;   /* 起播/续播时 monotonic 基准 */
-    uint32_t           play_base_wall; /* 该基准对应的录像 wall(=start_wall) */
-    long               pause_at_ms;    /* 暂停时刻(0=未暂停);resume 补进 base */
-    volatile int       alive_feeders;  /* 存活 feeder 数;归 0 = 放完/无录像 → 停(不空走时间轴) */
-    volatile uint32_t  max_decoded_wall;/* 已解码到的最大 wall;时间轴 clamp 到此(无录像不前进) */
-    volatile int       clock_reanchored;/* 首帧已把共享时钟锚到实际起播 wall(跳过空档,免空睡) */
-    /* --- 解码器跨 seek 复用(避免每次拖时间轴都拆/重建 8K 解码器 → -1/送流失败churn) --- */
-    int                dec_open;       /* 解码器已开(feeder 可反复起停复用) */
-    int                dec_chlist[16]; /* 解码器当前所属 1-based 通道集 */
-    int                dec_n;          /* 上同,个数;与请求不一致才重开 */
+    int                audio_en[NVR_PB_MAX_CELLS];
+    int                audio_n;
+    long               play_base_ms;
+    uint32_t           play_base_wall;
+    long               pause_at_ms;
+    volatile int       alive_feeders;
+    volatile uint32_t  max_decoded_wall;
+    volatile int       clock_reanchored;
+    int                dec_open;
+    int                dec_chlist[NVR_PB_MAX_CELLS];
+    int                dec_n;
 };
 
-/* displayMode → mhal 布局(与 liveView mode_to_mhal 完全一致:含 8=1大+7小、6→9格 等)。 */
-static mhal_layout_t pb_mode_to_layout(int mode)
+static int pb_grid_side(int mode)
 {
-    switch (mode) {
-        case 0: case 1: return MHAL_LAYOUT_1;
-        case 4:  return MHAL_LAYOUT_4;
-        case 8:  return MHAL_LAYOUT_8;
-        case 9:  return MHAL_LAYOUT_9;
-        case 16: return MHAL_LAYOUT_16;
-        case 25: return MHAL_LAYOUT_25;
-        case 36: return MHAL_LAYOUT_36;
-        default: return MHAL_LAYOUT_16;
-    }
+    if (mode <= 1) return 1;
+    if (mode == 4)  return 2;
+    if (mode == 9)  return 3;
+    if (mode == 16) return 4;
+    if (mode == 25) return 5;
+    if (mode == 36) return 6;
+    int n = 2;
+    while (n < 6 && n * n < mode) n++;
+    return n;
 }
-/* 回放视频区宫格:先按 HDMI 分辨率算视频区(mode0=全屏 W×H;其余=0.8W×0.8H@(0,0)),
- * 再用**与 liveView 同一套**布局(mhal_layout_rect)在该区域内算第 cell_idx 格的像素矩形。 */
+static int pb_cell_count(int mode)
+{
+    if (mode <= 0) return 1;
+    return mode;
+}
 static void pb_cell_rect(struct nvr_playback *pb, int cell_idx,
                          int *cx, int *cy, int *cw, int *ch)
 {
-    /* ★ 用**实际显示分辨率**(与 liveView 同源 g_disp)算视频区,不能用可能过时/缺省的 cfg.hdmi_*
-     *   (否则按 1920 算的格落到 4K 屏上会缩成一小块)。 */
     int W = 0, H = 0; mhal_vout_get_resolution(&W, &H);
     if (W <= 0 || H <= 0) { W = pb->cfg.hdmi_w > 0 ? pb->cfg.hdmi_w : 1920;
                             H = pb->cfg.hdmi_h > 0 ? pb->cfg.hdmi_h : 1080; }
-    int rw = (pb->disp_mode == 0) ? W : W * 4 / 5;   /* mode0 全屏,其余 0.8 视频区 */
+    int rw = (pb->disp_mode == 0) ? W : W * 4 / 5;
     int rh = (pb->disp_mode == 0) ? H : H * 4 / 5;
-    mhal_layout_rect(pb_mode_to_layout(pb->disp_mode), cell_idx, rw, rh, cx, cy, cw, ch);
+    int n = pb_grid_side(pb->disp_mode);
+    int cell_w = rw / n, cell_h = rh / n;
+    *cx = (cell_idx % n) * cell_w;
+    *cy = (cell_idx / n) * cell_h;
+    *cw = cell_w;
+    *ch = cell_h;
 }
 
-static long now_ms(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
-                          return ts.tv_sec*1000L + ts.tv_nsec/1000000L; }
-static int parse_speed(const char *s){ if(!s||!s[0])return 1; int n=atoi(s); return (n>=1&&n<=16)?n:1; }
+static long now_ms(void)
+{
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
 
-/* 探测某通道自 start_wall 起首个视频 I 帧的 codec(确认有可放录像 + 定 H264/H265)。
- * 返回 0 且 *codec 有效=有录像;<0=无录像/失败。只读若干帧即关,开销小。 */
+/* 解析倍速 → milli(1000=1X); frame → *frame_out=1, milli=1000。 */
+static int parse_speed(const char *s, int *frame_out)
+{
+    if (frame_out) *frame_out = 0;
+    if (!s || !s[0]) return 1000;
+    if (strcmp(s, "frame") == 0) { if (frame_out) *frame_out = 1; return 1000; }
+    if (s[0] == '0' && s[1] == '.') {
+        double v = atof(s);
+        if (v > 0.0 && v <= 16.0) return (int)(v * 1000.0 + 0.5);
+    }
+    int n = atoi(s);
+    if (n >= 1 && n <= 16) return n * 1000;
+    return 1000;
+}
+
+static uint32_t day_end_of(uint32_t wall)
+{
+    time_t tt = (time_t)wall;
+    struct tm tm;
+#if defined(_WIN32)
+    localtime_s(&tm, &tt);
+#else
+    localtime_r(&tt, &tm);
+#endif
+    tm.tm_hour = 23; tm.tm_min = 59; tm.tm_sec = 59; tm.tm_isdst = -1;
+    return (uint32_t)mktime(&tm);
+}
+
+static uint32_t pb_master_wall(const nvr_playback_t *pb)
+{
+    int sm = pb->speed_milli > 0 ? pb->speed_milli : 1000;
+    if (pb->play_base_ms == 0) return pb->start_wall;
+    long ref = pb->pause_at_ms ? pb->pause_at_ms : now_ms();
+    long el = ref - pb->play_base_ms; if (el < 0) el = 0;
+    /* wall += elapsed_ms * speed_milli / 1e6 */
+    long delta = (el * (long)sm) / 1000000L;
+    if (pb->backward) {
+        if ((uint32_t)delta >= pb->play_base_wall) return 0;
+        return pb->play_base_wall - (uint32_t)delta;
+    }
+    return pb->play_base_wall + (uint32_t)delta;
+}
+
+static void pb_wait_wall_fwd(nvr_playback_t *pb, uint32_t frame_wall)
+{
+    int sm = pb->speed_milli > 0 ? pb->speed_milli : 1000;
+    while (pb->running && !pb->paused) {
+        uint32_t mw = pb_master_wall(pb);
+        if (frame_wall <= mw) return;
+        uint32_t lag = frame_wall - mw;
+        long sleep_ms = (long)lag * 1000000L / sm; /* wall_sec → ms at speed */
+        if (sleep_ms > 200) sleep_ms = 200;
+        if (sleep_ms < 5) sleep_ms = 5;
+        usleep((useconds_t)(sleep_ms * 1000));
+    }
+}
+
+static void pb_wait_wall_bwd(nvr_playback_t *pb, uint32_t frame_wall)
+{
+    int sm = pb->speed_milli > 0 ? pb->speed_milli : 1000;
+    while (pb->running && !pb->paused) {
+        uint32_t mw = pb_master_wall(pb);
+        if (frame_wall >= mw) return;  /* 倒放:帧 wall 应 ≥ 主时钟(更早的帧已过) */
+        uint32_t lag = mw - frame_wall;
+        long sleep_ms = (long)lag * 1000000L / sm;
+        if (sleep_ms > 200) sleep_ms = 200;
+        if (sleep_ms < 5) sleep_ms = 5;
+        usleep((useconds_t)(sleep_ms * 1000));
+    }
+}
+
+static int pb_query_segs(nvr_playback_t *pb, int chn0, int want_stream,
+                         uint32_t start_wall, uint32_t end_wall,
+                         rsdk_index_slot_t *segs, int cap)
+{
+    rsdk_group_t *g = pb->cfg.group;
+    if (end_wall <= start_wall) end_wall = start_wall + 24 * 3600;
+    int n = rsdk_group_query_stream(g, start_wall, end_wall, chn0,
+                                    RSDK_REC_CONTINUOUS, want_stream, segs, cap);
+    if (n <= 0 && want_stream == NVR_STREAM_SUB)
+        n = rsdk_group_query_stream(g, start_wall, end_wall, chn0,
+                                    RSDK_REC_CONTINUOUS, -1, segs, cap);
+    return n;
+}
+
+/* 盘上音频 → mhal_aout(硬解 AAC/G711 → 喇叭)。多格 enable 均可送。 */
+static void pb_play_audio_frame(nvr_playback_t *pb, int cell,
+                                const rsdk_frame_hdr_t *h,
+                                const uint8_t *data, uint32_t len)
+{
+    if (!pb || !h || !data || len == 0) return;
+    if (cell < 0 || cell >= pb->audio_n || !pb->audio_en[cell]) return;
+    if (pb->paused || pb->backward) return;   /* 倒放/暂停不出声 */
+    if (pb->speed_milli != 1000 || pb->frame_step) return; /* 仅 1X 正放送音 */
+
+    mhal_acodec_t ac = MHAL_ACODEC_AAC;
+    if (h->codec == RSDK_CODEC_AAC) ac = MHAL_ACODEC_AAC;
+    /* 其它 codec 枚举暂按 AAC 试;G711 写入后扩展 */
+    uint64_t ts_us = (uint64_t)h->wall_time * 1000000ULL;
+    (void)mhal_aout_send(ac, 0, data, len, ts_us);
+}
+
+/* 从 MAIN 轨旁路取音频(子流回放时音轨在主流 writer)。返回打开的 player,失败 NULL。 */
+static rsdk_group_player_t *pb_open_audio_player(nvr_playback_t *pb, int chn0, uint32_t start_wall)
+{
+    rsdk_index_slot_t *segs = (rsdk_index_slot_t *)malloc(sizeof(rsdk_index_slot_t) * PB_MAX_SEGS);
+    if (!segs) return NULL;
+    int nseg = pb_query_segs(pb, chn0, NVR_STREAM_MAIN, start_wall,
+                             pb->day_end_wall ? pb->day_end_wall + 1 : start_wall + 24 * 3600,
+                             segs, PB_MAX_SEGS);
+    rsdk_group_player_t *gp = NULL;
+    if (nseg > 0)
+        rsdk_group_play_open(pb->cfg.group, segs, nseg, &gp);
+    free(segs);
+    return gp;
+}
+
+/* 把 MAIN 音频 player 推到 master 附近并送出声。 */
+static void pb_drain_audio_player(nvr_playback_t *pb, int cell, rsdk_group_player_t *gp_au)
+{
+    if (!gp_au || !pb) return;
+    uint32_t mw = pb_master_wall(pb);
+    for (int guard = 0; guard < 64; guard++) {
+        rsdk_frame_hdr_t h; const uint8_t *data = NULL; uint32_t len = 0; int disk = 0, gap = 0;
+        if (rsdk_group_play_next2(gp_au, &h, &data, &len, &disk, &gap) != RSDK_OK) break;
+        if (h.rec_kind != RSDK_RK_FRAME) continue;
+        if ((uint32_t)h.wall_time + 1 < mw) continue;  /* 太旧跳过(追主时钟) */
+        if ((uint32_t)h.wall_time > mw + 1) break;     /* 超前 → 下次再取 */
+        if (h.frame_type == RSDK_FRAME_AUDIO)
+            pb_play_audio_frame(pb, cell, &h, data, len);
+    }
+}
+
 static int pb_peek_codec(nvr_playback_t *pb, int chn0, int want_stream,
                          uint32_t start_wall, int *codec)
 {
     rsdk_group_t *g = pb->cfg.group;
-    rsdk_index_slot_t *segs = (rsdk_index_slot_t*)malloc(sizeof(rsdk_index_slot_t)*PB_MAX_SEGS);
-    if(!segs) return -1;
-    int nseg = rsdk_group_query(g, start_wall, start_wall + 24*3600, chn0,
-                                RSDK_REC_CONTINUOUS, segs, PB_MAX_SEGS);
-    if(nseg<=0){ free(segs); return -1; }
-    rsdk_group_player_t *gp=NULL;
-    if(rsdk_group_play_open(g, segs, nseg, &gp)!=RSDK_OK || !gp){ free(segs); return -1; }
+    rsdk_index_slot_t *segs = (rsdk_index_slot_t *)malloc(sizeof(rsdk_index_slot_t) * PB_MAX_SEGS);
+    if (!segs) return -1;
+    int nseg = pb_query_segs(pb, chn0, want_stream, start_wall, start_wall + 24 * 3600, segs, PB_MAX_SEGS);
+    if (nseg <= 0) { free(segs); return -1; }
+    rsdk_group_player_t *gp = NULL;
+    if (rsdk_group_play_open(g, segs, nseg, &gp) != RSDK_OK || !gp) { free(segs); return -1; }
     free(segs);
     int rc = -1;
-    for(int guard=0; guard<4096; guard++){
-        rsdk_frame_hdr_t h; const uint8_t *data=NULL; uint32_t len=0; int disk=0, gap=0;
-        if(rsdk_group_play_next2(gp, &h, &data, &len, &disk, &gap)!=RSDK_OK) break;
-        if(h.frame_type==RSDK_FRAME_AUDIO) continue;
-        if((int)h.stream != want_stream) continue;
-        if((uint32_t)h.wall_time < start_wall) continue;
-        if(h.frame_type != RSDK_FRAME_I) continue;      /* 等首个 I 帧 */
+    for (int guard = 0; guard < 4096; guard++) {
+        rsdk_frame_hdr_t h; const uint8_t *data = NULL; uint32_t len = 0; int disk = 0, gap = 0;
+        if (rsdk_group_play_next2(gp, &h, &data, &len, &disk, &gap) != RSDK_OK) break;
+        if (h.rec_kind != RSDK_RK_FRAME) continue;
+        if (h.frame_type == RSDK_FRAME_AUDIO) continue;
+        if ((int)h.stream != want_stream) continue;
+        if ((uint32_t)h.wall_time < start_wall) continue;
+        if (h.frame_type != RSDK_FRAME_I) continue;
         *codec = h.codec; rc = 0; break;
     }
     rsdk_group_play_close(gp);
     return rc;
 }
 
-/* feeder(每通道一个):读该通道段组帧 → 过滤 → 喂**预开**的解码器 ctx->vdec(已绑本格),按 pts 节奏。
- * 解码器由 spawn 在 defer 批中开好并绑格,feeder 不再 open/commit(避免逐路成图触发"can't extend")。
- * pb->running=0 退出;vdec 由 stop 统一关。arg = pb_feeder_ctx_t*。 */
-static void *pb_feeder(void *arg)
+static void pb_set_notify(nvr_playback_t *pb, const char *msg)
 {
-    pb_feeder_ctx_t *ctx = (pb_feeder_ctx_t*)arg;
-    nvr_playback_t  *pb  = ctx->pb;
-    rsdk_group_t    *g   = pb->cfg.group;
-    int chn0 = ctx->chn0;
-    int cell = ctx->cell_idx;
-    int want_stream = ctx->want_stream;
-    uint32_t start_wall = pb->start_wall;
-    mhal_vdec_t *vdec = ctx->vdec;
-    if(!vdec) return NULL;
-
-    rsdk_index_slot_t *segs = (rsdk_index_slot_t*)malloc(sizeof(rsdk_index_slot_t)*PB_MAX_SEGS);
-    if(!segs) return NULL;
-    int nseg = rsdk_group_query(g, start_wall, start_wall + 24*3600, chn0,
-                                RSDK_REC_CONTINUOUS, segs, PB_MAX_SEGS);
-    if(nseg<=0){ free(segs); return NULL; }
-    rsdk_group_player_t *gp=NULL;
-    if(rsdk_group_play_open(g, segs, nseg, &gp)!=RSDK_OK || !gp){ free(segs); return NULL; }
-    free(segs);
-
-    /* ★ 送解码与 liveView(stream_router.c)**完全同一套**,只是数据源是录像:
-     *   ① nal_classify 分类每帧(纯参数集/关键帧/含参数);② 参数集持续缓存到 par;
-     *   ③ 缺参数的关键帧 → 拼上缓存 par 再送(否则解码器 scan 不到头);④ 纯参数集帧只缓存不单独送;
-     *   ⑤ 从关键帧起同步(synced,否则 P 帧参考链断花屏);⑥ 逐帧送,按 pts 共享时钟实时节奏。 */
-    uint8_t *par = (uint8_t*)malloc(65536);
-    if(!par){ rsdk_group_play_close(gp); __sync_sub_and_fetch(&pb->alive_feeders,1); return NULL; }
-    int par_len=0, par_building=0, synced=0, trace=0;
-    long base_ms=0; uint64_t base_pts=0, prev_pts=0;
-    NVR_LOGI("pb","chn%d ▶回放 格%d %s @%u", chn0+1, cell,
-             want_stream==NVR_STREAM_SUB?"子":"主", start_wall);
-
-    while(pb->running){
-        if(pb->paused){ usleep(40000); continue; }
-        rsdk_frame_hdr_t h; const uint8_t *data=NULL; uint32_t len=0; int disk=0, gap=0;
-        if(rsdk_group_play_next2(gp, &h, &data, &len, &disk, &gap)!=RSDK_OK) break;   /* 放完 */
-        if(h.frame_type==RSDK_FRAME_AUDIO) continue;             /* 跳音频 */
-        if((int)h.stream != want_stream)  continue;              /* 只放选中码流(主/子) */
-
-        nal_class_t nc; nal_classify(data, (int)len, (h.codec==RSDK_CODEC_H265)?1:0, &nc);
-
-        /* ① 参数集缓存(每帧,与是否解码无关):连续参数集 NAL 累积到 par。 */
-        if(nc.is_param){
-            if(!par_building){ par_len=0; par_building=1; }
-            if(par_len + (int)len <= 65536){ memcpy(par+par_len, data, len); par_len += len; }
-            continue;                                            /* 纯参数集帧:只缓存,不单独送 */
-        }
-        par_building = 0;
-
-        if((uint32_t)h.wall_time < start_wall) continue;         /* 跳到起播点 */
-
-        /* ② 缺参数的关键帧 → 拼上缓存 par(SPS/PPS/VPS)再送 */
-        const uint8_t *sbuf=data; uint32_t slen=len; uint8_t *tmp=NULL;
-        if(nc.is_key && !nc.has_param && par_len>0){
-            tmp = (uint8_t*)malloc((size_t)par_len + len);
-            if(tmp){ memcpy(tmp, par, par_len); memcpy(tmp+par_len, data, len); sbuf=tmp; slen=(uint32_t)par_len+len; }
-        }
-
-        int speed = pb->speed_num>0?pb->speed_num:1;
-        /* ③ 同步门控:从关键帧起(P 帧参考链需先有 IDR) */
-        if(!synced){
-            if(!nc.is_key){ if(tmp) free(tmp); continue; }
-            synced=1; base_pts=h.pts; prev_pts=h.pts;
-            /* 实际起播 wall 可能晚于请求点(空档 rsdk 返回下段)→ 重锚共享时钟到实际位置,免空睡。 */
-            if(!pb->clock_reanchored){
-                pb->play_base_ms=now_ms(); pb->play_base_wall=(uint32_t)h.wall_time; pb->clock_reanchored=1;
-                NVR_LOGI("pb","chn%d 共享时钟重锚 → 实际起播 wall=%u(请求 %u)", chn0+1, (uint32_t)h.wall_time, start_wall);
-            }
-            base_ms = pb->play_base_ms +
-                      (long)(((int64_t)((uint32_t)h.wall_time - pb->play_base_wall))*1000/speed);
-        }
-        /* 段边界/空档(pts 回退或前跳>10s):重锚现在播 + 共享时钟推进到本帧 wall(跳过空档) */
-        if(h.pts < prev_pts || (h.pts - prev_pts) > (uint64_t)90000*10){
-            base_pts=h.pts; base_ms=now_ms();
-            pb->play_base_ms=now_ms(); pb->play_base_wall=(uint32_t)h.wall_time;
-        }
-        prev_pts = h.pts;
-        /* ④ pts 平滑实时节奏 */
-        long target = base_ms + (long)(((int64_t)(h.pts - base_pts)/90)/speed);
-        long dt = target - now_ms();
-        while(dt > 0 && pb->running && !pb->paused){
-            long s = dt > 200 ? 200 : dt; usleep((useconds_t)(s*1000)); dt = target - now_ms();
-        }
-        int sr = mhal_vdec_send(vdec, sbuf, slen, (uint32_t)h.pts);
-        if(trace < 40){ NVR_LOGI("pbtr","chn%d SEND key=%d haspar=%d slen=%u ret=%d",
-                         chn0+1, nc.is_key, nc.has_param, slen, sr); trace++; }
-        if(tmp) free(tmp);
-        if((uint32_t)h.wall_time > pb->max_decoded_wall) pb->max_decoded_wall = (uint32_t)h.wall_time;
-    }
-    free(par);
-    rsdk_group_play_close(gp);
-    __sync_sub_and_fetch(&pb->alive_feeders, 1);   /* 本路放完/退出 → 存活计数减一 */
-    NVR_LOGI("pb","chn%d ■回放退出(格%d)", chn0+1, cell);
-    return NULL;
+    if (!msg || !msg[0]) { pb->notify[0] = 0; return; }
+    snprintf(pb->notify, sizeof(pb->notify), "%s", msg);
 }
 
-/* 请求的通道集是否与已开解码器一致(一致 → seek 复用解码器,不重建 8K 解码器)。 */
-static int pb_chlist_same(nvr_playback_t *pb)
+/* 能力检查 → PlaybackMsgNotify;返回 0=可播,-1=notSupport。 */
+static int pb_check_caps(nvr_playback_t *pb)
 {
-    if(!pb->dec_open || pb->dec_n != pb->ch_count) return 0;
-    for(int i=0;i<pb->ch_count && i<16;i++) if(pb->dec_chlist[i] != pb->ch_list[i]) return 0;
+    int maxch = nvr_gui_config_max_playback_channels();
+    int nch = pb->ch_count > 0 ? pb->ch_count : 1;
+    if (nch > maxch) {
+        char buf[128];
+        snprintf(buf, sizeof(buf),
+                 "Cannot support simultaneous playback more than %d channels.", maxch);
+        pb_set_notify(pb, buf);
+        snprintf(pb->status, sizeof(pb->status), "notSupport");
+        return -1;
+    }
+    /* 多宫格用子流;仅 mode0 主流 → 不会超过 2 路主流。若强制多路主流则提示。 */
+    if (pb->disp_mode == 0 && nch > 1) {
+        pb_set_notify(pb, "Cannot support playback more than 2 main streams.");
+        snprintf(pb->status, sizeof(pb->status), "notSupport");
+        return -1;
+    }
+    if (pb->speed_milli > 8000) {
+        pb_set_notify(pb, "Cannot support fast-forwarding greater than 8X.");
+        pb->speed_milli = 8000;
+        snprintf(pb->speed, sizeof(pb->speed), "8X");
+    }
+    /* 4K:预算装不下时在 open 阶段逐路跳过,这里对已知 4K 通道先提示 */
+    for (int i = 0; i < nch && i < NVR_PB_MAX_CELLS; i++) {
+        int chn0 = pb->ch_list[i] > 0 ? pb->ch_list[i] - 1 : -1;
+        if (chn0 < 0) continue;
+        int w = 0, h = 0, fps = 0;
+        int st = (pb->disp_mode == 0) ? NVR_STREAM_MAIN : NVR_STREAM_SUB;
+        nvr_stream_dim(pb->cfg.sm, chn0, st, &w, &h, &fps);
+        if (w >= 3840 && h >= 2160) {
+            double cost = mhal_budget_cost(w, h, fps > 0 ? fps : 15);
+            if (cost > mhal_budget_total()) {
+                char buf[128];
+                snprintf(buf, sizeof(buf), "Cannot support 4K decoding for Channel%d.", chn0 + 1);
+                pb_set_notify(pb, buf);
+                /* 不直接 notSupport 整场:其它路仍可播 */
+            }
+        }
+    }
+    return 0;
+}
+
+static int pb_send_vframe(nvr_playback_t *pb, pb_feeder_ctx_t *ctx, mhal_vdec_t *vdec,
+                          const uint8_t *data, uint32_t len, const rsdk_frame_hdr_t *h,
+                          uint8_t *par, int *par_len, int *par_building, int *synced,
+                          uint64_t *prev_pts, int *trace)
+{
+    nal_class_t nc; nal_classify(data, (int)len, (h->codec == RSDK_CODEC_H265) ? 1 : 0, &nc);
+    if (nc.is_param) {
+        if (!*par_building) { *par_len = 0; *par_building = 1; }
+        if (*par_len + (int)len <= 65536) { memcpy(par + *par_len, data, len); *par_len += (int)len; }
+        return 0;
+    }
+    *par_building = 0;
+
+    const uint8_t *sbuf = data; uint32_t slen = len; uint8_t *tmp = NULL;
+    if (nc.is_key && !nc.has_param && *par_len > 0) {
+        tmp = (uint8_t *)malloc((size_t)*par_len + len);
+        if (tmp) {
+            memcpy(tmp, par, (size_t)*par_len);
+            memcpy(tmp + *par_len, data, len);
+            sbuf = tmp; slen = (uint32_t)*par_len + len;
+        }
+    }
+    if (!*synced) {
+        if (!nc.is_key) { if (tmp) free(tmp); return 0; }
+        *synced = 1; *prev_pts = h->pts;
+        if (!pb->clock_reanchored) {
+            pb->play_base_ms = now_ms();
+            pb->play_base_wall = (uint32_t)h->wall_time;
+            pb->clock_reanchored = 1;
+        }
+    }
+    if (pb->i_only && !nc.is_key) { if (tmp) free(tmp); return 0; }
+
+    if (pb->backward) pb_wait_wall_bwd(pb, (uint32_t)h->wall_time);
+    else              pb_wait_wall_fwd(pb, (uint32_t)h->wall_time);
+
+    if (!pb->backward && *prev_pts && h->pts >= *prev_pts &&
+        (h->pts - *prev_pts) < (uint64_t)90000 * 2) {
+        int sm = pb->speed_milli > 0 ? pb->speed_milli : 1000;
+        long fine = (long)(((int64_t)(h->pts - *prev_pts) / 90) * 1000 / sm);
+        if (fine > 0 && fine < 80 && pb->running && !pb->paused)
+            usleep((useconds_t)(fine * 1000));
+    }
+    *prev_pts = h->pts;
+
+    int sr = mhal_vdec_send(vdec, sbuf, slen, (uint32_t)h->pts);
+    if (*trace < 20) {
+        NVR_LOGI("pbtr", "chn%d SEND key=%d slen=%u ret=%d wall=%u",
+                 ctx->chn0 + 1, nc.is_key, slen, sr, (uint32_t)h->wall_time);
+        (*trace)++;
+    }
+    if (tmp) free(tmp);
+    if ((uint32_t)h->wall_time > pb->max_decoded_wall) pb->max_decoded_wall = (uint32_t)h->wall_time;
+
+    if (pb->frame_step) {
+        pb->paused = 1; pb->pause_at_ms = now_ms();
+        snprintf(pb->status, sizeof(pb->status), "paused");
+    }
     return 1;
 }
 
-/* 为 ch_list 每通道开解码器绑格(defer 批一次成图),**不启 feeder**。须已持锁。
- * - 解码预算与 liveView 同一套(746 Mpix/s):按列表顺序准入,累计超预算即**停止**后续(留黑)。
- * - 多宫格(disp_mode>1)默认用**子流**回放(与 live 多格一致、开销小);单格/全屏用主流。
- * - 无录像的通道跳过(该格留黑),不影响其它路。 */
+/* 正放 feeder。 */
+static void *pb_feeder_fwd(void *arg)
+{
+    pb_feeder_ctx_t *ctx = (pb_feeder_ctx_t *)arg;
+    nvr_playback_t *pb = ctx->pb;
+    rsdk_group_t *g = pb->cfg.group;
+    int chn0 = ctx->chn0, cell = ctx->cell_idx, want_stream = ctx->want_stream;
+    uint32_t start_wall = pb->start_wall;
+    mhal_vdec_t *vdec = ctx->vdec;
+    if (!vdec) return NULL;
+
+    rsdk_index_slot_t *segs = (rsdk_index_slot_t *)malloc(sizeof(rsdk_index_slot_t) * PB_MAX_SEGS);
+    if (!segs) return NULL;
+    int nseg = pb_query_segs(pb, chn0, want_stream, start_wall, pb->day_end_wall + 1, segs, PB_MAX_SEGS);
+    if (nseg <= 0) { free(segs); return NULL; }
+    rsdk_group_player_t *gp = NULL;
+    if (rsdk_group_play_open(g, segs, nseg, &gp) != RSDK_OK || !gp) { free(segs); return NULL; }
+    free(segs);
+
+    uint8_t *par = (uint8_t *)malloc(65536);
+    if (!par) { rsdk_group_play_close(gp); __sync_sub_and_fetch(&pb->alive_feeders, 1); return NULL; }
+    int par_len = 0, par_building = 0, synced = 0, trace = 0;
+    uint64_t prev_pts = 0;
+
+    /* 子流视频时音轨在 MAIN writer → 旁路开 MAIN player 取 AAC(可中途 enable 再开) */
+    rsdk_group_player_t *gp_au = NULL;
+
+    NVR_LOGI("pb", "chn%d ▶回放 格%d %s @%u speed=%s%s", chn0 + 1, cell,
+             want_stream == NVR_STREAM_SUB ? "子" : "主", start_wall, pb->speed,
+             pb->i_only ? " I-only" : "");
+
+    while (pb->running) {
+        if (pb->paused) { usleep(40000); continue; }
+        if (pb->day_end_wall && pb_master_wall(pb) >= pb->day_end_wall) {
+            snprintf(pb->status, sizeof(pb->status), "stopped");
+            break;
+        }
+        /* 中途打开音频:子流旁路 MAIN */
+        if (!gp_au && want_stream != NVR_STREAM_MAIN &&
+            cell < pb->audio_n && pb->audio_en[cell])
+            gp_au = pb_open_audio_player(pb, chn0, pb_master_wall(pb));
+
+        rsdk_frame_hdr_t h; const uint8_t *data = NULL; uint32_t len = 0; int disk = 0, gap = 0;
+        if (rsdk_group_play_next2(gp, &h, &data, &len, &disk, &gap) != RSDK_OK) break;
+        if (h.rec_kind != RSDK_RK_FRAME) continue;
+
+        /* 主流交织音轨:直接出声 */
+        if (h.frame_type == RSDK_FRAME_AUDIO) {
+            pb_play_audio_frame(pb, cell, &h, data, len);
+            continue;
+        }
+        if ((int)h.stream != want_stream) continue;
+        if ((uint32_t)h.wall_time < start_wall) continue;
+        if (pb->day_end_wall && (uint32_t)h.wall_time > pb->day_end_wall) break;
+
+        if (gap) pb_wait_wall_fwd(pb, (uint32_t)h.wall_time);
+        {
+            uint32_t mw = pb_master_wall(pb);
+            if ((uint32_t)h.wall_time + 2 < mw && h.frame_type != RSDK_FRAME_I) continue;
+        }
+        pb_send_vframe(pb, ctx, vdec, data, len, &h, par, &par_len, &par_building,
+                       &synced, &prev_pts, &trace);
+
+        if (gp_au && cell < pb->audio_n && pb->audio_en[cell])
+            pb_drain_audio_player(pb, cell, gp_au);
+    }
+    free(par);
+    if (gp_au) rsdk_group_play_close(gp_au);
+    rsdk_group_play_close(gp);
+    __sync_sub_and_fetch(&pb->alive_feeders, 1);
+    NVR_LOGI("pb", "chn%d ■回放退出(格%d)", chn0 + 1, cell);
+    return NULL;
+}
+
+/* 倒放:预扫 I 帧索引,按 pts seek 逆序解显。 */
+static void *pb_feeder_bwd(void *arg)
+{
+    pb_feeder_ctx_t *ctx = (pb_feeder_ctx_t *)arg;
+    nvr_playback_t *pb = ctx->pb;
+    rsdk_group_t *g = pb->cfg.group;
+    int chn0 = ctx->chn0, want_stream = ctx->want_stream;
+    uint32_t start_wall = pb->start_wall;
+    mhal_vdec_t *vdec = ctx->vdec;
+    if (!vdec) return NULL;
+
+    uint32_t t0 = start_wall > 3600 ? start_wall - 3600 : 0; /* 倒放预扫最多 1 小时 */
+    if (pb->day_end_wall) {
+        uint32_t day0 = pb->day_end_wall - 86399;
+        if (t0 < day0) t0 = day0;
+    }
+
+    rsdk_index_slot_t *segs = (rsdk_index_slot_t *)malloc(sizeof(rsdk_index_slot_t) * PB_MAX_SEGS);
+    if (!segs) return NULL;
+    int nseg = pb_query_segs(pb, chn0, want_stream, t0, start_wall + 1, segs, PB_MAX_SEGS);
+    if (nseg <= 0) { free(segs); return NULL; }
+    rsdk_group_player_t *gp = NULL;
+    if (rsdk_group_play_open(g, segs, nseg, &gp) != RSDK_OK || !gp) { free(segs); return NULL; }
+
+    pb_ikey_t *keys = (pb_ikey_t *)malloc(sizeof(pb_ikey_t) * PB_IKEY_MAX);
+    int nk = 0;
+    if (keys) {
+        for (int guard = 0; guard < 500000 && nk < PB_IKEY_MAX; guard++) {
+            rsdk_frame_hdr_t h; const uint8_t *data = NULL; uint32_t len = 0; int disk = 0;
+            if (rsdk_group_play_next(gp, &h, &data, &len, &disk) != RSDK_OK) break;
+            if (h.rec_kind != RSDK_RK_FRAME) continue;
+            if (h.frame_type != RSDK_FRAME_I) continue;
+            if ((int)h.stream != want_stream) continue;
+            if ((uint32_t)h.wall_time < t0 || (uint32_t)h.wall_time > start_wall) continue;
+            keys[nk].wall = (uint32_t)h.wall_time;
+            keys[nk].pts = h.pts;
+            nk++;
+        }
+    }
+    rsdk_group_play_close(gp);
+    NVR_LOGI("pb", "chn%d ◀倒放 扫到 %d 个 I 帧", chn0 + 1, nk);
+
+    uint8_t *par = (uint8_t *)malloc(65536);
+    int par_len = 0, par_building = 0, synced = 0, trace = 0;
+    uint64_t prev_pts = 0;
+
+    for (int i = nk - 1; i >= 0 && pb->running; i--) {
+        while (pb->paused && pb->running) usleep(40000);
+        if (!pb->running) break;
+        if (rsdk_group_play_open(g, segs, nseg, &gp) != RSDK_OK || !gp) break;
+        rsdk_group_play_seek_pts(gp, keys[i].pts);
+        rsdk_frame_hdr_t h; const uint8_t *data = NULL; uint32_t len = 0; int disk = 0, gap = 0;
+        int got = 0;
+        for (int g2 = 0; g2 < 64; g2++) {
+            if (rsdk_group_play_next2(gp, &h, &data, &len, &disk, &gap) != RSDK_OK) break;
+            if (h.rec_kind != RSDK_RK_FRAME || h.frame_type != RSDK_FRAME_I) continue;
+            if ((int)h.stream != want_stream) continue;
+            got = 1; break;
+        }
+        if (got && par) {
+            pb_send_vframe(pb, ctx, vdec, data, len, &h, par, &par_len, &par_building,
+                           &synced, &prev_pts, &trace);
+        }
+        rsdk_group_play_close(gp); gp = NULL;
+        if (pb->frame_step) break;
+    }
+
+    free(par); free(keys); free(segs);
+    __sync_sub_and_fetch(&pb->alive_feeders, 1);
+    NVR_LOGI("pb", "chn%d ■倒放退出", chn0 + 1);
+    return NULL;
+}
+
+static void *pb_feeder(void *arg)
+{
+    pb_feeder_ctx_t *ctx = (pb_feeder_ctx_t *)arg;
+    if (ctx->pb->backward) return pb_feeder_bwd(arg);
+    return pb_feeder_fwd(arg);
+}
+
+static int pb_chlist_same(nvr_playback_t *pb)
+{
+    if (!pb->dec_open || pb->dec_n != pb->ch_count) return 0;
+    for (int i = 0; i < pb->ch_count && i < NVR_PB_MAX_CELLS; i++)
+        if (pb->dec_chlist[i] != pb->ch_list[i]) return 0;
+    return 1;
+}
+
 static void pb_open_decoders_locked(nvr_playback_t *pb)
 {
     pb->nth = 0;
     int nch = pb->ch_count > 0 ? pb->ch_count : 1;
-    if(nch > PB_MAX_FEED) nch = PB_MAX_FEED;
-    /* ★ 码流选择:只有 displayMode==0(全屏)放**主码流**;其余(1宫格及多宫格)都放**子码流**。 */
+    if (nch > PB_MAX_FEED) nch = PB_MAX_FEED;
     int want_stream = (pb->disp_mode == 0) ? NVR_STREAM_MAIN : NVR_STREAM_SUB;
     pb->want_stream = want_stream;
     double budget = mhal_budget_total(), used = 0;
 
-    /* ★ 全局单一使用者:开回放解码器前,活跃解码器应为 0(live 全停)。>0 = 有残留 live 解码器
-     *   竞争硬件 → 4 路回放 + 残留 → DEC_HW_TIMEOUT。此处强制再关一遍所有 live 解码,并记数诊断。 */
-    if(pb->cfg.sm) for(int i=0;i<PB_MAX_CH;i++) nvr_stream_set_display(pb->cfg.sm, i, -1);
-    NVR_LOGI("pb","回放开解码前:活跃解码器 %d(应为0=live已全停)", mhal_vdec_active_count());
+    if (pb->cfg.sm) for (int i = 0; i < PB_MAX_CH; i++) nvr_stream_set_display(pb->cfg.sm, i, -1);
+    NVR_LOGI("pb", "回放开解码前:活跃解码器 %d", mhal_vdec_active_count());
 
-    mhal_vout_defer_begin();     /* 批量开解码器:一次 stop_list→start_list 成图(避免逐路"can't extend") */
-    for(int i=0;i<nch;i++){
-        int chn0 = (pb->ch_count>0 && pb->ch_list[i]>0) ? pb->ch_list[i]-1
-                 : (pb->chn0>=0 ? pb->chn0 : i);
-        if(chn0 < 0) continue;
+    mhal_vout_defer_begin();
+    for (int i = 0; i < nch; i++) {
+        int chn0 = (pb->ch_count > 0 && pb->ch_list[i] > 0) ? pb->ch_list[i] - 1
+                 : (pb->chn0 >= 0 ? pb->chn0 : i);
+        if (chn0 < 0) continue;
         int codec = -1;
-        if(pb_peek_codec(pb, chn0, want_stream, pb->start_wall, &codec) != 0){
-            NVR_LOGW("pb","chn%d 起播 %u 无录像(该格留黑)", chn0+1, pb->start_wall);
+        if (pb_peek_codec(pb, chn0, want_stream, pb->start_wall, &codec) != 0) {
+            NVR_LOGW("pb", "chn%d 起播 %u 无录像(该格留黑)", chn0 + 1, pb->start_wall);
             continue;
         }
-        int w=0,ht=0,fps=0; nvr_stream_dim(pb->cfg.sm, chn0, want_stream, &w,&ht,&fps);
+        int w = 0, ht = 0, fps = 0; nvr_stream_dim(pb->cfg.sm, chn0, want_stream, &w, &ht, &fps);
         double cost = mhal_budget_cost(w, ht, fps);
-        if(cost > 0 && used + cost > budget){
-            NVR_LOGW("pb","预算已满(%.0f/%.0f Mpix/s):通道 %d 及之后不回放(留黑)",
-                     used/1e6, budget/1e6, chn0+1);
+        if (cost > 0 && used + cost > budget) {
+            char buf[128];
+            if (w >= 3840)
+                snprintf(buf, sizeof(buf), "Cannot support 4K decoding for Channel%d.", chn0 + 1);
+            else
+                snprintf(buf, sizeof(buf),
+                         "Cannot support simultaneous playback more than %d channels.", pb->nth);
+            pb_set_notify(pb, buf);
+            NVR_LOGW("pb", "预算已满:通道 %d 及之后不回放", chn0 + 1);
             break;
         }
-        mhal_codec_t mc = (codec==RSDK_CODEC_H265)?MHAL_CODEC_H265:MHAL_CODEC_H264;
-        NVR_LOGI("pb","chn%d 回放开解码 %s codec=%s %dx%d@%d 窗%d", chn0+1,
-                 want_stream==NVR_STREAM_SUB?"子":"主", codec==RSDK_CODEC_H265?"H265":"H264", w, ht, fps, i);
-        mhal_vdec_t *vd=NULL;
-        /* ★ 用宫格窗号 i 开(bind_vout_win=i,vout_win≥0):commit 的 start_list 只收 vout_win≥0 的路,
-         *   此刻就 bind_rect(会置 vout_win=-2)会被排除 → 解码器不启 → 送流 -33。故成图后再 bind_rect。 */
+        mhal_codec_t mc = (codec == RSDK_CODEC_H265) ? MHAL_CODEC_H265 : MHAL_CODEC_H264;
+        mhal_vdec_t *vd = NULL;
         int orc = mhal_vdec_open(chn0, mc, w, ht, fps, i, &vd);
-        if(orc!=0 || !vd){ NVR_LOGE("pb","chn%d 开解码失败 %d(该格留黑)", chn0+1, orc); continue; }
+        if (orc != 0 || !vd) { NVR_LOGE("pb", "chn%d 开解码失败 %d", chn0 + 1, orc); continue; }
         used += cost;
         pb_feeder_ctx_t *fc = &pb->fctx[pb->nth];
         fc->pb = pb; fc->chn0 = chn0; fc->cell_idx = i; fc->want_stream = want_stream;
         fc->vdec = vd; fc->thread_ok = 0;
         pb->nth++;
     }
-    mhal_vout_defer_end();       /* 一次成图:所有回放解码器同时 start_list 启好(vout_win≥0 才收) */
-    { int dw=0,dh=0; mhal_vout_get_resolution(&dw,&dh);
-      NVR_LOGI("pb","回放宫格计算:屏 %dx%d mode=%d 视频区 %dx%d", dw,dh, pb->disp_mode,
-               (pb->disp_mode==0)?dw:dw*4/5, (pb->disp_mode==0)?dh:dh*4/5); }
-    for(int k=0;k<pb->nth;k++){  /* 成图后精确摆到本格(bind_rect,已在 started 集合) */
-        int cx,cy,cw,chh; pb_cell_rect(pb, pb->fctx[k].cell_idx, &cx,&cy,&cw,&chh);
-        NVR_LOGI("pb","chn%d 格%d → 矩形(%d,%d %dx%d)", pb->fctx[k].chn0+1, pb->fctx[k].cell_idx, cx,cy,cw,chh);
+    for (int k = 0; k < pb->nth; k++) {
+        int cx, cy, cw, chh; pb_cell_rect(pb, pb->fctx[k].cell_idx, &cx, &cy, &cw, &chh);
         mhal_vout_bind_rect(pb->fctx[k].chn0, cx, cy, cw, chh);
     }
-    pb->dec_open = (pb->nth>0);
+    mhal_vout_defer_end();
+    pb->dec_open = (pb->nth > 0);
     pb->dec_n = pb->ch_count;
-    for(int i=0;i<pb->ch_count && i<16;i++) pb->dec_chlist[i] = pb->ch_list[i];
+    for (int i = 0; i < pb->ch_count && i < NVR_PB_MAX_CELLS; i++) pb->dec_chlist[i] = pb->ch_list[i];
 }
 
-/* 启 feeder 喂帧(解码器须已开好)。须已持锁。 */
 static void pb_start_feeders_locked(nvr_playback_t *pb)
 {
-    if(pb->nth<=0){ pb->running=0; snprintf(pb->status,sizeof(pb->status),"stopped"); return; }
+    if (pb->nth <= 0) { pb->running = 0; snprintf(pb->status, sizeof(pb->status), "stopped"); return; }
     pb->running = 1;
-    pb->alive_feeders = pb->nth;              /* 存活计数;归 0 = 全放完 → 停 */
-    pb->max_decoded_wall = pb->start_wall;    /* 时间轴 clamp 起点 */
-    for(int k=0;k<pb->nth;k++)
+    pb->alive_feeders = pb->nth;
+    pb->max_decoded_wall = pb->start_wall;
+    for (int k = 0; k < pb->nth; k++)
         pb->fctx[k].thread_ok = (pthread_create(&pb->th[k], NULL, pb_feeder, &pb->fctx[k]) == 0);
-    snprintf(pb->status,sizeof(pb->status),"playing");
+    snprintf(pb->status, sizeof(pb->status), "playing");
 }
 
-/* 停并 join 所有 feeder(**解码器留着**供 seek 复用)。须已持锁。 */
 static void pb_stop_feeders_locked(nvr_playback_t *pb)
 {
     pb->running = 0;
-    for(int i=0;i<pb->nth;i++)
-        if(pb->fctx[i].thread_ok){ pthread_join(pb->th[i], NULL); pb->fctx[i].thread_ok = 0; }
+    for (int i = 0; i < pb->nth; i++)
+        if (pb->fctx[i].thread_ok) { pthread_join(pb->th[i], NULL); pb->fctx[i].thread_ok = 0; }
 }
 
-/* 停 feeder + defer 批统一关解码器(一次成图收窗)。须已持锁。 */
 static void pb_close_decoders_locked(nvr_playback_t *pb)
 {
     pb_stop_feeders_locked(pb);
-    if(pb->nth>0){
+    if (pb->nth > 0) {
         mhal_vout_defer_begin();
-        for(int i=0;i<pb->nth;i++)
-            if(pb->fctx[i].vdec){ mhal_vdec_close(pb->fctx[i].vdec); pb->fctx[i].vdec=NULL; }
+        for (int i = 0; i < pb->nth; i++)
+            if (pb->fctx[i].vdec) { mhal_vdec_close(pb->fctx[i].vdec); pb->fctx[i].vdec = NULL; }
         mhal_vout_defer_end();
     }
     pb->nth = 0; pb->dec_open = 0; pb->dec_n = 0;
 }
 
-/* 进入回放模式:接管全屏窗口并**黑屏**(关 live 解码 + 清黑),不显示 LiveView。须已持锁。 */
 static void pb_blackout_locked(nvr_playback_t *pb, int chn0)
 {
-    /* 停**所有**通道的 live 解码 → 整屏让位给回放;清黑(默认先黑,play 才喂录像)。
-     * ★ 回放期间是**独占**模式:live 不再解码(preview 已由 setPlaybackMode 置 display_mode=0,
-     *   通道上线也不会重开 live),回 live 只由 setDeviceDisplayMode 触发。 */
-    if(pb->cfg.sm) for(int i=0;i<PB_MAX_CH;i++) nvr_stream_set_display(pb->cfg.sm, i, -1);
+    if (pb->cfg.sm) for (int i = 0; i < PB_MAX_CH; i++) nvr_stream_set_display(pb->cfg.sm, i, -1);
     mhal_vout_clear_black();
-    if(chn0>=0) pb->chn0 = chn0;
+    if (chn0 >= 0) pb->chn0 = chn0;
 }
 
-/* 停回放(停 feeder + 关解码器)+ 黑屏(**留在回放模式**;回 live 只由 setDeviceDisplayMode 触发)。须已持锁。 */
 static void pb_stop_locked(nvr_playback_t *pb)
 {
     pb_close_decoders_locked(pb);
     mhal_vout_clear_black();
+    mhal_aout_close();   /* 停回放时关喇叭通路 */
     pb->chn0 = -1;
-    snprintf(pb->status,sizeof(pb->status),"stopped");
+    snprintf(pb->status, sizeof(pb->status), "stopped");
 }
 
-/* 进入回放模式黑屏(供 GUI_setPlaybackMode:一进回放就黑,不显示 live)。 */
 void nvr_playback_enter(nvr_playback_t *pb, int chn1)
 {
-    if(!pb) return;
-    int chn0 = (chn1>0)? chn1-1 : (pb->chn0>=0?pb->chn0:0);
+    if (!pb) return;
+    int chn0 = (chn1 > 0) ? chn1 - 1 : (pb->chn0 >= 0 ? pb->chn0 : 0);
     pthread_mutex_lock(&pb->lock);
     pb_close_decoders_locked(pb);
     pb_blackout_locked(pb, chn0);
-    snprintf(pb->status,sizeof(pb->status),"stopped");
+    snprintf(pb->status, sizeof(pb->status), "stopped");
     pthread_mutex_unlock(&pb->lock);
 }
 
 int nvr_playback_create(const nvr_playback_cfg_t *cfg, nvr_playback_t **out)
 {
-    if(!cfg||!out) return -1;
-    nvr_playback_t *pb = (nvr_playback_t*)calloc(1,sizeof(*pb));
-    if(!pb) return -1;
-    pb->cfg = *cfg; pb->chn0=-1; pb->want_stream=NVR_STREAM_MAIN; pb->speed_num=1;
-    snprintf(pb->status,sizeof(pb->status),"stopped");
-    snprintf(pb->speed,sizeof(pb->speed),"1X");
-    snprintf(pb->direction,sizeof(pb->direction),"forward");
-    pthread_mutex_init(&pb->lock,NULL);
+    if (!cfg || !out) return -1;
+    nvr_playback_t *pb = (nvr_playback_t *)calloc(1, sizeof(*pb));
+    if (!pb) return -1;
+    pb->cfg = *cfg; pb->chn0 = -1; pb->want_stream = NVR_STREAM_MAIN;
+    pb->speed_milli = 1000; pb->audio_n = 4;
+    snprintf(pb->status, sizeof(pb->status), "stopped");
+    snprintf(pb->speed, sizeof(pb->speed), "1X");
+    snprintf(pb->direction, sizeof(pb->direction), "forward");
+    pthread_mutex_init(&pb->lock, NULL);
     *out = pb; return 0;
 }
 
 void nvr_playback_destroy(nvr_playback_t *pb)
 {
-    if(!pb) return;
+    if (!pb) return;
     pthread_mutex_lock(&pb->lock); pb_stop_locked(pb); pthread_mutex_unlock(&pb->lock);
     pthread_mutex_destroy(&pb->lock); free(pb);
 }
@@ -390,109 +681,176 @@ void nvr_playback_destroy(nvr_playback_t *pb)
 int nvr_playback_control(nvr_playback_t *pb, const char *action, int chn1,
                          uint32_t start_wall, const char *speed, const char *direction)
 {
-    if(!pb||!action) return -1;
+    if (!pb || !action) return -1;
     pthread_mutex_lock(&pb->lock);
-    if(speed&&speed[0])    { snprintf(pb->speed,sizeof(pb->speed),"%s",speed); pb->speed_num=parse_speed(speed); }
-    if(direction&&direction[0]){ snprintf(pb->direction,sizeof(pb->direction),"%s",direction);
-                                 pb->backward = (strcmp(direction,"backward")==0); }
+    pb_set_notify(pb, NULL);
 
-    int is_pause = (strcmp(action,"pause")==0);
-    int is_stop  = (strcmp(action,"stop")==0);
-    int is_play  = (strcmp(action,"play")==0) || (strcmp(action,"start")==0) || (strcmp(action,"seek")==0);
-    /* resume(从暂停继续):显式 resume,或 play 但已在放且暂停中且未带新起点(不重开文件,仅继续) */
-    int is_resume= (strcmp(action,"resume")==0) ||
-                   (is_play && pb->nth>0 && pb->paused && start_wall==0);
+    int old_bwd = pb->backward;
+    int frame = 0;
+    if (speed && speed[0]) {
+        snprintf(pb->speed, sizeof(pb->speed), "%s", speed);
+        pb->speed_milli = parse_speed(speed, &frame);
+        pb->frame_step = frame;
+        pb->i_only = (pb->speed_milli > 4000) || pb->backward;
+    }
+    if (direction && direction[0]) {
+        snprintf(pb->direction, sizeof(pb->direction), "%s", direction);
+        pb->backward = (strcmp(direction, "backward") == 0);
+        pb->i_only = (pb->speed_milli > 4000) || pb->backward;
+    }
 
-    if(is_pause){
-        if(pb->nth>0 && !pb->paused){ pb->paused=1; pb->pause_at_ms=now_ms();  /* 冻结共享时钟 */
-            snprintf(pb->status,sizeof(pb->status),"paused"); }
-    } else if(is_stop){
+    int is_pause = (strcmp(action, "pause") == 0);
+    int is_stop  = (strcmp(action, "stop") == 0);
+    int is_play  = (strcmp(action, "play") == 0) || (strcmp(action, "start") == 0) ||
+                   (strcmp(action, "seek") == 0);
+    int is_resume = (strcmp(action, "resume") == 0) ||
+                    (is_play && pb->nth > 0 && pb->paused && start_wall == 0 &&
+                     !pb->frame_step);
+
+    /* 同 startTime 仅改 speed/direction:不重开(doc);方向翻转则重启 feeder */
+    int same_seek = is_play && start_wall > 0 && start_wall == pb->start_wall &&
+                    pb->nth > 0 && (pb->running || pb->paused);
+
+    if (is_pause) {
+        if (pb->nth > 0 && !pb->paused) {
+            pb->paused = 1; pb->pause_at_ms = now_ms();
+            snprintf(pb->status, sizeof(pb->status), "paused");
+        }
+    } else if (is_stop) {
         pb_stop_locked(pb);
-    } else if(is_resume){
-        if(pb->paused){ if(pb->pause_at_ms){ pb->play_base_ms += now_ms()-pb->pause_at_ms; pb->pause_at_ms=0; }
-                        pb->paused=0; }
-        snprintf(pb->status,sizeof(pb->status),"playing");
-    } else if(is_play){  /* play / start / seek → 起播/换起点:ch_list 每通道各放各格 */
-        int chn0 = (chn1>0)? chn1-1 : (pb->ch_count>0 ? pb->ch_list[0]-1 : pb->chn0);
-        uint32_t sw = (start_wall>0)? start_wall : pb->start_wall;
-        if(sw==0 || (chn0<0 && pb->ch_count<=0)){ pthread_mutex_unlock(&pb->lock); return -1; }
-        pb_stop_feeders_locked(pb);              /* 停 feeder(解码器留着) */
-        pb->start_wall = sw;                     /* 供 peek/feeder 起点 */
-        if(!pb_chlist_same(pb)){                 /* 通道集变了才重建 8K 解码器(否则 seek 复用,免 -1/churn) */
+    } else if (same_seek) {
+        if (pb->paused) {
+            if (pb->pause_at_ms) { pb->play_base_ms += now_ms() - pb->pause_at_ms; pb->pause_at_ms = 0; }
+            pb->paused = 0;
+        }
+        if (old_bwd != pb->backward) {
+            pb_stop_feeders_locked(pb);
+            pb->play_base_ms = now_ms(); pb->play_base_wall = pb->start_wall;
+            pb->clock_reanchored = 0; pb->paused = 0; pb->pause_at_ms = 0;
+            pb_start_feeders_locked(pb);
+        }
+        snprintf(pb->status, sizeof(pb->status), "playing");
+    } else if (is_resume) {
+        if (pb->paused) {
+            if (pb->pause_at_ms) { pb->play_base_ms += now_ms() - pb->pause_at_ms; pb->pause_at_ms = 0; }
+            pb->paused = 0;
+        }
+        snprintf(pb->status, sizeof(pb->status), "playing");
+    } else if (is_play) {
+        if (pb_check_caps(pb) != 0) { pthread_mutex_unlock(&pb->lock); return 0; }
+        int chn0 = (chn1 > 0) ? chn1 - 1 : (pb->ch_count > 0 ? pb->ch_list[0] - 1 : pb->chn0);
+        uint32_t sw = (start_wall > 0) ? start_wall : pb->start_wall;
+        if (sw == 0 || (chn0 < 0 && pb->ch_count <= 0)) { pthread_mutex_unlock(&pb->lock); return -1; }
+        pb_stop_feeders_locked(pb);
+        pb->start_wall = sw;
+        pb->day_end_wall = day_end_of(sw);
+        if (!pb_chlist_same(pb)) {
             pb_close_decoders_locked(pb);
             pb_blackout_locked(pb, chn0);
             pb_open_decoders_locked(pb);
         }
-        /* ★ 每次 play 都按当前 disp_mode 重绑每格矩形(即使复用解码器):切布局后画面必落到新宫格,
-         *   不残留旧位置(liveView 按序填满,回放也须每次刷新格位)。 */
-        for(int k=0;k<pb->nth;k++){
-            int cx,cy,cw,chh; pb_cell_rect(pb, pb->fctx[k].cell_idx, &cx,&cy,&cw,&chh);
+        for (int k = 0; k < pb->nth; k++) {
+            int cx, cy, cw, chh; pb_cell_rect(pb, pb->fctx[k].cell_idx, &cx, &cy, &cw, &chh);
             mhal_vout_bind_rect(pb->fctx[k].chn0, cx, cy, cw, chh);
         }
-        pb->want_stream = (pb->disp_mode==0)?NVR_STREAM_MAIN:NVR_STREAM_SUB;
+        pb->want_stream = (pb->disp_mode == 0) ? NVR_STREAM_MAIN : NVR_STREAM_SUB;
         pb->paused = 0; pb->pause_at_ms = 0;
-        pb->play_base_ms = now_ms(); pb->play_base_wall = sw;   /* 共享时钟基准(首出帧可能重锚到实际位置) */
+        pb->play_base_ms = now_ms(); pb->play_base_wall = sw;
         pb->clock_reanchored = 0;
         pb->cur_wall = sw;
-        pb_start_feeders_locked(pb);             /* 拉 feeder 喂帧(复用/新建的解码器) */
+        pb->i_only = (pb->speed_milli > 4000) || pb->backward;
+        pb_start_feeders_locked(pb);
     }
-    /* status / 未知 action:仅回当前状态(下面统一取),不动引擎 —— 关键:status 轮询不得重起播! */
     pthread_mutex_unlock(&pb->lock);
     return 0;
 }
 
 void nvr_playback_set_mode(nvr_playback_t *pb, int display_mode, const int *channels1, int n)
 {
-    if(!pb) return;
+    if (!pb) return;
     pthread_mutex_lock(&pb->lock);
     pb->disp_mode = display_mode;
-    if(n>16) n=16; if(n<0) n=0;
+    if (n > NVR_PB_MAX_CELLS) n = NVR_PB_MAX_CELLS; if (n < 0) n = 0;
     pb->ch_count = n;
-    for(int i=0;i<n;i++) pb->ch_list[i] = channels1?channels1[i]:0;
-    /* 通道/布局变了 → 关旧解码器(下次 play 按新宫格重开)+ 黑屏接管;主放通道=列表首个 */
+    for (int i = 0; i < n; i++) pb->ch_list[i] = channels1 ? channels1[i] : 0;
+    /* 音频 enable[] 按格数伸缩:增加保旧,减少丢尾 */
+    int cells = pb_cell_count(display_mode == 0 ? 1 : display_mode);
+    if (cells > NVR_PB_MAX_CELLS) cells = NVR_PB_MAX_CELLS;
+    if (cells > pb->audio_n) {
+        for (int i = pb->audio_n; i < cells; i++) pb->audio_en[i] = 0;
+    }
+    pb->audio_n = cells;
+
     pb_close_decoders_locked(pb);
-    int chn0 = (n>0 && pb->ch_list[0]>0)? pb->ch_list[0]-1 : (pb->chn0>=0?pb->chn0:0);
+    int chn0 = (n > 0 && pb->ch_list[0] > 0) ? pb->ch_list[0] - 1 : (pb->chn0 >= 0 ? pb->chn0 : 0);
     pb_blackout_locked(pb, chn0);
-    snprintf(pb->status,sizeof(pb->status),"stopped");
+    snprintf(pb->status, sizeof(pb->status), "stopped");
     pthread_mutex_unlock(&pb->lock);
 }
 
 int nvr_playback_get_mode(nvr_playback_t *pb, int *channels_out, int cap, int *n)
 {
-    if(!pb) return 4;
+    if (!pb) return 4;
     pthread_mutex_lock(&pb->lock);
-    int dm = pb->disp_mode>0?pb->disp_mode:1;
-    int cnt = pb->ch_count>0?pb->ch_count:1;
-    if(cnt>cap) cnt=cap;
-    for(int i=0;i<cnt;i++) channels_out[i] = pb->ch_count>0?pb->ch_list[i]:(i+1);
-    if(n) *n=cnt;
+    int dm = pb->disp_mode > 0 ? pb->disp_mode : 1;
+    int cnt = pb->ch_count > 0 ? pb->ch_count : 1;
+    if (cnt > cap) cnt = cap;
+    for (int i = 0; i < cnt; i++) channels_out[i] = pb->ch_count > 0 ? pb->ch_list[i] : (i + 1);
+    if (n) *n = cnt;
     pthread_mutex_unlock(&pb->lock);
     return dm;
 }
 
-void nvr_playback_get_status(nvr_playback_t *pb, char *status, char *speed,
-                             char *direction, uint32_t *cur_wall)
+void nvr_playback_set_audio(nvr_playback_t *pb, const int *enable, int n)
 {
-    if(!pb) return;
+    if (!pb || !enable) return;
     pthread_mutex_lock(&pb->lock);
-    /* 所有 feeder 已退出(放完/无录像)→ 报 stopped(即使 pb->status 还写着 playing) */
-    int ended = (pb->nth>0 && pb->alive_feeders<=0 && !pb->paused);
-    if(status)    snprintf(status,16,"%s", ended ? "stopped" : pb->status);
-    if(speed)     snprintf(speed,16,"%s",pb->speed);
-    if(direction) snprintf(direction,16,"%s",pb->direction);
-    if(cur_wall){
-        /* ★ 时间轴 = **共享时钟**(平滑、不跳)但 clamp 到**已解码位置** max_decoded:
-         *   - 连续有图:共享时钟 ≤ 已解码 → 取共享时钟(平滑);
-         *   - 空档/放完:已解码停住 → 时间轴停在那(不空走 = 无录像不前进,修"无录像播放")。 */
+    if (n > NVR_PB_MAX_CELLS) n = NVR_PB_MAX_CELLS;
+    if (n < 0) n = 0;
+    for (int i = 0; i < n; i++) pb->audio_en[i] = enable[i] ? 1 : 0;
+    pb->audio_n = n;
+    pthread_mutex_unlock(&pb->lock);
+}
+
+int nvr_playback_get_audio(nvr_playback_t *pb, int *enable_out, int cap)
+{
+    if (!pb || !enable_out || cap <= 0) return 0;
+    pthread_mutex_lock(&pb->lock);
+    int n = pb->audio_n;
+    if (n > cap) n = cap;
+    if (n <= 0) { /* 默认按当前布局格数全静音 */
+        n = pb_cell_count(pb->disp_mode == 0 ? 1 : (pb->disp_mode > 0 ? pb->disp_mode : 4));
+        if (n > cap) n = cap;
+        for (int i = 0; i < n; i++) enable_out[i] = 0;
+    } else {
+        for (int i = 0; i < n; i++) enable_out[i] = pb->audio_en[i] ? 1 : 0;
+    }
+    pthread_mutex_unlock(&pb->lock);
+    return n;
+}
+
+void nvr_playback_get_status(nvr_playback_t *pb, char *status, char *speed,
+                             char *direction, uint32_t *cur_wall,
+                             char *notify, int notify_cap)
+{
+    if (!pb) return;
+    pthread_mutex_lock(&pb->lock);
+    int ended = (pb->nth > 0 && pb->alive_feeders <= 0 && !pb->paused);
+    if (status)    snprintf(status, 16, "%s", ended ? "stopped" : pb->status);
+    if (speed)     snprintf(speed, 16, "%s", pb->speed);
+    if (direction) snprintf(direction, 16, "%s", pb->direction);
+    if (notify && notify_cap > 0) {
+        if (pb->notify[0]) snprintf(notify, (size_t)notify_cap, "%s", pb->notify);
+        else notify[0] = 0;
+    }
+    if (cur_wall) {
         uint32_t cur;
-        int speed_n = pb->speed_num>0?pb->speed_num:1;
-        if(pb->nth<=0 || pb->play_base_ms==0) cur = pb->start_wall;
+        if (pb->nth <= 0 || pb->play_base_ms == 0) cur = pb->start_wall;
         else {
-            long ref = pb->pause_at_ms ? pb->pause_at_ms : now_ms();
-            long el = ref - pb->play_base_ms; if(el<0) el=0;
-            uint32_t sc = pb->play_base_wall + (uint32_t)((el/1000)*speed_n);   /* 共享时钟 */
+            uint32_t sc = pb_master_wall(pb);
             uint32_t md = pb->max_decoded_wall;
-            cur = (sc < md) ? sc : md;                                          /* clamp 到已解码 */
+            if (pb->backward) cur = (sc > md) ? sc : md; /* 倒放取较新解码边界 */
+            else cur = (sc < md) ? sc : md;
         }
         *cur_wall = cur;
     }

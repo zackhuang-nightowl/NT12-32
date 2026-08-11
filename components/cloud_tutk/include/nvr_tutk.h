@@ -1,10 +1,11 @@
 /***************************************************************************************
- *  nvr_tutk.h — ④ TUTK P2P glue（NVR 设备端）
+ *  nvr_tutk.h — ④ TUTK P2P glue（NVR 设备端 · P2PTunnel 端口映射）
  *
- *  NVR 作为 TUTK "设备"：登录 IOTC → 监听 App 连接 → 每会话开 AV server →
- *  把 streaming 的码流经 avSendFrameData 推给远程 App。
+ *  App 经 P2PTunnel 映射:
+ *    · NOP 命令 → localhost:nop_port (8089)
+ *    · Live RTSP → localhost:rtsp_port (554) → nvr_rtsp_live
  *
- *  底层：third_party/tutk_sdk（IOTCAPIs / AVAPIs / IOTCDevice / AVServer）。
+ *  IOTC auth key 经 get/setIotcAuthKey 写入设置库 tutk.authkey。
  ***************************************************************************************/
 #ifndef NVR_TUTK_H
 #define NVR_TUTK_H
@@ -15,22 +16,29 @@
 extern "C" {
 #endif
 
-/* 1) 初始化 + 设备登录（uid/auth_key 出厂写入或注册获取；见 config/cloud_tutk.json） */
-int  nvr_tutk_init(const char *uid, const char *auth_key);
+#define NVR_TUTK_AUTH_KEY_LEN 8
 
-/* 2) 起监听线程（等待 App 连接，接受即开 AV server） */
+typedef struct {
+    const char *uid;
+    const char *auth_key;       /* 8 字符 IOTC key;空串=无 key 登录 */
+    const char *license_key;    /* TUTK_SDK_Set_License_Key;可 NULL */
+    int         nop_port;       /* 默认 8089 */
+    int         rtsp_port;      /* 默认 554 */
+    int         max_sessions;   /* 默认 8 */
+} nvr_tutk_cfg_t;
+
+int  nvr_tutk_init(const nvr_tutk_cfg_t *cfg);
 int  nvr_tutk_start(void);
 void nvr_tutk_stop(void);
 void nvr_tutk_deinit(void);
 
-/* 3) 推一帧视频给所有在线会话（由 ③ streaming 的旁路调用；codec: 0=H264 1=H265） */
-int  nvr_tutk_send_video(int chn, const uint8_t *data, int len, int codec,
-                         int is_key, uint32_t ts_ms);
+/* 运行中更新 auth key(优先 IOTC_Device_Update_Authkey;失败则需 restart) */
+int  nvr_tutk_update_authkey(const char *auth_key);
 
-/* 在线客户端数（诊断/限流用） */
-int  nvr_tutk_online(void);
+int  nvr_tutk_running(void);
+int  nvr_tutk_online(void);    /* 当前 P2PTunnel/IOTC 会话数 */
 
 #ifdef __cplusplus
 }
 #endif
-#endif
+#endif /* NVR_TUTK_H */

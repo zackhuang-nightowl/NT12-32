@@ -2,7 +2,10 @@
  *  nvr_cmd_util.c — 见 nvr_cmd_util.h。
  ***************************************************************************************/
 #include "nvr_cmd_util.h"
+#include "nvr_cmd_internal.h"
+#include "nop_sdk/nop_app.h"
 #include <stdlib.h>
+#include <string.h>
 
 char *nvr_resp_status(int code, const char *msg)
 {
@@ -59,3 +62,25 @@ int nvr_jbool(const cJSON *o, const char *k, int d)
   if (!v) return d; if (cJSON_IsBool(v)) return cJSON_IsTrue(v); if (cJSON_IsNumber(v)) return v->valueint != 0; return d; }
 int nvr_jhas(const cJSON *o, const char *k)
 { return o && cJSON_GetObjectItem(o, k) ? 1 : 0; }
+
+char *nvr_cmd_nop_dispatch(cJSON *args, const nvr_cmd_ctx_t *ctx, const char *func)
+{
+    if (!ctx || !ctx->nop || !func) return nvr_resp_not_support();
+    cJSON *req = cJSON_CreateObject();
+    if (!req) return nvr_resp_err("oom");
+    cJSON_AddStringToObject(req, "func", func);
+    if (args) cJSON_AddItemToObject(req, "args", cJSON_Duplicate(args, 1));
+    else      cJSON_AddObjectToObject(req, "args");
+    char *json_in = cJSON_PrintUnformatted(req);
+    cJSON_Delete(req);
+    if (!json_in) return nvr_resp_err("oom");
+    char *nout = NULL;
+    int rc = nop_app_dispatch(ctx->nop, json_in, &nout);
+    free(json_in);
+    if (rc == 0 && nout) {
+        char *dup = strdup(nout);
+        nop_app_free_response(nout);
+        return dup ? dup : nvr_resp_err("oom");
+    }
+    return nvr_resp_not_support();
+}

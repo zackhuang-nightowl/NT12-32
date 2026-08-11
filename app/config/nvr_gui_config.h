@@ -29,6 +29,13 @@ int  nvr_gui_config_set_display(int mode, int page);
 /* 读通道容量 channels=[PoE, LAN](读不到给默认 16 / 16)。返回 0。 */
 int  nvr_gui_config_get_channels(int *poe_n, int *lan_n);
 
+/* 读回放宫格清单 allPlaybackDisplayModes(无则回落 allDisplayModes;再无则默认 1,4,9,16)。
+ * out 写模式值,返回个数(≤cap)。 */
+int  nvr_gui_config_get_playback_modes(int *out, int cap);
+
+/* 最大同屏回放路数:取 allPlaybackDisplayModes 最大值,并 clamp 到 PoE+LAN 容量。 */
+int  nvr_gui_config_max_playback_channels(void);
+
 #ifdef __cplusplus
 }
 #endif

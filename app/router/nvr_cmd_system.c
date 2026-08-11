@@ -5,7 +5,8 @@
 #include "nvr_cmd_util.h"
 #include "nvr_defaults.h"
 #include "nvr_log.h"
-#include "nvr_netime.h"   /* nvr_tz_install / nvr_time_push_cameras */
+#include "nvr_netime.h"
+#include "nvr_tutk.h"
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -231,4 +232,93 @@ char *cmd_GUI_setRemoteAccessState(cJSON *a, const nvr_cmd_ctx_t *c)
         cJSON_AddStringToObject(o, "result", "OK");
     }
     return nvr_resp_content(o);
+}
+
+/* ---- 功能列表 / 自动重启 / TUTK ---- */
+static int tutk_auth_key_valid(const char *v)
+{
+    if (!v) return 0;
+    size_t n = strlen(v);
+    if (n != NVR_TUTK_AUTH_KEY_LEN) return 0;
+    for (size_t i = 0; i < n; i++)
+        if (!((v[i] >= '0' && v[i] <= '9') ||
+              (v[i] >= 'A' && v[i] <= 'Z') ||
+              (v[i] >= 'a' && v[i] <= 'z')))
+            return 0;
+    return 1;
+}
+
+static const char *const g_feature_list[] = {
+    "General", "Encode", "Record", "Alarm", "Network",
+    "NetService", "OutputSettings", "Account", "RS232"
+};
+
+char *cmd_GUI_getFeatureList(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a; (void)c;
+    cJSON *o = cJSON_CreateObject();
+    cJSON *arr = cJSON_AddArrayToObject(o, "Restore");
+    for (size_t i = 0; i < sizeof(g_feature_list) / sizeof(g_feature_list[0]); i++)
+        cJSON_AddItemToArray(arr, cJSON_CreateString(g_feature_list[i]));
+    return nvr_resp_content(o);
+}
+
+char *cmd_GUI_getAutoRebootSetting(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a;
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddBoolToObject(o, "Enable", nvr_settings_get_int(c->settings, "system.auto_reboot.enable", 0));
+    cJSON_AddNumberToObject(o, "WhichDay", nvr_settings_get_int(c->settings, "system.auto_reboot.day", 0));
+    cJSON_AddNumberToObject(o, "WhichTime", nvr_settings_get_int(c->settings, "system.auto_reboot.time", 0));
+    return nvr_resp_content(o);
+}
+
+char *cmd_GUI_setAutoRebootSetting(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    if (!nvr_jhas(a, "Enable") || !nvr_jhas(a, "WhichDay") || !nvr_jhas(a, "WhichTime"))
+        return nvr_resp_err("invalid_param");
+    nvr_settings_set_int(c->settings, "system.auto_reboot.enable", nvr_jbool(a, "Enable", 0));
+    nvr_settings_set_int(c->settings, "system.auto_reboot.day", nvr_jint(a, "WhichDay", 0));
+    nvr_settings_set_int(c->settings, "system.auto_reboot.time", nvr_jint(a, "WhichTime", 0));
+    return nvr_resp_ok();
+}
+
+char *cmd_getIotcAuthKey(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a;
+    char key[NVR_TUTK_AUTH_KEY_LEN + 4];
+    nvr_settings_get_str(c->settings, "tutk.authkey", key, sizeof(key), "");
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "value", key);
+    return nvr_resp_content(o);
+}
+
+char *cmd_setIotcAuthKey(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    const char *value = nvr_jstr(a, "value", NULL);
+    if (!value || !tutk_auth_key_valid(value))
+        return nvr_resp_err("invalid_auth_key");
+    if (!c->settings || nvr_settings_set_str(c->settings, "tutk.authkey", value) != 0)
+        return nvr_resp_err("persist_failed");
+    NVR_LOGI("router", "setIotcAuthKey → %.8s", value);
+    return nvr_resp_ok();
+}
+
+char *cmd_GUI_getUID(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a;
+    char uid[64], sn[64], mac[32];
+    nvr_settings_get_str(c->settings, "tutk.uid", uid, sizeof(uid), "");
+    nvr_settings_get_str(c->settings, "system.sn", sn, sizeof(sn), "");
+    nvr_settings_get_str(c->settings, "system.mac", mac, sizeof(mac), "");
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "uid", uid);
+    cJSON_AddStringToObject(o, "serial", sn);
+    cJSON_AddStringToObject(o, "mac_address", mac);
+    return nvr_resp_content(o);
+}
+
+char *cmd_GUI_getSystemLog(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    return nvr_cmd_nop_dispatch(a, c, "GUI_getSystemLog");
 }

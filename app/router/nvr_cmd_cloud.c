@@ -54,3 +54,8 @@ char *cmd_getCloudRecordConfigs(cJSON *a, const nvr_cmd_ctx_t *c)
     }
     return nvr_resp_content(o);
 }
+
+char *cmd_getCloudRecordSwitch(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    return cmd_X_NightOwl_getCloudRecordSwitch(a, c);
+}

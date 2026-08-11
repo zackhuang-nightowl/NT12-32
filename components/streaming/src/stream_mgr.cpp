@@ -184,7 +184,7 @@ extern "C" rsdk_err_t nvr_stream_set_record(nvr_stream_mgr_t *m, int chn, int on
      *       通道拆除(puller 已停)时才由 stream_router_close 关,无竞态。 */
     c->cfg.record = on;
     if (on) {
-        if (!c->writer) stream_open_writer(c, m->cfg.group);
+        if (!c->writer_main || !c->writer_sub) stream_open_writer(c, m->cfg.group);
         c->rec_gated_main = 0; c->rec_gated_sub = 0;
     }
     return RSDK_OK;
@@ -197,7 +197,7 @@ extern "C" uint32_t nvr_stream_recording_mask(nvr_stream_mgr_t *m)
     uint32_t mask = 0;
     if (!m) return 0;
     for (int i = 0; i < NVR_MAX_CH && i < 32; i++)
-        if (m->used[i] && m->ch[i].writer && m->ch[i].cfg.record) mask |= (1u << i);  /* 开关关=不算录像中 */
+        if (m->used[i] && (m->ch[i].writer_main || m->ch[i].writer_sub) && m->ch[i].cfg.record) mask |= (1u << i);  /* 开关关=不算录像中 */
     return mask;
 }
 
@@ -213,7 +213,7 @@ extern "C" rsdk_err_t nvr_stream_mgr_set_group(nvr_stream_mgr_t *m, rsdk_group_t
         if (!m->used[i]) continue;
         stream_chan_t *c = &m->ch[i];
         c->grp = group;
-        if (group && c->cfg.record && !c->writer) { stream_open_writer(c, group); opened++; }
+        if (group && c->cfg.record && (!c->writer_main || !c->writer_sub)) { stream_open_writer(c, group); opened++; }
     }
     NVR_LOGI("stream", "set_group: 更新录像盘组, 补开 %d 路 writer", opened);
     return RSDK_OK;
@@ -237,7 +237,7 @@ extern "C" uint32_t nvr_stream_mgr_pause_recording(nvr_stream_mgr_t *m)
     int closed = 0;
     for (int i = 0; i < NVR_MAX_CH; i++) {
         if (!m->used[i]) continue;
-        if (m->ch[i].writer) { stream_close_writer(&m->ch[i]); closed++; }
+        if (m->ch[i].writer_main || m->ch[i].writer_sub) { stream_close_writer(&m->ch[i]); closed++; }
     }
     NVR_LOGW("stream", "格式化暂停写盘:置 record=0 + 关闭 %d 路 writer(盘静默)", closed);
     return was;

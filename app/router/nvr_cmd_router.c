@@ -154,6 +154,7 @@ int nvr_cmd_router_start(const nvr_cmd_router_cfg_t *cfg, nvr_cmd_router_t **out
     r->ctx.stg      = cfg->stg;
     r->ctx.sm       = cfg->sm;
     r->ctx.group    = cfg->group;
+    r->ctx.meta     = cfg->meta;
     r->ctx.nop      = cfg->nop;
     r->ctx.pv       = cfg->pv;
     r->ctx.pb       = cfg->pb;

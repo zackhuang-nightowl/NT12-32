@@ -24,6 +24,10 @@ int         nvr_jint (const cJSON *o, const char *k, int d);
 int         nvr_jbool(const cJSON *o, const char *k, int d);
 int         nvr_jhas (const cJSON *o, const char *k);
 
+/* 回落 components/nop cap handler(LOCAL 表命中后仍走 NVR 进程内 nop_app)。 */
+struct nvr_cmd_ctx_t;
+char *nvr_cmd_nop_dispatch(cJSON *args, const struct nvr_cmd_ctx_t *ctx, const char *func);
+
 #ifdef __cplusplus
 }
 #endif

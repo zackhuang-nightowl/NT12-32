@@ -175,12 +175,13 @@ rsdk_err_t rsdk_balance_pick(rsdk_group_t *g, int chn, rsdk_dev_t **picked) {
 
 /* ==================== 多盘回放 ==================== */
 
-int rsdk_group_query(rsdk_group_t *g, uint32_t t0, uint32_t t1, int chn,
-                     int rectype, rsdk_index_slot_t *out, int cap) {
+int rsdk_group_query_stream(rsdk_group_t *g, uint32_t t0, uint32_t t1, int chn,
+                            int rectype, int stream, rsdk_index_slot_t *out, int cap) {
     if (!g || !out || cap <= 0) return 0;
     int total = 0;
     for (int i = 0; i < g->n && total < cap; i++) {
-        int got = rsdk_index_query(g->devs[i], t0, t1, chn, rectype, out + total, cap - total);
+        int got = rsdk_index_query_stream(g->devs[i], t0, t1, chn, rectype, stream,
+                                          out + total, cap - total);
         for (int k = 0; k < got; k++) out[total + k].start_disk = (uint16_t)i; /* 重写为数组下标 */
         total += got;
     }
@@ -188,6 +189,11 @@ int rsdk_group_query(rsdk_group_t *g, uint32_t t0, uint32_t t1, int chn,
     for (int a = 0; a < total; a++) for (int b = a + 1; b < total; b++)
         if (out[b].start_time < out[a].start_time) { rsdk_index_slot_t t = out[a]; out[a] = out[b]; out[b] = t; }
     return total;
+}
+
+int rsdk_group_query(rsdk_group_t *g, uint32_t t0, uint32_t t1, int chn,
+                     int rectype, rsdk_index_slot_t *out, int cap) {
+    return rsdk_group_query_stream(g, t0, t1, chn, rectype, -1, out, cap);
 }
 
 struct rsdk_group_player {

@@ -11,6 +11,7 @@
 
 struct rsdk_writer {
     rsdk_dev_t *d; rsdk_group_t *group; int chn, rectype;
+    int      stream;             /* 0主/1子(写入索引 slot.stream) */
     uint32_t seg_id;
     uint64_t chunk, base_off; uint32_t cur_off;   /* 当前段所在 chunk + 段内偏移 */
     uint32_t frame_seq, frame_count;
@@ -70,6 +71,7 @@ static void fill_slot(rsdk_writer_t *w, rsdk_index_slot_t *s, int closed) {
     s->end_disk = s->start_disk;
     s->start_chunk = w->chunk; s->start_off = 0;
     s->end_chunk = w->chunk; s->end_off = w->end_off;
+    s->stream = (uint8_t)(w->stream & 0xFF);
 }
 
 static rsdk_err_t finalize_seg(rsdk_writer_t *w) {
@@ -93,14 +95,24 @@ rsdk_err_t rsdk_rec_open(rsdk_dev_t *d, int chn, int rectype, rsdk_writer_t **ou
 }
 
 rsdk_err_t rsdk_rec_open_group(rsdk_group_t *g, int chn, int rectype, rsdk_writer_t **out) {
+    return rsdk_rec_open_group_stream(g, chn, rectype, 0, out);
+}
+
+rsdk_err_t rsdk_rec_open_group_stream(rsdk_group_t *g, int chn, int rectype, int stream,
+                                      rsdk_writer_t **out) {
     if (!g || !out) return RSDK_E_PARAM;
     rsdk_writer_t *w = calloc(1, sizeof *w);
     if (!w) return RSDK_E_IO;
     w->group = g; w->chn = chn; w->rectype = rectype;
+    w->stream = (stream < 0) ? 0 : stream;
     rsdk_err_t rc = start_seg(w);
     if (rc) { free(w); return rc; }
     *out = w;
     return RSDK_OK;
+}
+
+void rsdk_rec_set_stream(rsdk_writer_t *w, int stream) {
+    if (w && w->frame_count == 0) w->stream = (stream < 0) ? 0 : stream;
 }
 
 uint32_t rsdk_rec_seg_id(rsdk_writer_t *w) { return w ? w->seg_id : 0; }

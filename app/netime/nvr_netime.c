@@ -1,21 +1,32 @@
 /***************************************************************************************
  *  nvr_netime.c — 网络与时间应用。见 nvr_netime.h。
- *  说明：调用设备上的 busybox 工具(ip/udhcpc/udhcpd/ntpd)。工具缺失则记警告不致命。
+ *  网络：读 Linux 实时状态(getifaddrs/sysfs/proc/resolv.conf);写用 na51090 BusyBox
+ *        (ifconfig/route/vconfig/udhcpc/udhcpd),与 SDK S10_Net + default.script 一致。
  ***************************************************************************************/
 #include "nvr_netime.h"
 #include "nvr_defaults.h"
 #include "nvr_log.h"
 #include "nvr_onvif.h"      /* nvr_onvif_set_time_now:给相机 ONVIF 授时 */
+#include "nvr_channel.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <time.h>
 #include <sys/time.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <dirent.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <fcntl.h>
+#include <errno.h>
 
 static int g_synced = 0;
 static volatile int g_ntp_busy = 0;   /* 一次只跑一个 ntpd 线程,防堆积 */
@@ -28,26 +39,341 @@ static int run(const char *fmt, ...)
     return system(cmd);
 }
 
+#define NVR_ETH0 "eth0"
+#define NVR_ETH1 "eth1"
+#define NVR_UDHCPC_SCRIPT "/usr/share/udhcpc/default.script"
+
+static int is_dhcp_type(const char *network_type)
+{
+    return network_type && strcasecmp(network_type, "DHCP") == 0;
+}
+
+static int read_iface_oper_up(const char *ifname);
+
+/* /proc 扫描:eth0 上是否有 udhcpc 在跑(实时 DHCP 判定) */
+static int eth0_udhcpc_running(void)
+{
+    DIR *d = opendir("/proc");
+    if (!d) return 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (de->d_name[0] < '1' || de->d_name[0] > '9') continue;
+        char path[64], buf[256];
+        snprintf(path, sizeof(path), "/proc/%s/cmdline", de->d_name);
+        FILE *f = fopen(path, "rb");
+        if (!f) continue;
+        size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        if (n == 0) continue;
+        buf[n] = 0;
+        for (size_t i = 0; i + 1 < n; i++)
+            if (buf[i] == 0) buf[i] = ' ';
+        if (strstr(buf, "udhcpc") && strstr(buf, NVR_ETH0)) {
+            closedir(d);
+            return 1;
+        }
+    }
+    closedir(d);
+    return 0;
+}
+
+static void flush_default_route(const char *ifname)
+{
+    run("while route del default gw 0.0.0.0 dev %s 2>/dev/null; do :; done", ifname);
+}
+
+static int proc_has_process(const char *name)
+{
+    DIR *d = opendir("/proc");
+    if (!d || !name || !name[0]) return 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (de->d_name[0] < '1' || de->d_name[0] > '9') continue;
+        char path[64], buf[256];
+        snprintf(path, sizeof(path), "/proc/%s/cmdline", de->d_name);
+        FILE *f = fopen(path, "rb");
+        if (!f) continue;
+        size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        if (n == 0) continue;
+        buf[n] = 0;
+        for (size_t i = 0; i + 1 < n; i++)
+            if (buf[i] == 0) buf[i] = ' ';
+        if (strstr(buf, name)) { closedir(d); return 1; }
+    }
+    closedir(d);
+    return 0;
+}
+
+static int read_iface_mac(const char *ifname, char *mac, int cap)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/sys/class/net/%s/address", ifname ? ifname : NVR_ETH0);
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    if (!fgets(mac, cap, f)) { fclose(f); return -1; }
+    fclose(f);
+    size_t n = strlen(mac);
+    if (n && mac[n - 1] == '\n') mac[n - 1] = 0;
+    return mac[0] ? 0 : -1;
+}
+
+static int read_iface_ipv4(const char *ifname, char *ip, int ip_cap, char *mask, int mask_cap)
+{
+    struct ifaddrs *ifa = NULL, *it;
+    if (ip) ip[0] = 0;
+    if (mask) mask[0] = 0;
+    if (getifaddrs(&ifa) != 0) return -1;
+    for (it = ifa; it; it = it->ifa_next) {
+        if (!it->ifa_addr || it->ifa_addr->sa_family != AF_INET) continue;
+        if (strcmp(it->ifa_name, ifname ? ifname : NVR_ETH0) != 0) continue;
+        char buf[64];
+        void *addr = &((struct sockaddr_in *)it->ifa_addr)->sin_addr;
+        inet_ntop(AF_INET, addr, buf, sizeof(buf));
+        if (ip && ip_cap > 0) snprintf(ip, (size_t)ip_cap, "%s", buf);
+        if (it->ifa_netmask && mask && mask_cap > 0) {
+            addr = &((struct sockaddr_in *)it->ifa_netmask)->sin_addr;
+            inet_ntop(AF_INET, addr, buf, sizeof(buf));
+            snprintf(mask, (size_t)mask_cap, "%s", buf);
+        }
+        freeifaddrs(ifa);
+        return 0;
+    }
+    freeifaddrs(ifa);
+    return -1;
+}
+
+static int read_default_gw(const char *ifname, char *gw, int cap)
+{
+    FILE *f = fopen("/proc/net/route", "r");
+    if (!f) return -1;
+    char line[256];
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
+    while (fgets(line, sizeof(line), f)) {
+        char iface[32];
+        unsigned long dest = 0, gwh = 0;
+        if (sscanf(line, "%31s\t%lx\t%lx", iface, &dest, &gwh) < 3 || dest != 0 || gwh == 0)
+            continue;
+        if (ifname && ifname[0] && strcmp(iface, ifname) != 0)
+            continue;
+        unsigned a = (gwh >> 24) & 0xff, b = (gwh >> 16) & 0xff, c = (gwh >> 8) & 0xff, d = gwh & 0xff;
+        snprintf(gw, (size_t)cap, "%u.%u.%u.%u", a, b, c, d);
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    return -1;
+}
+
+static void read_dns(char *dns1, int c1, char *dns2, int c2)
+{
+    if (dns1) dns1[0] = 0;
+    if (dns2) dns2[0] = 0;
+    FILE *f = fopen("/etc/resolv.conf", "r");
+    if (!f) return;
+    char line[128];
+    while (fgets(line, sizeof(line), f)) {
+        char ns[64];
+        if (sscanf(line, " nameserver %63s", ns) != 1 && sscanf(line, "nameserver %63s", ns) != 1)
+            continue;
+        if (dns1 && !dns1[0] && c1 > 0) snprintf(dns1, (size_t)c1, "%s", ns);
+        else if (dns2 && !dns2[0] && c2 > 0) { snprintf(dns2, (size_t)c2, "%s", ns); break; }
+    }
+    fclose(f);
+}
+
+static void apply_dns(const char *dns1, const char *dns2)
+{
+    FILE *f = fopen("/etc/resolv.conf", "w");
+    if (!f) return;
+    if (dns1 && dns1[0]) fprintf(f, "nameserver %s\n", dns1);
+    if (dns2 && dns2[0]) fprintf(f, "nameserver %s\n", dns2);
+    fclose(f);
+}
+
+static void local_link_from_eth0_kv(nvr_settings_t *s, nvr_local_link_t *lk)
+{
+    int dhcp = nvr_settings_get_int(s, "network.eth0.dhcp", 1);
+    snprintf(lk->network_type, sizeof(lk->network_type), "%s", dhcp ? "DHCP" : "Static");
+    nvr_settings_get_str(s, "network.eth0.ip",   lk->ip,          sizeof(lk->ip),          NVR_DEF_ETH0_IP);
+    nvr_settings_get_str(s, "network.eth0.mask", lk->subnet_mask, sizeof(lk->subnet_mask), NVR_DEF_ETH0_MASK);
+    nvr_settings_get_str(s, "network.eth0.gw",   lk->gateway,     sizeof(lk->gateway),     "");
+    if (!lk->dns1[0]) snprintf(lk->dns1, sizeof(lk->dns1), "8.8.8.8");
+    if (!lk->dns2[0]) snprintf(lk->dns2, sizeof(lk->dns2), "8.8.4.4");
+}
+
+static void sync_local_link_to_eth0_kv(nvr_settings_t *s, const nvr_local_link_t *lk)
+{
+    int dhcp = is_dhcp_type(lk->network_type);
+    nvr_settings_set_int(s, "network.eth0.dhcp", dhcp);
+    if (!dhcp) {
+        nvr_settings_set_str(s, "network.eth0.ip",   lk->ip);
+        nvr_settings_set_str(s, "network.eth0.mask", lk->subnet_mask);
+        nvr_settings_set_str(s, "network.eth0.gw",   lk->gateway);
+    }
+}
+
+static int read_iface_link_mbps(const char *ifname)
+{
+    char path[64], buf[16];
+    if (!ifname || !ifname[0]) return -1;
+    snprintf(path, sizeof(path), "/sys/class/net/%s/speed", ifname);
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    if (!fgets(buf, sizeof(buf), f)) { fclose(f); return -1; }
+    fclose(f);
+    int mbps = atoi(buf);
+    return mbps > 0 ? mbps : -1;
+}
+
+int nvr_net_eth0_link_mbps(void)
+{
+    return read_iface_link_mbps(NVR_ETH0);
+}
+
+int nvr_net_lan_bandwidth_mbps(int *total_mbps, int *max_rx_mbps)
+{
+    int mbps = read_iface_link_mbps(NVR_ETH0);
+    if (mbps <= 0) return -1;
+    if (total_mbps) *total_mbps = mbps;
+    if (max_rx_mbps) *max_rx_mbps = mbps;
+    return 0;
+}
+
+static int is_wifi_iface(const char *name)
+{
+    return name && (strncmp(name, "wlan", 4) == 0 || strncmp(name, "wl", 2) == 0);
+}
+
+static int is_eth_iface(const char *name)
+{
+    return name && strncmp(name, "eth", 3) == 0;
+}
+
+int nvr_net_wan_fill(nvr_wan_if_info_t *out)
+{
+    if (!out) return -1;
+    memset(out, 0, sizeof(*out));
+
+    int has_eth = 0, has_wifi = 0, eth_up = 0, wifi_up = 0;
+    DIR *d = opendir("/sys/class/net");
+    if (!d) return -1;
+
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        const char *name = de->d_name;
+        if (!name[0] || name[0] == '.') continue;
+        if (strcmp(name, "lo") == 0) continue;
+
+        int up = read_iface_oper_up(name);
+        if (is_wifi_iface(name)) {
+            has_wifi = 1;
+            if (up) wifi_up = 1;
+        } else if (is_eth_iface(name)) {
+            has_eth = 1;
+            if (strcmp(name, NVR_ETH0) == 0 && up) eth_up = 1;
+        }
+    }
+    closedir(d);
+
+    if (!has_eth && !has_wifi) {
+        has_eth = 1;
+        snprintf(out->value, sizeof(out->value), "eth");
+        out->list[out->list_n++] = "eth";
+        return 0;
+    }
+
+    if (has_eth) out->list[out->list_n++] = "eth";
+    if (has_wifi) out->list[out->list_n++] = "wifi";
+
+    if (eth_up)
+        snprintf(out->value, sizeof(out->value), "eth");
+    else if (wifi_up)
+        snprintf(out->value, sizeof(out->value), "wifi");
+    else
+        snprintf(out->value, sizeof(out->value), has_eth ? "eth" : "wifi");
+
+    if (eth_up) out->connected[out->conn_n++] = "eth";
+    if (wifi_up) out->connected[out->conn_n++] = "wifi";
+    return 0;
+}
+
+int nvr_net_local_link_fill(nvr_settings_t *s, nvr_local_link_t *out)
+{
+    if (!s || !out) return -1;
+    memset(out, 0, sizeof(*out));
+    if (nvr_settings_local_link_get(s, out) != 0)
+        local_link_from_eth0_kv(s, out);
+
+    /* GET 以 Linux 实时状态为准(设置库仅作缺省/持久化) */
+    read_iface_mac(NVR_ETH0, out->mac, sizeof(out->mac));
+
+    char lip[64], lmask[64], lgw[64], d1[64], d2[64];
+    if (read_iface_ipv4(NVR_ETH0, lip, sizeof(lip), lmask, sizeof(lmask)) == 0) {
+        if (lip[0])  snprintf(out->ip, sizeof(out->ip), "%s", lip);
+        if (lmask[0]) snprintf(out->subnet_mask, sizeof(out->subnet_mask), "%s", lmask);
+    }
+    if (read_default_gw(NVR_ETH0, lgw, sizeof(lgw)) == 0 && lgw[0])
+        snprintf(out->gateway, sizeof(out->gateway), "%s", lgw);
+
+    read_dns(d1, sizeof(d1), d2, sizeof(d2));
+    if (d1[0]) snprintf(out->dns1, sizeof(out->dns1), "%s", d1);
+    if (d2[0]) snprintf(out->dns2, sizeof(out->dns2), "%s", d2);
+
+    if (eth0_udhcpc_running())
+        snprintf(out->network_type, sizeof(out->network_type), "DHCP");
+    else if (!out->network_type[0])
+        snprintf(out->network_type, sizeof(out->network_type), "Static");
+
+    if (!out->subnet_mask[0]) snprintf(out->subnet_mask, sizeof(out->subnet_mask), "%s", NVR_DEF_ETH0_MASK);
+    return 0;
+}
+
+int nvr_net_apply_eth0(nvr_settings_t *s)
+{
+    if (!s) return -1;
+    nvr_local_link_t lk;
+    nvr_net_local_link_fill(s, &lk);
+
+    if (is_dhcp_type(lk.network_type)) {
+        run("killall udhcpc 2>/dev/null");
+        run("ifconfig %s up 2>/dev/null", NVR_ETH0);
+        run("udhcpc -i %s -b -q -s %s 2>/dev/null &", NVR_ETH0, NVR_UDHCPC_SCRIPT);
+        NVR_LOGI("net", "%s = DHCP (udhcpc)", NVR_ETH0);
+    } else {
+        run("killall udhcpc 2>/dev/null");
+        run("ifconfig %s %s netmask %s up 2>/dev/null", NVR_ETH0, lk.ip, lk.subnet_mask);
+        flush_default_route(NVR_ETH0);
+        if (lk.gateway[0])
+            run("route add default gw %s dev %s 2>/dev/null", lk.gateway, NVR_ETH0);
+        NVR_LOGI("net", "%s = 静态 %s/%s gw=%s", NVR_ETH0, lk.ip, lk.subnet_mask, lk.gateway);
+    }
+    apply_dns(lk.dns1, lk.dns2);
+    return 0;
+}
+
+int nvr_net_local_link_apply(nvr_settings_t *s, const nvr_local_link_t *in)
+{
+    if (!s || !in) return -1;
+    if (!is_dhcp_type(in->network_type)) {
+        if (!in->ip[0] || !in->subnet_mask[0])
+            return -1;
+    }
+    nvr_local_link_t row = *in;
+    if (!row.mac[0]) read_iface_mac(NVR_ETH0, row.mac, sizeof(row.mac));
+    if (nvr_settings_local_link_set(s, &row) != 0) return -1;
+    sync_local_link_to_eth0_kv(s, &row);
+    return nvr_net_apply_eth0(s);
+}
+
 /* ---------------- 网络 ---------------- */
 int nvr_net_apply(nvr_settings_t *s)
 {
     if (!s) return -1;
 
-    /* eth0：默认 DHCP；设了静态则用静态 */
-    int eth0_dhcp = nvr_settings_get_int(s, "network.eth0.dhcp", 1);   /* 默认 DHCP */
-    if (eth0_dhcp) {
-        run("ip link set eth0 up 2>/dev/null");
-        run("udhcpc -i eth0 -b -q 2>/dev/null &");   /* 后台租约 */
-        NVR_LOGI("net", "eth0 = DHCP");
-    } else {
-        char ip[32], mask[32], gw[32];
-        nvr_settings_get_str(s, "network.eth0.ip",   ip,   sizeof(ip),   NVR_DEF_ETH0_IP);
-        nvr_settings_get_str(s, "network.eth0.mask", mask, sizeof(mask), NVR_DEF_ETH0_MASK);
-        nvr_settings_get_str(s, "network.eth0.gw",   gw,   sizeof(gw),   "");
-        run("ip addr flush dev eth0 2>/dev/null; ip addr add %s/24 dev eth0 2>/dev/null; ip link set eth0 up", ip);
-        if (gw[0]) run("ip route add default via %s 2>/dev/null", gw);
-        NVR_LOGI("net", "eth0 = 静态 %s", ip);
-    }
+    /* eth0：local_link / network.eth0.* → 应用 */
+    if (nvr_net_apply_eth0(s) != 0)
+        NVR_LOGW("net", "eth0 应用失败,继续 PoE 口配置");
 
     /* eth1：PoE 汇聚口 —— 每 PoE 口一个 VLAN(2001..2016)，网段 198.18.<口>.0/24。
      * ⚠️ 与原厂(S30eth1vlan + dhcpd_vlan.conf)对齐：
@@ -59,12 +385,15 @@ int nvr_net_apply(nvr_settings_t *s)
      * conf 运行期生成到 /tmp，自包含无需预置文件。 */
     int poe = nvr_settings_get_int(s, "system.poe_ports", 16);
     int vlan_base = nvr_settings_get_int(s, "network.eth1.vlan_base", NVR_DEF_VLAN_BASE);
-    run("ip link set eth1 up 2>/dev/null");
+    run("ifconfig %s up 2>/dev/null", NVR_ETH1);
     for (int p = 1; p <= poe; p++) {
+        char pkey[48];
+        snprintf(pkey, sizeof(pkey), "network.poe.port.%d.enable", p);
+        if (!nvr_settings_get_int(s, pkey, 1)) continue;
+
         int vid = vlan_base + p;
-        run("ip link add link eth1 name eth1.%d type vlan id %d 2>/dev/null", vid, vid);
-        run("ip addr flush dev eth1.%d 2>/dev/null; ip addr add 198.18.%d.100/24 dev eth1.%d 2>/dev/null; ip link set eth1.%d up 2>/dev/null",
-            vid, p, vid, vid);
+        run("vconfig add %s %d 2>/dev/null", NVR_ETH1, vid);
+        run("ifconfig eth1.%d 198.18.%d.100 netmask 255.255.255.0 up 2>/dev/null", vid, p);
         /* 生成该 VLAN 的 udhcpd.conf 并起服务：相机固定 .1，网关/DNS 指向 NVR .100 */
         char conf[64]; snprintf(conf, sizeof(conf), "/tmp/udhcpd.eth1.%d.conf", vid);
         FILE *f = fopen(conf, "w");
@@ -86,7 +415,218 @@ int nvr_net_apply(nvr_settings_t *s)
     }
     NVR_LOGI("net", "eth1 PoE 汇聚: %d 个 VLAN(%d..%d), NVR 侧 198.18.<口>.100, 相机固定 198.18.<口>.1",
              poe, vlan_base + 1, vlan_base + poe);
+    nvr_net_upnp_apply(s);
     return 0;
+}
+
+/* ---------------- UPnP / PoE / SMTP ---------------- */
+
+static int read_iface_oper_up(const char *ifname)
+{
+    char path[128], st[16];
+    snprintf(path, sizeof(path), "/sys/class/net/%s/operstate", ifname);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    if (!fgets(st, sizeof(st), f)) { fclose(f); return 0; }
+    fclose(f);
+    return (strncmp(st, "up", 2) == 0 || strncmp(st, "unknown", 7) == 0);
+}
+
+int nvr_net_upnp_fill(nvr_settings_t *s, nvr_upnp_cfg_t *out)
+{
+    if (!s || !out) return -1;
+    memset(out, 0, sizeof(*out));
+    out->enable    = nvr_settings_get_int(s, "network.upnp.enable", 1);
+    out->http_port = nvr_settings_get_int(s, "network.upnp.http_port",
+                    nvr_settings_get_int(s, "network.port.http", 80));
+    out->tcp_port  = nvr_settings_get_int(s, "network.upnp.tcp_port",
+                    nvr_settings_get_int(s, "network.port.tcp", NVR_DEF_NOP_PORT));
+    out->running   = proc_has_process("miniupnpd") || proc_has_process("upnpd");
+    return 0;
+}
+
+int nvr_net_upnp_apply(nvr_settings_t *s)
+{
+    if (!s) return -1;
+    nvr_upnp_cfg_t u;
+    nvr_net_upnp_fill(s, &u);
+    run("killall miniupnpd 2>/dev/null; killall upnpd 2>/dev/null");
+    if (!u.enable) {
+        NVR_LOGI("net", "UPnP 已关闭");
+        return 0;
+    }
+    FILE *f = fopen("/tmp/nvr_miniupnpd.conf", "w");
+    if (!f) return -1;
+    fprintf(f,
+        "ext_ifname=%s\n"
+        "listening_ip=\n"
+        "port=5000\n"
+        "enable_upnp=yes\n"
+        "secure_mode=no\n"
+        "presentation_url=http://%s:%d/\n",
+        NVR_ETH0, NVR_ETH0, u.http_port);
+    fclose(f);
+    run("miniupnpd -f /tmp/nvr_miniupnpd.conf -d 2>/dev/null || "
+        "upnpd -f /tmp/nvr_miniupnpd.conf 2>/dev/null &");
+    NVR_LOGI("net", "UPnP 已启动 http=%d tcp=%d", u.http_port, u.tcp_port);
+    return 0;
+}
+
+static int poe_vlan_id(nvr_settings_t *s, int channel)
+{
+    int base = nvr_settings_get_int(s, "network.eth1.vlan_base", NVR_DEF_VLAN_BASE);
+    return base + channel;
+}
+
+int nvr_net_poe_fill(nvr_chan_mgr_t *cm, nvr_settings_t *s, int channel,
+                     int *enable, int *power_used)
+{
+    if (!s || channel < 1 || channel > NVR_POE_PORTS) return -1;
+    char key[48];
+    snprintf(key, sizeof(key), "network.poe.port.%d.enable", channel);
+    int cfg_en = nvr_settings_get_int(s, key, 1);
+
+    char ifname[32];
+    snprintf(ifname, sizeof(ifname), "eth1.%d", poe_vlan_id(s, channel));
+    int link_up = read_iface_oper_up(ifname);
+
+    if (enable) *enable = cfg_en && link_up;
+    if (power_used) {
+        *power_used = 0;
+        if (cm && cfg_en && link_up) {
+            nvr_chan_status_t st = nvr_chan_status(cm, channel - 1);
+            if (st == NVR_CHAN_ONLINE || st == NVR_CHAN_CONNECTING)
+                *power_used = 5;
+        }
+    }
+    return 0;
+}
+
+int nvr_net_poe_apply(nvr_settings_t *s, int channel, int enable)
+{
+    if (!s || channel < 1 || channel > NVR_POE_PORTS) return -1;
+    char key[48];
+    snprintf(key, sizeof(key), "network.poe.port.%d.enable", channel);
+    nvr_settings_set_int(s, key, enable ? 1 : 0);
+    int vid = poe_vlan_id(s, channel);
+    if (enable)
+        run("vconfig add %s %d 2>/dev/null; ifconfig eth1.%d 198.18.%d.100 netmask 255.255.255.0 up 2>/dev/null",
+            NVR_ETH1, vid, vid, channel);
+    else
+        run("ifconfig eth1.%d down 2>/dev/null", vid);
+    NVR_LOGI("net", "PoE 口%d %s (eth1.%d)", channel, enable ? "启用" : "关闭", vid);
+    return 0;
+}
+
+static int smtp_read_reply(int fd, int expect, char *err, int err_cap)
+{
+    char line[512];
+    int code = 0;
+    for (;;) {
+        ssize_t n = 0;
+        size_t pos = 0;
+        while (pos + 1 < sizeof(line)) {
+            ssize_t r = recv(fd, line + pos, 1, 0);
+            if (r <= 0) return -1;
+            if (line[pos] == '\n') { line[pos + 1] = 0; n = (ssize_t)(pos + 1); break; }
+            pos++;
+        }
+        if (n <= 0) return -1;
+        if (code == 0) code = atoi(line);
+        if (strlen(line) < 4 || line[3] != '-') break;
+    }
+    if (expect && code != expect) {
+        if (err && err_cap > 0) snprintf(err, (size_t)err_cap, "smtp %d", code);
+        return -1;
+    }
+    return code;
+}
+
+static int smtp_send_cmd(int fd, const char *cmd, int expect, char *err, int err_cap)
+{
+    if (cmd && send(fd, cmd, strlen(cmd), 0) < 0) return -1;
+    return smtp_read_reply(fd, expect, err, err_cap);
+}
+
+static void smtp_b64_encode(const char *in, char *out, int cap)
+{
+    static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    int i = 0, o = 0;
+    unsigned char a, b, c;
+    while (in[i] && o + 4 < cap) {
+        a = (unsigned char)in[i++];
+        b = in[i] ? (unsigned char)in[i++] : 0;
+        c = in[i] ? (unsigned char)in[i++] : 0;
+        out[o++] = tbl[a >> 2];
+        out[o++] = tbl[((a & 3) << 4) | (b >> 4)];
+        out[o++] = in[i - 1] ? tbl[((b & 15) << 2) | (c >> 6)] : '=';
+        out[o++] = in[i] ? tbl[c & 63] : '=';
+    }
+    if (o + 2 < cap) { out[o++] = '\r'; out[o++] = '\n'; out[o] = 0; }
+}
+
+int nvr_net_email_test(const nvr_email_cfg_t *cfg, const char *receiver)
+{
+    if (!cfg || !cfg->smtp_server[0]) return -1;
+    if (cfg->use_ssl && cfg->smtp_port == 465) {
+        NVR_LOGW("net", "SMTP SSL/465 暂未实现,请用 587/25 测试");
+        return -1;
+    }
+    const char *rcpt = receiver && receiver[0] && strcmp(receiver, "none") != 0
+                     ? receiver : cfg->receiver[0];
+    if (!rcpt || !rcpt[0] || strcmp(rcpt, "none") == 0) return -1;
+
+    char port[16];
+    snprintf(port, sizeof(port), "%d", cfg->smtp_port > 0 ? cfg->smtp_port : 25);
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(cfg->smtp_server, port, &hints, &res) != 0 || !res) return -1;
+
+    int fd = (int)socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (fd < 0) { freeaddrinfo(res); return -1; }
+    struct timeval tv = { .tv_sec = 15, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    if (connect(fd, res->ai_addr, (socklen_t)res->ai_addrlen) != 0) {
+        close(fd); freeaddrinfo(res); return -1;
+    }
+    freeaddrinfo(res);
+
+    char err[64] = {0};
+    if (smtp_read_reply(fd, 220, err, sizeof(err)) < 0) { close(fd); return -1; }
+    if (smtp_send_cmd(fd, "EHLO nvr.local\r\n", 250, err, sizeof(err)) < 0) { close(fd); return -1; }
+
+    if (cfg->username[0]) {
+        char user[256], pass[256], cmd[512];
+        smtp_b64_encode(cfg->username, user, sizeof(user));
+        smtp_b64_encode(cfg->password, pass, sizeof(pass));
+        if (smtp_send_cmd(fd, "AUTH LOGIN\r\n", 334, err, sizeof(err)) < 0) goto smtp_fail;
+        snprintf(cmd, sizeof(cmd), "%s", user);
+        if (smtp_send_cmd(fd, cmd, 334, err, sizeof(err)) < 0) goto smtp_fail;
+        snprintf(cmd, sizeof(cmd), "%s", pass);
+        if (smtp_send_cmd(fd, cmd, 235, err, sizeof(err)) < 0) goto smtp_fail;
+    }
+
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "MAIL FROM:<%s>\r\n",
+             cfg->sender[0] ? cfg->sender : cfg->username);
+    if (smtp_send_cmd(fd, cmd, 250, err, sizeof(err)) < 0) goto smtp_fail;
+    snprintf(cmd, sizeof(cmd), "RCPT TO:<%s>\r\n", rcpt);
+    if (smtp_send_cmd(fd, cmd, 250, err, sizeof(err)) < 0) goto smtp_fail;
+    if (smtp_send_cmd(fd, "DATA\r\n", 354, err, sizeof(err)) < 0) goto smtp_fail;
+    snprintf(cmd, sizeof(cmd),
+             "Subject: %s\r\nFrom: <%s>\r\nTo: <%s>\r\n\r\nNVR email test.\r\n.\r\n",
+             cfg->title[0] ? cfg->title : "NVR Test", cfg->sender, rcpt);
+    if (smtp_send_cmd(fd, cmd, 250, err, sizeof(err)) < 0) goto smtp_fail;
+    smtp_send_cmd(fd, "QUIT\r\n", 221, NULL, 0);
+    close(fd);
+    NVR_LOGI("net", "SMTP 测试邮件已发送至 %s", rcpt);
+    return 0;
+smtp_fail:
+    NVR_LOGW("net", "SMTP 失败: %s", err[0] ? err : "unknown");
+    close(fd);
+    return -1;
 }
 
 /* ---------------- 时间（UTC 内部时钟 + 时区显示 + NTP） ----------------
