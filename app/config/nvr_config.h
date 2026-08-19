@@ -37,10 +37,13 @@ typedef struct {
     int  enabled;          /* 0=禁用(跳过) 1=启用 */
     char mac[24];          /* 设备 MAC（发现分类得；IP 变更后按 mac 找回；持久化写 camera） */
     char model[48];        /* 型号：ONVIF discovery scopes 的 /hardware/（发现/添加时填，持久化） */
+    char serial[64];       /* 设备 SN：scopes /serial/ 或 /sn/（nopOnvif 激活用） */
+    char service_url[128]; /* 发现得到的 device_service 路径 */
     /* --- 多视频源(Multi-VideoSource):一物理设备 N 源各占一 channel,按 videoSourceToken 区分 --- */
     char video_source_token[100]; /* 该 channel 绑定的 ONVIF VideoSourceToken(空=单源/NOP,零回归) */
     int  dev_chn;                 /* 源序号(设备侧 channel;单源=1;透传改写目标) */
     char type[8];                 /* "single" | "multi"(多源;同 mac 归组) */
+    char enh_random[32];          /* NOP digest random；空=普通模式。NVR reset 才清。 */
 } nvr_channel_t;
 
 /* 系统级 */

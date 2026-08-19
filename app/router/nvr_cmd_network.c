@@ -115,20 +115,9 @@ char *cmd_GUI_getNetPort(cJSON *a, const nvr_cmd_ctx_t *c)
 
 char *cmd_GUI_setNetPort(cJSON *a, const nvr_cmd_ctx_t *c)
 {
-    cJSON *info = a ? cJSON_GetObjectItem(a, "NetPortInfo") : NULL;
-    if (!cJSON_IsObject(info) || !c->settings) return nvr_resp_err("invalid_param");
-    if (nvr_jhas(info, "HttpPort"))
-        nvr_settings_set_int(c->settings, "network.port.http", nvr_jint(info, "HttpPort", 80));
-    if (nvr_jhas(info, "HttpsPort"))
-        nvr_settings_set_int(c->settings, "network.port.https", nvr_jint(info, "HttpsPort", 443));
-    if (nvr_jhas(info, "TCPPort"))
-        nvr_settings_set_int(c->settings, "network.port.tcp", nvr_jint(info, "TCPPort", NVR_DEF_NOP_PORT));
-    if (nvr_jhas(info, "RtspPort"))
-        nvr_settings_set_int(c->settings, "network.port.rtsp", nvr_jint(info, "RtspPort", 554));
-    NVR_LOGI("router", "setNetPort http=%d tcp=%d",
-             nvr_settings_get_int(c->settings, "network.port.http", 80),
-             nvr_settings_get_int(c->settings, "network.port.tcp", NVR_DEF_NOP_PORT));
-    return nvr_resp_ok();
+    (void)a; (void)c;
+    /* 产品约定：暂不提供改口；8089/554 启动时读库，热切未做。 */
+    return nvr_resp_not_support();
 }
 
 char *cmd_GUI_getNTP(cJSON *a, const nvr_cmd_ctx_t *c)

@@ -5,7 +5,7 @@ const char *nop_strerror(nop_status_t s)
     switch (s) {
     case NOP_OK:           return "OK";
     case NOP_ERR_PARAM:    return "bad parameter";
-    case NOP_ERR_NOTIMPL:  return "not implemented";
+    case NOP_ERR_NOTIMPL:  return "NOT_SUPPORT";
     case NOP_ERR_IO:       return "I/O error";
     case NOP_ERR_NOMEM:    return "out of memory";
     case NOP_ERR_TIMEOUT:  return "timeout";

@@ -23,6 +23,13 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
     { "GUI_setPlaybackMode",                   cmd_GUI_setPlaybackMode },
     { "GUI_getPlaybackMode",                   cmd_GUI_getPlaybackMode },
     { "getPlaybackCapabilities",               cmd_getPlaybackCapabilities },
+    { "getLiveCapabilities",                   cmd_getLiveCapabilities },
+    { "startLiveStream",                       cmd_startLiveStream },
+    { "stopLiveStream",                        cmd_stopLiveStream },
+    { "getSpeakerCapabilities",                cmd_getSpeakerCapabilities },
+    { "startSpeaker",                          cmd_startSpeaker },
+    { "stopSpeaker",                           cmd_stopSpeaker },
+    { "buildTunnel",                           cmd_buildTunnel },
     { "X_NightOwl_getDeviceCapabilities",      cmd_X_NightOwl_getDeviceCapabilities },
     { "AI_getChannelAICapabilities",           cmd_AI_getChannelAICapabilities },
     { "X_NightOwl_setChannelZoomPan",          cmd_X_NightOwl_setChannelZoomPan },
@@ -52,35 +59,42 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
     { "X_NightOwl_resetToFactorySettings",     cmd_X_NightOwl_resetToFactorySettings },
     { "X_NightOwl_setOwner",                   cmd_X_NightOwl_setOwner },
     { "X_NightOwl_getOwner",                   cmd_X_NightOwl_getOwner },
+    { "X_NightOwl_updateP2PCredential",        cmd_X_NightOwl_updateP2PCredential },
+    { "X_NightOwl_loginUser",                  cmd_X_NightOwl_loginUser },
     { "GUI_getRemoteAccessState",              cmd_GUI_getRemoteAccessState },
     { "GUI_setRemoteAccessState",              cmd_GUI_setRemoteAccessState },
     { "GUI_getFeatureList",                    cmd_GUI_getFeatureList },
     { "getIotcAuthKey",                        cmd_getIotcAuthKey },
     { "setIotcAuthKey",                        cmd_setIotcAuthKey },
+    { "getIotcUID",                            cmd_getIotcUID },
+    { "getAvPassword",                         cmd_getAvPassword },
+    { "getAvAccount",                          cmd_getAvAccount },
+    { "getProfile",                            cmd_getProfile },
     { "GUI_getUID",                            cmd_GUI_getUID },
     { "GUI_getAutoRebootSetting",              cmd_GUI_getAutoRebootSetting },
     { "GUI_setAutoRebootSetting",              cmd_GUI_setAutoRebootSetting },
     { "GUI_getSystemLog",                      cmd_GUI_getSystemLog },           /* 待做:NVR 日志 */
 
     /* --- account 鉴权 --- */
-    { "GUI_login",                             cmd_GUI_login },                  /* 待做:auth */
-    { "GUI_logout",                            cmd_GUI_logout },                 /* 待做:auth */
-    { "GUI_LoginPage",                         cmd_GUI_LoginPage },              /* 待做:auth */
-    { "GUI_getLoginStatus",                    cmd_GUI_getLoginStatus },         /* 待做:auth */
-    { "GUI_createUser",                        cmd_GUI_createUser },             /* 待做:auth */
-    { "GUI_deleteUser",                        cmd_GUI_deleteUser },             /* 待做:auth */
-    { "GUI_getUsers",                          cmd_GUI_getUsers },               /* 待做:auth */
-    { "GUI_getUserGroupPermissions",           cmd_GUI_getUserGroupPermissions },/* 待做:auth */
-    { "GUI_forgetPassword",                    cmd_GUI_forgetPassword },         /* 待做:auth */
+    { "GUI_login",                             cmd_GUI_login },
+    { "GUI_logout",                            cmd_GUI_logout },
+    { "GUI_LoginPage",                         cmd_GUI_LoginPage },              /* GUI 进出登录窗通知 */
+    { "GUI_getLoginStatus",                    cmd_GUI_getLoginStatus },
+    { "GUI_createUser",                        cmd_GUI_createUser },
+    { "GUI_deleteUser",                        cmd_GUI_deleteUser },
+    { "GUI_setUser",                           cmd_GUI_setUser },
+    { "GUI_getUsers",                          cmd_GUI_getUsers },
+    { "GUI_getUserGroupPermissions",           cmd_GUI_getUserGroupPermissions },
+    { "GUI_forgetPassword",                    cmd_GUI_forgetPassword },
 
     /* --- misc 通道聚合/安全 --- */
     { "getChannelsStatus",                     cmd_getChannelsStatus },
     { "getChannelStats",                       cmd_getChannelStats },            /* 待做:通道统计 */
     { "getChannelLoading",                     cmd_getChannelLoading },          /* 待做:加载状态 */
-    { "getEnhancedSecurity",                   cmd_getEnhancedSecurity },        /* 待做:NVR 编排+crypto */
-    { "setEnhancedSecurity",                   cmd_setEnhancedSecurity },        /* 待做:NVR 编排+crypto */
-    { "X_NightOwl_getDeviceActive",            cmd_X_NightOwl_getDeviceActive }, /* 待做:设备激活 */
-    { "X_NightOwl_setDeviceActive",            cmd_X_NightOwl_setDeviceActive }, /* 待做:设备激活 */
+    { "getEnhancedSecurity",                   cmd_getEnhancedSecurity },        /* NVR 代查 NOP digest random */
+    { "setEnhancedSecurity",                   cmd_setEnhancedSecurity },        /* NVR 代开/关 digest，入库 P_enh/空 */
+    { "X_NightOwl_getDeviceActive",            cmd_X_NightOwl_getDeviceActive }, /* NVR 代查/代激活 nopOnvif */
+    { "X_NightOwl_setDeviceActive",            cmd_X_NightOwl_setDeviceActive },
     { "getCurrentClouds",                      cmd_getCurrentClouds },           /* 待做:云存状态 */
     { "getCloudStatusHistory",                 cmd_getCloudStatusHistory },      /* 待做:云存历史 */
     { "getChannelCloudRecordStats",            cmd_getChannelCloudRecordStats }, /* 待做:云存统计 */
@@ -149,12 +163,14 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
     { "GUI_ChannelBackupFiles",                cmd_GUI_ChannelBackupFiles },
     { "GUI_GetChannelBackupStatus",            cmd_GUI_GetChannelBackupStatus },
     { "GUI_StopChannelBackup",                 cmd_GUI_StopChannelBackup },
-    { "GUI_getChannelEventRecordingSchedule",  cmd_GUI_getChannelEventRecordingSchedule }, /* 待做:schedule */
-    { "GUI_setChannelEventRecordingSchedule",  cmd_GUI_setChannelEventRecordingSchedule }, /* 待做:schedule */
-    { "getChannelRecordingTime",               cmd_getChannelRecordingTime },    /* 待做:recorder */
+    { "GUI_getChannelEventRecordingSchedule",  cmd_GUI_getChannelEventRecordingSchedule },
+    { "GUI_setChannelEventRecordingSchedule",  cmd_GUI_setChannelEventRecordingSchedule },
+    { "getChannelRecordingTime",               cmd_getChannelRecordingTime },
+    { "setChannelRecordingTime",               cmd_setChannelRecordingTime },
 
     /* --- ota 升级 --- */
     { "upgradeFirmware",                       cmd_upgradeFirmware },
+    { "GUI_upgradeFirmware",                   cmd_upgradeFirmware },
     { "checkFirmwareUpgradeStatus",            cmd_checkFirmwareUpgradeStatus },
 
     /* --- event 事件 --- */
@@ -162,6 +178,10 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
     { "X_NightOwl_queryEventCalendar",         cmd_X_NightOwl_queryEventCalendar },
     { "X_NightOwl_queryContinuousCalendar",    cmd_X_NightOwl_queryContinuousCalendar },
     { "X_NightOwl_queryRecordingInterval",     cmd_X_NightOwl_queryRecordingInterval },
+    { "AI_getEventExtInfo",                    cmd_AI_getEventExtInfo },
+    { "AI_getEventExtInfoBatchByReverseTime",  cmd_AI_getEventExtInfoBatchByReverseTime },
+    { "AI_getEventExtInfoConfig",              cmd_AI_getEventExtInfoConfig },
+    { "AI_setEventExtInfoConfig",              cmd_AI_setEventExtInfoConfig },
 };
 
 const int g_nvr_cmd_table_len = (int)(sizeof(g_nvr_cmd_table) / sizeof(g_nvr_cmd_table[0]));

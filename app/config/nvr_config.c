@@ -3,6 +3,7 @@
  ***************************************************************************************/
 #include "nvr_config.h"
 #include "nvr_defaults.h"   /* PoE IP 模板宏 NVR_POE_CAM_IP_PAT */
+#include "nvr_identity.h"
 #include "cJSON.h"
 
 #include <stdio.h>
@@ -80,8 +81,9 @@ static void load_system(nvr_config_t *c, cJSON *j)
     if (dev) {
         snprintf(s->model, sizeof(s->model), "%s", jstr(dev, "model", NVR_DEF_MODEL));
         snprintf(s->name,  sizeof(s->name),  "%s", jstr(dev, "name",  NVR_DEF_NAME));
-        snprintf(s->sn,    sizeof(s->sn),    "%s", jstr(dev, "sn",    ""));
     }
+    /* SN 来自数据分区 /User/OWLSerialNumber(恒定),非 JSON;供磁盘加密派生 device_sn。 */
+    nvr_identity_get_sn(s->sn, sizeof(s->sn));
     cJSON *ch = cJSON_GetObjectItem(j, "channels");
     if (ch) {
         s->capacity     = jint(ch, "capacity", NVR_DEF_CAPACITY);
@@ -167,10 +169,10 @@ static void fill_poe_channel(nvr_config_t *c, const ch_defaults_t *d, int port, 
     snprintf(e->name, sizeof(e->name), "Camera %d", port);
     snprintf(e->user, sizeof(e->user), "%s", d->user);
     snprintf(e->pass, sizeof(e->pass), "%s", d->pass);
-    /* ★ PoE 口→网段 +1:VLAN 2001 是 NVR↔PoE 管理口,16 个 PoE 口走 VLAN 2002..2017,
-     * 即物理口 P → VLAN 200(P+1) → 网段 (P+1)。故通道 P(chn=P-1)的相机在 198.18.(P+1).1。
-     * 例:口1→通道1→198.18.2.1→cell0;口5→通道5→198.18.6.1→cell4。 */
-    ipfmt(e->onvif_ip, sizeof(e->onvif_ip), d->ip_pattern, port + 1);
+    /* ★ PoE 口↔网段 1:1:口 P → 段 P(198.18.P.x)。交换芯片把口 P tag 到 VLAN(2001+P),
+     * NVR 侧 eth1.(2001+P) 取 IP 198.18.P.100(见 nvr_netime + NVR_DEF_VLAN_BASE=2001),
+     * 相机固定 198.18.P.1。故 onvif_ip 段号 = 口号(与 sources 路径一致,无偏移)。 */
+    ipfmt(e->onvif_ip, sizeof(e->onvif_ip), d->ip_pattern, port);
     e->onvif_port = 80;
     e->onvif_auto = onvif ? jbool(onvif, "auto", 1) : 1;   /* PoE 默认 ONVIF 自动取流 */
     e->codec  = d->codec;
@@ -324,8 +326,19 @@ int nvr_config_overlay_from_settings(nvr_config_t *cfg, nvr_settings_t *settings
         nvr_camera_row_t *r = &rows[i];
         nvr_channel_t *e = emit(cfg, r->chn);   /* 复用: 存在则取现有, 否则新增 */
         if (!e) continue;
+        /* enabled=0 行:出厂预建的 32 个占位行 + 已删设备都是 enabled=0(见 nvr_settings.c
+         * 预建注释:"加载器(跳 !enabled)")。绝不能用它覆盖 config 里 enabled=1 的 PoE 口——
+         * PoE 口是即插即用、config 恒 enabled=1;一旦被占位/残留的 enabled=0 标成 DISABLED,
+         * install_slot 早退 → streaming 未注册(used=0)→ 后续发现解析出的 URL 在 set_url 被拒
+         * → PoE 口永不起 puller、永不出图。故 PoE 口跳过该行、保留 config 的 enabled(真实相机
+         * 上线后 persist_camera 会以 enabled=1 回写、自愈 DB);非 PoE(手动 IP 通道)仍尊重 DB
+         * 的 enabled=0(支持禁用/删除)。 */
+        if (!r->enabled) {
+            if (e->poe_port > 0) continue;      /* PoE 口:忽略占位/残留禁用,保留 config 自动发现 */
+            e->enabled = 0;                      /* 非 PoE:尊重 DB 禁用,保留占位但标记 */
+            continue;
+        }
         e->enabled = r->enabled;
-        if (!r->enabled) continue;              /* 禁用通道: 保留占位但标记 */
         if (r->name[0])     snprintf(e->name, sizeof(e->name), "%s", r->name);
         if (r->url[0])      snprintf(e->url,  sizeof(e->url),  "%s", r->url);
         if (r->username[0]) snprintf(e->user, sizeof(e->user), "%s", r->username);
@@ -334,6 +347,8 @@ int nvr_config_overlay_from_settings(nvr_config_t *cfg, nvr_settings_t *settings
         if (r->mac[0])      snprintf(e->mac, sizeof(e->mac), "%s", r->mac);
         if (r->model[0])    snprintf(e->model, sizeof(e->model), "%s", r->model);  /* 型号:重启回显 */
         if (r->onvif_port)  e->onvif_port = r->onvif_port;
+        if (r->serial[0])   snprintf(e->serial, sizeof(e->serial), "%s", r->serial);
+        if (r->service_url[0]) snprintf(e->service_url, sizeof(e->service_url), "%s", r->service_url);
         e->onvif_auto = r->onvif_auto;
         e->poe_port   = r->poe_port;
         e->codec      = r->codec;
@@ -346,6 +361,7 @@ int nvr_config_overlay_from_settings(nvr_config_t *cfg, nvr_settings_t *settings
         e->dev_chn    = r->dev_chn > 0 ? r->dev_chn : 1;
         if (r->type[0]) snprintf(e->type, sizeof(e->type), "%s", r->type);
         snprintf(e->video_source_token, sizeof(e->video_source_token), "%s", r->video_source_token);
+        snprintf(e->enh_random, sizeof(e->enh_random), "%s", r->enh_random);
     }
     return 0;
 }

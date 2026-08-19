@@ -28,8 +28,10 @@ set(NVR_APP_INCLUDES
     ${CMAKE_CURRENT_SOURCE_DIR}/netime
     ${CMAKE_CURRENT_SOURCE_DIR}/ble
     ${CMAKE_CURRENT_SOURCE_DIR}/playback
+    ${CMAKE_CURRENT_SOURCE_DIR}/talk
     ${CMAKE_CURRENT_SOURCE_DIR}/nop8012
     ${NVR_ROOT}/third_party/curl/include        # curl.h（转发到设备用；host 用系统头）
+    ${NVR_ROOT}/third_party/openssl/include     # nvr_ota.c 交叉编译用 vendored openssl 头(host 用系统头)
     ${NVR_ROOT}/components/streaming/include
     ${NVR_ROOT}/components/storage/include
     ${NVR_ROOT}/components/recorder/include
@@ -37,6 +39,7 @@ set(NVR_APP_INCLUDES
     ${NVR_ROOT}/components/onvif/include
     ${NVR_ROOT}/components/crypto/include
     ${NVR_ROOT}/components/nop/include
+    ${NVR_ROOT}/components/nop/src              # nop_onvif_map.h(公共)转引 nop/nop_envelope.h(私有 src)
     ${NVR_ROOT}/components/cloud_uploader/include
     ${NVR_ROOT}/components/cloud_tutk/include
     ${NVR_ROOT}/platform/media_hal
@@ -50,6 +53,7 @@ add_library(nvr_app_core STATIC
     config/nvr_gui_config.c
     channel/nvr_channel.c
     channel/nvr_chan_nop_sync.c
+    channel/nvr_chan_bind.c
     preview/nvr_preview.c
     record_sched/nvr_record_sched.c
     event/nvr_event.c
@@ -67,6 +71,9 @@ add_library(nvr_app_core STATIC
     router/nvr_cmd_ota.c
     router/nvr_cmd_event.c
     router/nvr_cmd_account.c
+    router/nvr_cognito.c
+    router/nvr_graphql.c
+    router/nvr_resetcode.c
     router/nvr_cmd_network.c
     router/nvr_cmd_misc.c
     config/nvr_chan_persist.c
@@ -75,7 +82,9 @@ add_library(nvr_app_core STATIC
     netime/nvr_netime.c
     ble/nvr_ble.c
     playback/nvr_playback.c
+    talk/nvr_talk.c
     router/nvr_cmd_playback.c
+    router/nvr_cmd_p2p.c
 )
 target_include_directories(nvr_app_core PUBLIC ${NVR_APP_INCLUDES})
 target_link_libraries(nvr_app_core PUBLIC cjson)
@@ -99,7 +108,7 @@ if(NVR_WITH_ONBOARD)
         nopcore_static nvr_cloud_tutk
         ${_tutk}/libssl.so ${_tutk}/libcrypto.so
         ${_ht}/libsrt/lib/arm64-v8a/libsrt.a ${_ht}/libsrtp/lib/arm64-v8a/libsrtp2.a
-        pthread m dl)
+        pthread m dl z)
     # nop 的 ONVIF 客户端 与 happytime_rtsp 同为 Happytimesoft，共享 bm/http 工具符号(base64/md5/
     # http_onvif_trans 等)会重复定义。二者实现同源，允许重复定义(取先出现的)。
     target_link_options(nvr_app PRIVATE -Wl,--allow-multiple-definition)

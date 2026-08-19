@@ -51,6 +51,10 @@ int onvif_session_vsc(onvif_session_t *session, char *out, unsigned size);
  *  scope). @return 0 on success, -1 when unresolved. */
 int onvif_session_analytics_cfg(onvif_session_t *session, char *out, unsigned size);
 
+/** This channel's bound VideoSourceToken ("" == first/single source). Stable key
+ *  for per-source capability lookups (nop_onvif_get_device_caps). */
+const char *onvif_session_bound_source(onvif_session_t *session);
+
 /** This channel's bound-source main/sub VideoEncoderConfiguration tokens (media
  *  scope). "" when unresolved (caller falls back to device-wide order). */
 const char *onvif_session_main_venc(onvif_session_t *session);
@@ -60,6 +64,11 @@ const char *onvif_session_sub_venc(onvif_session_t *session);
  *  host:port as @p ref_channel). @return channel index, or -1 if none. */
 int onvif_backend_channel_for_source(nop_onvif_map_backend_t *be, int ref_channel,
                                      const char *source_token);
+
+/** Bind state for graceful NOP errors (independent of session reachability):
+ *  1 = channel has an ONVIF camera bound (host set), 0 = not bound. Lets a mapper
+ *  emit "Camera Disconnected" vs "No Camera Binded" when a session can't open. */
+int onvif_map_channel_bound(nop_onvif_map_backend_t *be, int channel);
 
 /* ======================================================================== */
 /* Domain mappers                                                           */
@@ -111,6 +120,8 @@ nop_status_t onvif_map_ptzFocusByStep(nop_onvif_map_backend_t *be, int ch,
                                       const nop_request_t *req, nop_response_t *resp);
 nop_status_t onvif_map_ptzFocusStop(nop_onvif_map_backend_t *be, int ch,
                                     const nop_request_t *req, nop_response_t *resp);
+nop_status_t onvif_map_getPtzCapabilities(nop_onvif_map_backend_t *be, int ch,
+                                          const nop_request_t *req, nop_response_t *resp);
 nop_status_t onvif_map_getPtzPresets(nop_onvif_map_backend_t *be, int ch,
                                      const nop_request_t *req, nop_response_t *resp);
 nop_status_t onvif_map_setPtzPreset(nop_onvif_map_backend_t *be, int ch,
@@ -125,10 +136,8 @@ nop_status_t onvif_map_gotoPtzHome(nop_onvif_map_backend_t *be, int ch,
                                    const nop_request_t *req, nop_response_t *resp);
 nop_status_t onvif_map_getPtzPatrols(nop_onvif_map_backend_t *be, int ch,
                                      const nop_request_t *req, nop_response_t *resp);
-nop_status_t onvif_map_createPtzPatrol(nop_onvif_map_backend_t *be, int ch,
-                                       const nop_request_t *req, nop_response_t *resp);
-nop_status_t onvif_map_modifyPtzPatrol(nop_onvif_map_backend_t *be, int ch,
-                                       const nop_request_t *req, nop_response_t *resp);
+nop_status_t onvif_map_setPtzPatrol(nop_onvif_map_backend_t *be, int ch,
+                                    const nop_request_t *req, nop_response_t *resp);
 nop_status_t onvif_map_operatePtzPatrol(nop_onvif_map_backend_t *be, int ch,
                                         const nop_request_t *req, nop_response_t *resp);
 nop_status_t onvif_map_removePtzPatrol(nop_onvif_map_backend_t *be, int ch,
@@ -179,6 +188,8 @@ nop_status_t onvif_map_upgradeChannelFirmware(nop_onvif_map_backend_t *be, int c
                                               const nop_request_t *req, nop_response_t *resp);
 
 /* §8 Motion activity zone (CellMotion) — onvif_map_motion.c */
+nop_status_t onvif_map_X_NightOwl_getChannelActivityZoneTypes(nop_onvif_map_backend_t *be, int ch,
+                                                              const nop_request_t *req, nop_response_t *resp);
 nop_status_t onvif_map_X_NightOwl_getChannelTriggerActivityZone(nop_onvif_map_backend_t *be, int ch,
                                                                 const nop_request_t *req, nop_response_t *resp);
 nop_status_t onvif_map_X_NightOwl_setChannelTriggerActivityZone(nop_onvif_map_backend_t *be, int ch,

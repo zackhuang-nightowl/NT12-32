@@ -110,7 +110,8 @@ int nvr_dev_classify(const char *scopes, nvr_dev_class_t *out)
     int has_a1c2b3  = (ci_strstr(scopes, "a1c2b3") != NULL);
     int has_noponvif= (ci_strstr(scopes, "noponvif") != NULL);
 
-    out->active = (ci_strstr(scopes, "nopstate/active") != NULL);
+    /* 默认已激活。仅 discovery 出现 nopState/inactive 才标未激活。 */
+    out->active = (ci_strstr(scopes, "nopState/inactive") == NULL);
     out->bound  = (ci_strstr(scopes, "/bound") != NULL);
 
     /* 分类（标识互斥；nopVersion/A1C2B3 → NOP；nopOnvif → NOPONVIF；否则 ONVIF） */

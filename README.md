@@ -23,7 +23,7 @@ NVR 作为**服务端**：对接相机（拉流/控制/事件）、驱动视频�
 - 显示布局由 LVGL 经 `GUI_setDeviceDisplayMode` / `DisplayExt` / `ChannelMapping` 驱动
 
 ### 录像
-- 连续录像；**裸盘直写 (no-FS)** + **AES-256-CTR 加密** + 10MB 环形块 + 索引
+- 连续录像（主/子双轨独立 writer）；**裸盘直写 (no-FS)** + **AES-256-CTR 加密** + 10MB 环形块 + 索引
 - 多盘负载均衡、索引检索、跨盘回放
 - **导出标准 MP4**（自研 muxer：H.264 avc1 / H.265 hvc1，moov 在尾）、抓拍 JPEG
 
@@ -39,7 +39,7 @@ NVR 作为**服务端**：对接相机（拉流/控制/事件）、驱动视频�
 
 ### 远程访问 & 协议
 - **NOP 2.0** 服务端（8089 `/APPJsonCmd`，envelope → router → capability → handler）
-- **TUTK P2P** 远程访问（IOTC / AVAPI）
+- **TUTK P2P** 远程访问（IOTC + P2PTunnel：映射本机 8089 NOP + 554 live 子码流）
 - **ONVIF**：客户端（取流 / 发现 / PTZ 控制）+ 服务端（对 App 发流 RTSP）
 - **NOP↔ONVIF 映射** 9 域：PTZ · OSD · 隐私遮挡 · 媒体编码 · AI 越线/入侵/物体检测 · 移动侦测 · 固件 等（含坐标系转译）
 
@@ -52,19 +52,19 @@ NVR 作为**服务端**：对接相机（拉流/控制/事件）、驱动视频�
 ## 目录
 
 ```
-app/         整机集成层（通道 / 预览 / 录像调度 / 事件 / 配置 / 路由 / 网络时间）
+app/         整机集成层（通道 / 预览 / 回放 / 录像调度 / 事件 / 路由 / 8012 / 网络时间）
 components/  六大功能：nop · onvif · streaming · cloud_tutk · recorder · storage（+ config/crypto/cloud_uploader）
-platform/    media_hal —— 封装 na51090 hdal（硬解 / 上屏）
+platform/    media_hal —— 封装 na51090 hdal（硬解 / 上屏 / 回放音频）
 third_party/ vendored 依赖：happytime(ONVIF/RTSP) · tutk_sdk · cJSON · sqlite3
-config/      运行期 JSON（首启种子）；channels.json = 通道模型 + 显示映射
+config/      运行期 JSON（首启种子）；可写库落 /flash/nvrcfg
 docs/        架构 / 来源追溯 / 现状 / 接口对照 / spec 与实现计划
 ```
 
 ## 构建
 
 ```bash
-# 主机（编库 + 自测）
-cmake -S . -B build && cmake --build build -j && ctest --test-dir build
+# 主机（编库 + nvr_app_core）
+cmake -S . -B build && cmake --build build -j
 
 # 目标机（aarch64 整机固件 nvr_app）
 cmake -S . -B build_arm -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64-ca53.cmake \

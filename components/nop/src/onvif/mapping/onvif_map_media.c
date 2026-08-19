@@ -3,8 +3,8 @@
  * @brief §3 Media handlers — NOP GUI_get/setChannelMediaProfiles <-> ONVIF
  *        Media2 VideoEncoder configuration (+ options ranges).
  *
- *   get: GetVideoEncoderConfigurations (+ Options) -> profiles[] with
- *        {current, Min, Max} + resolution options, name = main/sub by order.
+ *   get: GetVideoEncoderConfigurations（一次 SOAP）-> profiles[] current；
+ *        Min/Max 用现值（Options 是另一次 ONVIF，GUI 要范围再另发）。
  *   set: profiles[] -> apply onto the current config baseline ->
  *        SetVideoEncoderConfiguration.
  *
@@ -48,22 +48,39 @@ static nop_json_t *range_obj(int cur, int lo, int hi)
     return o;
 }
 
+/* Graceful "no data" response per the API doc (statusCode 200 + content.error):
+ * "No Camera Binded" when the channel has no ONVIF camera, else "Camera
+ * Disconnected". Returns NOP_OK so the router emits 200, not a bare error. */
+static nop_status_t media_no_data(nop_onvif_map_backend_t *be, int ch,
+                                  nop_response_t *resp)
+{
+    resp->content = nop_json_obj();
+    if (!resp->content)
+        return NOP_ERR_NOMEM;
+    nop_json_add_str(resp->content, "error",
+                     onvif_map_channel_bound(be, ch) ? "Camera Disconnected"
+                                                     : "No Camera Binded");
+    return NOP_OK;
+}
+
 nop_status_t onvif_map_GUI_getChannelMediaProfiles(nop_onvif_map_backend_t *be, int ch,
                                                    const nop_request_t *req,
                                                    nop_response_t *resp)
 {
-    onvif_session_t *s;
-    nop_onvif_venc_t vencs[VENC_MAX];
-    nop_json_t      *arr;
-    const char      *mv, *sv;
-    int              per_source, n, i, k;
+    onvif_session_t    *s;
+    nop_onvif_device_t *dev;
+    nop_onvif_venc_t    vencs[VENC_MAX];
+    nop_json_t         *arr;
+    const char         *mv, *sv;
+    int                 per_source, n, i;
     (void)req;
 
     s = onvif_session_begin(be, ch);
     if (!s)
-        return NOP_ERR_IO;
-    n = nop_onvif_media2_get_vencs(onvif_session_dev(s), vencs, VENC_MAX);
-    if (n < 0) { onvif_session_end(be); return NOP_ERR_IO; }
+        return media_no_data(be, ch, resp);
+    dev = onvif_session_dev(s);
+    n = nop_onvif_media2_get_vencs(dev, vencs, VENC_MAX);
+    if (n < 0) { onvif_session_end(be); return media_no_data(be, ch, resp); }
 
     /* Scope to THIS source's encoders, keyed by VideoEncoderToken (§10). When
      * the source's encoders are unresolved, fall back to device-wide order. */
@@ -73,11 +90,11 @@ nop_status_t onvif_map_GUI_getChannelMediaProfiles(nop_onvif_map_backend_t *be, 
 
     arr = nop_json_arr();
     for (i = 0; i < n; i++) {
-        nop_onvif_venc_opts_t opts;
         nop_json_t *e, *encoding, *resolution, *res_opts;
+        nop_onvif_venc_opts_t opt;
+        int         have_opt, k;
         char wh[32];
         const char *name;
-        int  have_opts;
 
         if (per_source) {
             if (mv[0] && !strcmp(vencs[i].token, mv))      name = "main";
@@ -87,12 +104,15 @@ nop_status_t onvif_map_GUI_getChannelMediaProfiles(nop_onvif_map_backend_t *be, 
             name = index_to_name(i);
         }
 
+        /* Options/ranges (ResolutionsAvailable/BitrateRange/GovLengthRange/
+         * FrameRatesSupported per spec §3) come from a separate ONVIF call;
+         * without it the GUI's dropdowns collapse to the single current value. */
+        have_opt = (nop_onvif_media2_get_venc_options(dev, vencs[i].token, &opt) == 0);
+
         e = nop_json_obj();
         encoding = nop_json_obj();
         resolution = nop_json_obj();
         res_opts = nop_json_arr();
-        have_opts = (nop_onvif_media2_get_venc_options(
-                         onvif_session_dev(s), vencs[i].token, &opts) == 0);
 
         nop_json_add_str(e, "name", name);
         nop_json_add_str(e, "VideoEncoderToken", vencs[i].token);
@@ -102,32 +122,28 @@ nop_status_t onvif_map_GUI_getChannelMediaProfiles(nop_onvif_map_backend_t *be, 
 
         snprintf(wh, sizeof(wh), "%dx%d", vencs[i].width, vencs[i].height);
         nop_json_add_str(resolution, "current", wh);
-        for (k = 0; have_opts && k < opts.res_count; k++) {
-            char o[32];
-            snprintf(o, sizeof(o), "%dx%d", opts.res_w[k], opts.res_h[k]);
-            nop_json_arr_push_str(res_opts, o);
-        }
+        if (have_opt)
+            for (k = 0; k < opt.res_count && k < NOP_ONVIF_VENC_MAX_RES; k++) {
+                char rs[32];
+                snprintf(rs, sizeof(rs), "%dx%d", opt.res_w[k], opt.res_h[k]);
+                nop_json_arr_push_str(res_opts, rs);
+            }
         nop_json_add(resolution, "options", res_opts);
         nop_json_add(e, "VideoEncoderResolution", resolution);
 
         nop_json_add(e, "VideoEncoderGovLength",
-                     range_obj(vencs[i].gov_length,
-                               have_opts ? opts.gov_min : vencs[i].gov_length,
-                               have_opts ? opts.gov_max : vencs[i].gov_length));
+                     have_opt ? range_obj(vencs[i].gov_length, opt.gov_min, opt.gov_max)
+                              : range_obj(vencs[i].gov_length, vencs[i].gov_length, vencs[i].gov_length));
         nop_json_add_bool(e, "VideoEncoderGuaranteedFrameRate", vencs[i].guaranteed_framerate != 0);
         nop_json_add_bool(e, "VideoEncoderConstantBitRate", vencs[i].const_bitrate != 0);
         nop_json_add(e, "VideoEncoderFrameRateLimit",
-                     range_obj(vencs[i].fps,
-                               have_opts ? opts.fps_min : vencs[i].fps,
-                               have_opts ? opts.fps_max : vencs[i].fps));
+                     have_opt ? range_obj(vencs[i].fps, opt.fps_min, opt.fps_max)
+                              : range_obj(vencs[i].fps, vencs[i].fps, vencs[i].fps));
         nop_json_add(e, "VideoEncoderBitrateLimit",
-                     range_obj(vencs[i].bitrate_kbps,
-                               have_opts ? opts.bitrate_min : vencs[i].bitrate_kbps,
-                               have_opts ? opts.bitrate_max : vencs[i].bitrate_kbps));
+                     have_opt ? range_obj(vencs[i].bitrate_kbps, opt.bitrate_min, opt.bitrate_max)
+                              : range_obj(vencs[i].bitrate_kbps, vencs[i].bitrate_kbps, vencs[i].bitrate_kbps));
         nop_json_add(e, "VideoEncoderQuality",
-                     range_obj(vencs[i].quality,
-                               have_opts ? opts.quality_min : 0,
-                               have_opts ? opts.quality_max : 100));
+                     range_obj(vencs[i].quality, 0, 100));   /* doc fixes Min=0/Max=100 */
         nop_json_arr_push(arr, e);
     }
     onvif_session_end(be);
@@ -156,6 +172,7 @@ nop_status_t onvif_map_GUI_setChannelMediaProfiles(nop_onvif_map_backend_t *be, 
     const nop_json_t *profiles;
     const char       *mv, *sv;
     int               per_source, n, p, np;
+    int               restore_unsupported = 0;
     nop_status_t      rc = NOP_OK;
 
     profiles = nop_json_get(req->args, "profiles");
@@ -164,9 +181,12 @@ nop_status_t onvif_map_GUI_setChannelMediaProfiles(nop_onvif_map_backend_t *be, 
 
     s = onvif_session_begin(be, ch);
     if (!s)
-        return NOP_ERR_IO;
-    n = nop_onvif_media2_get_vencs(onvif_session_dev(s), base, VENC_MAX);
-    if (n < 0) { onvif_session_end(be); return NOP_ERR_IO; }
+        return media_no_data(be, ch, resp);
+    n = nop_onvif_device_cached_vencs(onvif_session_dev(s),
+                                      onvif_session_bound_source(s), base, VENC_MAX);
+    if (n < 0)
+        n = nop_onvif_media2_get_vencs(onvif_session_dev(s), base, VENC_MAX);
+    if (n < 0) { onvif_session_end(be); return media_no_data(be, ch, resp); }
 
     mv = onvif_session_main_venc(s);
     sv = onvif_session_sub_venc(s);
@@ -181,6 +201,13 @@ nop_status_t onvif_map_GUI_setChannelMediaProfiles(nop_onvif_map_backend_t *be, 
         int               idx = -1, k;
         if (!prof)
             continue;
+        /* restore=true means factory-reset this profile (all other fields
+         * ignored per the API doc). Our ONVIF ABI has no per-profile reset, so
+         * report it explicitly instead of silently re-applying current values. */
+        if (nop_json_bool(prof, "restore", false)) {
+            restore_unsupported = 1;
+            continue;
+        }
         pname = nop_json_str(prof, "name", "main");
         /* Target this source's encoder by VideoEncoderToken (explicit token wins,
          * else main/sub -> the source's resolved tokens). */
@@ -222,12 +249,18 @@ nop_status_t onvif_map_GUI_setChannelMediaProfiles(nop_onvif_map_backend_t *be, 
 
         if (nop_onvif_media2_set_venc(onvif_session_dev(s), &cfg) != 0)
             rc = NOP_ERR_IO;
+        else
+            nop_onvif_device_venc_cache_put(onvif_session_dev(s), &cfg);
     }
     onvif_session_end(be);
 
     resp->content = nop_json_obj();
-    if (resp->content)
-        nop_json_add_str(resp->content, "error", rc == NOP_OK ? "" : "onvif set encoder failed");
+    if (resp->content) {
+        const char *err = "";
+        if (rc != NOP_OK)            err = "onvif set encoder failed";
+        else if (restore_unsupported) err = "unsupported of restore";
+        nop_json_add_str(resp->content, "error", err);
+    }
     return rc;
 }
 

@@ -4,12 +4,16 @@
 #include "nvr_cmd_internal.h"
 #include "nvr_cmd_util.h"
 #include "nvr_defaults.h"
+#include "nvr_identity.h"
 #include "nvr_log.h"
 #include "nvr_netime.h"
 #include "nvr_tutk.h"
+#include "nvr_ble.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <time.h>
 #include <sys/reboot.h>
 
@@ -69,14 +73,20 @@ char *cmd_X_NightOwl_setInputChannelName(cJSON *a, const nvr_cmd_ctx_t *c)
 }
 char *cmd_getDeviceInfo(cJSON *a, const nvr_cmd_ctx_t *c)
 {
-    (void)a; char nm[64], sn[64], mdl[32];
+    (void)a; char nm[64], sn[64], mdl[32], fw[32], mac[32] = "";
     nvr_settings_get_str(c->settings, "system.device_name", nm, sizeof(nm), NVR_DEF_NAME);
-    nvr_settings_get_str(c->settings, "system.sn", sn, sizeof(sn), "");   /* SN 由烧录分区读取,无编译默认 */
+    nvr_identity_get_sn(sn, sizeof(sn));   /* SN 由数据分区 /User/OWLSerialNumber 读取,恒定 */
     nvr_settings_get_str(c->settings, "system.model", mdl, sizeof(mdl), NVR_DEF_MODEL);
+    nvr_settings_get_str(c->settings, "system.fw_version", fw, sizeof(fw), NVR_DEF_FW_VERSION);
+    nvr_identity_get_mac("eth0", mac, sizeof(mac));
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "name", nm); cJSON_AddStringToObject(o, "sn", sn);
     cJSON_AddStringToObject(o, "model", mdl);
     cJSON_AddNumberToObject(o, "channels", nvr_settings_get_int(c->settings, "system.capacity", NVR_DEF_CAPACITY));
+    /* APP(TUTK)契约字段:firmwareVersion/serialNumber/mac */
+    cJSON_AddStringToObject(o, "firmwareVersion", fw);
+    cJSON_AddStringToObject(o, "serialNumber", sn);
+    cJSON_AddStringToObject(o, "mac", mac);
     return nvr_resp_content(o);
 }
 /* 设置系统时区(协议 X_NightOwl_setTimezone):
@@ -191,21 +201,114 @@ char *cmd_X_NightOwl_resetToFactorySettings(cJSON *a, const nvr_cmd_ctx_t *c)
 char *cmd_X_NightOwl_setOwner(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     nvr_owner_row_t ow;
-    if (nvr_settings_owner_get(c->settings, &ow) != 0) memset(&ow, 0, sizeof(ow));  /* 读改写:保留 email/phone/cloud 等 */
-    snprintf(ow.owner_id, sizeof(ow.owner_id), "%s", nvr_jstr(a, "owner_id", ""));
-    snprintf(ow.username, sizeof(ow.username), "%s", nvr_jstr(a, "username", ""));
-    snprintf(ow.stoken,   sizeof(ow.stoken),   "%s", nvr_jstr(a, "stoken", ""));
+    if (nvr_settings_owner_get(c->settings, &ow) != 0) memset(&ow, 0, sizeof(ow));
+    const char *owner_id = nvr_jstr(a, "owner_id", "");
+    const char *username = nvr_jstr(a, "username", "");
+    const char *stoken   = nvr_jstr(a, "stoken", "");
+    snprintf(ow.owner_id, sizeof(ow.owner_id), "%s", owner_id);
+    snprintf(ow.username, sizeof(ow.username), "%s", username);
+    if (stoken[0]) snprintf(ow.stoken, sizeof(ow.stoken), "%s", stoken);
     nvr_settings_owner_set(c->settings, &ow);
+
+    /* 文档：setOwner 带 ownerId 触发 BLEKey 更新；回包带 BLEKey；下一连接才用新 key 加密 */
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "func", "X_NightOwl_setOwner");
+    if (owner_id[0]) {
+        char blekey[20];
+        if (nvr_ble_gen_key16(blekey, (int)sizeof(blekey)) == 0) {
+            nvr_settings_set_str(c->settings, "ble.key", blekey);
+            cJSON_AddStringToObject(o, "BLEKey", blekey);
+            NVR_LOGI("router", "setOwner → BLEKey 已生成（下连生效）");
+        }
+    }
     NVR_LOGI("router", "setOwner 存储(stoken %d 字节)", (int)strlen(ow.stoken));
-    return nvr_resp_ok();
+    return nvr_resp_content(o);
 }
 char *cmd_X_NightOwl_getOwner(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     (void)a; nvr_owner_row_t ow; cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "func", "X_NightOwl_getOwner");
     if (nvr_settings_owner_get(c->settings, &ow) == 0) {
         cJSON_AddStringToObject(o, "owner_id", ow.owner_id);
         cJSON_AddStringToObject(o, "username", ow.username);
         cJSON_AddStringToObject(o, "stoken", ow.stoken);
+    }
+    return nvr_resp_content(o);
+}
+
+/* 读 /dev/urandom 填 buf；失败用 rand 回落 */
+static void fill_rand(unsigned char *buf, int n)
+{
+    int fd = open("/dev/urandom", O_RDONLY);
+    int ok = 0;
+    if (fd >= 0) {
+        if (read(fd, buf, (size_t)n) == n) ok = 1;
+        close(fd);
+    }
+    if (!ok) {
+        srand((unsigned)time(NULL) ^ (unsigned)getpid());
+        for (int i = 0; i < n; i++) buf[i] = (unsigned char)(rand() & 0xFF);
+    }
+}
+
+/* 文档 updateP2PCredential：设备乱数生成 authKey(8) + avPassword(6 hex)，落库并热更新 TUTK */
+char *cmd_X_NightOwl_updateP2PCredential(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a;
+    static const char *ALNUM =
+        "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    unsigned char rnd[14];
+    fill_rand(rnd, (int)sizeof(rnd));
+    char auth[NVR_TUTK_AUTH_KEY_LEN + 1];
+    for (int i = 0; i < NVR_TUTK_AUTH_KEY_LEN; i++)
+        auth[i] = ALNUM[rnd[i] % 62];
+    auth[NVR_TUTK_AUTH_KEY_LEN] = 0;
+    char av[8];
+    static const char *HEX = "0123456789abcdef";
+    for (int i = 0; i < 6; i++)
+        av[i] = HEX[rnd[8 + i] % 16];
+    av[6] = 0;
+
+    /* 写回数据分区 tutkdata.json(IOTCKey + AVKey),持久且对齐 ODC。 */
+    (void)c;
+    (void)nvr_identity_set_tutk_creds(auth, av);
+    (void)nvr_tutk_update_authkey(auth);
+
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "func", "X_NightOwl_updateP2PCredential");
+    cJSON_AddStringToObject(o, "authKey", auth);
+    cJSON_AddStringToObject(o, "avPassword", av);
+    NVR_LOGI("router", "updateP2PCredential auth=%.8s av=%s", auth, av);
+    return nvr_resp_content(o);
+}
+
+/* BLE 登录：出厂 admin/admin；已绑定则 user=owner_id 且 BLEKey=ble.key */
+char *cmd_X_NightOwl_loginUser(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    const char *user = nvr_jstr(a, "user", NULL);
+    const char *ble  = nvr_jstr(a, "BLEKey", NULL);
+    if (!user || !ble) return nvr_resp_err("invalid_param");
+
+    nvr_owner_row_t ow;
+    memset(&ow, 0, sizeof(ow));
+    if (c->settings) (void)nvr_settings_owner_get(c->settings, &ow);
+
+    int ok = 0;
+    if (ow.owner_id[0]) {
+        char blekey[20];
+        nvr_settings_get_str(c->settings, "ble.key", blekey, sizeof(blekey), "");
+        if (strcmp(user, ow.owner_id) == 0 && blekey[0] && strcmp(ble, blekey) == 0)
+            ok = 1;
+    } else {
+        if (strcmp(user, "admin") == 0 && strcmp(ble, "admin") == 0)
+            ok = 1;
+    }
+
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "func", "X_NightOwl_loginUser");
+    if (!ok) {
+        cJSON_Delete(o);
+        return nvr_resp_err("auth_failed");
     }
     return nvr_resp_content(o);
 }
@@ -285,9 +388,9 @@ char *cmd_GUI_setAutoRebootSetting(cJSON *a, const nvr_cmd_ctx_t *c)
 
 char *cmd_getIotcAuthKey(cJSON *a, const nvr_cmd_ctx_t *c)
 {
-    (void)a;
+    (void)a; (void)c;
     char key[NVR_TUTK_AUTH_KEY_LEN + 4];
-    nvr_settings_get_str(c->settings, "tutk.authkey", key, sizeof(key), "");
+    nvr_identity_get_tutk_creds(key, sizeof(key), NULL, 0);   /* IOTCKey ← /User/OWL/tutkdata.json */
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "value", key);
     return nvr_resp_content(o);
@@ -295,22 +398,71 @@ char *cmd_getIotcAuthKey(cJSON *a, const nvr_cmd_ctx_t *c)
 
 char *cmd_setIotcAuthKey(cJSON *a, const nvr_cmd_ctx_t *c)
 {
+    (void)c;
     const char *value = nvr_jstr(a, "value", NULL);
     if (!value || !tutk_auth_key_valid(value))
         return nvr_resp_err("invalid_auth_key");
-    if (!c->settings || nvr_settings_set_str(c->settings, "tutk.authkey", value) != 0)
+    /* 写回数据分区(持久,重启不丢);仅改 IOTCKey,保留 AvPassword。 */
+    if (nvr_identity_set_tutk_creds(value, NULL) != 0)
         return nvr_resp_err("persist_failed");
+    (void)nvr_tutk_update_authkey(value);   /* 进程内热更新 */
     NVR_LOGI("router", "setIotcAuthKey → %.8s", value);
     return nvr_resp_ok();
+}
+
+/* ---- ODC TUTK agent(AVAPIs_Server_CLI)启动引导:cgi 会向 :6061 拉取这些值 ---- */
+char *cmd_getIotcUID(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a; (void)c;
+    char uid[64] = "";
+    nvr_identity_get_uid(uid, sizeof(uid));                   /* ← /User/tutk_agent_udid */
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "value", uid);
+    return nvr_resp_content(o);
+}
+
+char *cmd_getAvPassword(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a; (void)c;
+    char av[16] = "";
+    nvr_identity_get_tutk_creds(NULL, 0, av, sizeof(av));     /* AvPassword ← /User/OWL/tutkdata.json(默认888888) */
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "value", av[0] ? av : "888888");
+    return nvr_resp_content(o);
+}
+
+char *cmd_getAvAccount(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a; (void)c;
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "value", "admin");
+    return nvr_resp_content(o);
+}
+
+char *cmd_getProfile(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a; (void)c;
+    FILE *fp = fopen("/dvr/tutk_cloud_agent/profile.txt", "rb");
+    if (!fp) return nvr_resp_not_support();
+    fseek(fp, 0, SEEK_END); long n = ftell(fp); fseek(fp, 0, SEEK_SET);
+    if (n <= 0 || n > 65536) { fclose(fp); return nvr_resp_not_support(); }
+    char *buf = malloc((size_t)n + 1);
+    if (!buf) { fclose(fp); return nvr_resp_err("oom"); }
+    size_t rd = fread(buf, 1, (size_t)n, fp); fclose(fp);
+    buf[rd] = '\0';
+    cJSON *prof = cJSON_Parse(buf);
+    free(buf);
+    if (!prof) return nvr_resp_not_support();
+    return nvr_resp_content(prof);   /* content = profile.txt 内容 */
 }
 
 char *cmd_GUI_getUID(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     (void)a;
     char uid[64], sn[64], mac[32];
-    nvr_settings_get_str(c->settings, "tutk.uid", uid, sizeof(uid), "");
-    nvr_settings_get_str(c->settings, "system.sn", sn, sizeof(sn), "");
-    nvr_settings_get_str(c->settings, "system.mac", mac, sizeof(mac), "");
+    nvr_identity_get_uid(uid, sizeof(uid));
+    nvr_identity_get_sn(sn, sizeof(sn));
+    nvr_identity_get_mac("eth0", mac, sizeof(mac));
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "uid", uid);
     cJSON_AddStringToObject(o, "serial", sn);

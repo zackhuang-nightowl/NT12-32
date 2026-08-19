@@ -44,7 +44,7 @@ typedef struct nop_onvif_device_info {
     char host[128];               /**< device service IP             */
     int  port;                    /**< device service port           */
     char service_url[128];        /**< e.g. /onvif/device_service     */
-    char scopes[512];             /**< space-joined onvif scope items */
+    char scopes[1024];            /**< space-joined onvif scope items（NightOwl nopOnvif/serial/nopState 排在最后，512 会截断丢激活标记） */
 } nop_onvif_device_info_t;
 
 typedef void (*nop_onvif_discovery_cb)(const nop_onvif_device_info_t *device, void *user);
@@ -73,12 +73,28 @@ nop_onvif_device_t *nop_onvif_device_create(const char *host, int port,
 /** Set credentials (WS-UsernameToken). */
 void  nop_onvif_device_set_auth(nop_onvif_device_t *device,
                                 const char *username, const char *password);
-/** Set per-request timeout in milliseconds (default 5000). */
+/** Set per-request timeout in milliseconds (default 3000). */
 void  nop_onvif_device_set_timeout(nop_onvif_device_t *device, int timeout_ms);
 /** Destroy the handle and free all fetched data. NULL-safe. */
 void  nop_onvif_device_destroy(nop_onvif_device_t *device);
 /** @return last ONVIF error string for the device, or "" . */
 const char *nop_onvif_device_last_error(nop_onvif_device_t *device);
+
+/* ---- 一机一 handle（host:port）。连接时建齐端点+profiles+token；取流/mapping/事件共用。 ---- */
+/** 借已有 handle，没有则 create。调用方不再 destroy，用 drop。 */
+nop_onvif_device_t *nop_onvif_device_retain(const char *host, int port,
+                                            const char *service_url, int https);
+/** 该机最后一路通道断开才真正 destroy。 */
+void nop_onvif_device_drop(const char *host, int port);
+/** 连接时一次：set_auth + GetCapabilities + GetServices + GetProfiles + 各源 token/caps/OSD/venc。已连接则只改密。 */
+int  nop_onvif_device_connect(nop_onvif_device_t *device,
+                              const char *username, const char *password);
+int  nop_onvif_device_connected(const nop_onvif_device_t *device);
+void nop_onvif_device_lock(nop_onvif_device_t *device);
+void nop_onvif_device_unlock(nop_onvif_device_t *device);
+/** 连接后取已缓存主/子 URI。vsrc 空=首源。0=ok。 */
+int  nop_onvif_device_cached_uri(nop_onvif_device_t *device, int want_sub,
+                                 const char *vsrc, char *out, size_t out_size);
 
 /* ======================================================================== */
 /* Device service (tds)                                                      */
@@ -94,6 +110,8 @@ typedef struct nop_onvif_device_information {
 
 int nop_onvif_get_device_information(nop_onvif_device_t *device,
                                      nop_onvif_device_information_t *out);
+/** GetScopes：空格拼接 ScopeItem。连接时缓存；后续直接读缓存。0=ok。 */
+int nop_onvif_get_scopes(nop_onvif_device_t *device, char *out, size_t cap);
 /** Fetch capability/service sets into the handle (validates connectivity). */
 int nop_onvif_get_capabilities(nop_onvif_device_t *device);
 int nop_onvif_get_services(nop_onvif_device_t *device);

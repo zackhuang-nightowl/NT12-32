@@ -8,6 +8,7 @@
  *        sources in third_party/onvif/ are used UNMODIFIED.
  */
 #include "nop_sdk/nop_onvif_ext.h"
+#include <ctype.h>
 
 /* Vendored ONVIF client library headers (third_party/onvif). */
 extern "C" {
@@ -267,7 +268,8 @@ int nop_onvif_ptz_remove_tour(nop_onvif_device_t *device, const char *profile_to
 /* ======================================================================== */
 
 int nop_onvif_media2_get_masks(nop_onvif_device_t *device,
-                               nop_onvif_mask_t *out, int max)
+                               nop_onvif_mask_t *out, int max,
+                               const char *config_token)
 {
     if (!device || !out || max <= 0)
         return -1;
@@ -276,6 +278,10 @@ int nop_onvif_media2_get_masks(nop_onvif_device_t *device,
     tr2_GetMasks_RES res;
     memset(&req, 0, sizeof(req));
     memset(&res, 0, sizeof(res));
+    if (config_token && config_token[0]) {
+        req.ConfigurationTokenFlag = 1;
+        strncpy(req.ConfigurationToken, config_token, sizeof(req.ConfigurationToken) - 1);
+    }
     if (!onvif_tr2_GetMasks(&device->dev, &req, &res))
         return -2;
 
@@ -298,13 +304,16 @@ int nop_onvif_media2_get_masks(nop_onvif_device_t *device,
         n++;
     }
     onvif_free_Masks(&res.Masks);
+    if (n >= 0)
+        nop_onvif_device_mask_cache_replace(device, config_token, out, n);
     return n;
 }
 
 int nop_onvif_media2_create_mask(nop_onvif_device_t *device,
                                  const char *config_token,
                                  const float *xs, const float *ys, int npoints,
-                                 int enabled, const char *type)
+                                 int enabled, const char *type,
+                                 char *out_token, int out_size)
 {
     if (!device || !config_token || !xs || !ys || npoints <= 0)
         return -1;
@@ -326,7 +335,13 @@ int nop_onvif_media2_create_mask(nop_onvif_device_t *device,
         req.Mask.Polygon.Point[i].x = xs[i];
         req.Mask.Polygon.Point[i].y = ys[i];
     }
-    return onvif_tr2_CreateMask(&device->dev, &req, &res) ? 0 : -2;
+    if (!onvif_tr2_CreateMask(&device->dev, &req, &res))
+        return -2;
+    if (out_token && out_size > 0) {
+        strncpy(out_token, res.Token, out_size - 1);
+        out_token[out_size - 1] = '\0';
+    }
+    return 0;
 }
 
 int nop_onvif_media2_delete_mask(nop_onvif_device_t *device, const char *token)
@@ -345,27 +360,34 @@ int nop_onvif_media2_delete_mask(nop_onvif_device_t *device, const char *token)
 int nop_onvif_media2_video_source_token(nop_onvif_device_t *device,
                                         char *out, int size)
 {
+    nop_onvif_source_tokens_t st;
     if (!device || !out || size <= 0)
         return -1;
-
-    tr2_GetProfiles_REQ req;
-    tr2_GetProfiles_RES res;
-    memset(&req, 0, sizeof(req));
-    memset(&res, 0, sizeof(res));
-    if (!onvif_tr2_GetProfiles(&device->dev, &req, &res))
-        return -2;
-
-    int rc = -3;
-    for (MediaProfileList *p = res.Profiles; p; p = p->next) {
-        if (p->MediaProfile.Configurations.VideoSourceFlag) {
-            strncpy(out, p->MediaProfile.Configurations.VideoSource.token, size - 1);
-            out[size - 1] = '\0';
-            rc = 0;
-            break;
+    out[0] = '\0';
+    if (nop_onvif_device_cached_source(device, NULL, &st) == 0 && st.vsc_token[0]) {
+        strncpy(out, st.vsc_token, size - 1);
+        out[size - 1] = '\0';
+        return 0;
+    }
+    if (device->dev.media_profiles) {
+        for (MediaProfileList *p = device->dev.media_profiles; p; p = p->next) {
+            if (p->MediaProfile.Configurations.VideoSourceFlag) {
+                strncpy(out, p->MediaProfile.Configurations.VideoSource.token, size - 1);
+                out[size - 1] = '\0';
+                return 0;
+            }
         }
     }
-    onvif_free_MediaProfiles(&res.Profiles);
-    return rc;
+    if (device->dev.profiles) {
+        for (ONVIF_PROFILE *p = device->dev.profiles; p; p = p->next) {
+            if (p->v_src_cfg && p->v_src_cfg->Configuration.token[0]) {
+                strncpy(out, p->v_src_cfg->Configuration.token, size - 1);
+                out[size - 1] = '\0';
+                return 0;
+            }
+        }
+    }
+    return -3;
 }
 
 /* ======================================================================== */
@@ -404,7 +426,8 @@ static void fill_osd_config(onvif_OSDConfiguration *cfg, const nop_onvif_osd_t *
 }
 
 int nop_onvif_media2_get_osds(nop_onvif_device_t *device,
-                              nop_onvif_osd_t *out, int max)
+                              nop_onvif_osd_t *out, int max,
+                              const char *config_token)
 {
     if (!device || !out || max <= 0)
         return -1;
@@ -413,6 +436,10 @@ int nop_onvif_media2_get_osds(nop_onvif_device_t *device,
     tr2_GetOSDs_RES res;
     memset(&req, 0, sizeof(req));
     memset(&res, 0, sizeof(res));
+    if (config_token && config_token[0]) {
+        req.ConfigurationTokenFlag = 1;
+        strncpy(req.ConfigurationToken, config_token, sizeof(req.ConfigurationToken) - 1);
+    }
     if (!onvif_tr2_GetOSDs(&device->dev, &req, &res))
         return -2;
 
@@ -433,6 +460,8 @@ int nop_onvif_media2_get_osds(nop_onvif_device_t *device,
         n++;
     }
     onvif_free_OSDConfigurations(&res.OSDs);
+    if (n >= 0)
+        nop_onvif_device_osd_cache_replace(device, config_token, out, n);
     return n;
 }
 
@@ -448,7 +477,8 @@ int nop_onvif_media2_set_osd(nop_onvif_device_t *device, const nop_onvif_osd_t *
     return onvif_tr2_SetOSD(&device->dev, &req, &res) ? 0 : -2;
 }
 
-int nop_onvif_media2_create_osd(nop_onvif_device_t *device, const nop_onvif_osd_t *osd)
+int nop_onvif_media2_create_osd(nop_onvif_device_t *device, const nop_onvif_osd_t *osd,
+                                char *out_token, int out_size)
 {
     if (!device || !osd)
         return -1;
@@ -458,7 +488,13 @@ int nop_onvif_media2_create_osd(nop_onvif_device_t *device, const nop_onvif_osd_
     memset(&res, 0, sizeof(res));
     fill_osd_config(&req.OSD, osd);
     req.OSD.token[0] = '\0';   /* device assigns the token on create */
-    return onvif_tr2_CreateOSD(&device->dev, &req, &res) ? 0 : -2;
+    if (!onvif_tr2_CreateOSD(&device->dev, &req, &res))
+        return -2;
+    if (out_token && out_size > 0) {
+        strncpy(out_token, res.OSDToken, out_size - 1);
+        out_token[out_size - 1] = '\0';
+    }
+    return 0;
 }
 
 int nop_onvif_media2_delete_osd(nop_onvif_device_t *device, const char *token)
@@ -526,6 +562,8 @@ int nop_onvif_media2_get_vencs(nop_onvif_device_t *device,
     for (VideoEncoder2ConfigurationList *l = res.Configurations; l && n < max; l = l->next)
         venc_from_cfg(&out[n++], &l->Configuration);
     onvif_free_VideoEncoder2Configurations(&res.Configurations);
+    if (n > 0)
+        nop_onvif_device_venc_cache_ingest(device, out, n);
     return n;
 }
 
@@ -666,20 +704,41 @@ static int parse_points(const char *xml, float *xs, float *ys, int max)
 }
 
 /* Append known class names found in a ClassFilter fragment to a CSV buffer. */
-static void parse_classes(const char *xml, char *out, int size)
+/* 从相机 GetRuleOptions 的 tt:StringList 里提取**真实** token(空格/逗号分隔)为 CSV。通用——
+ * 按设备实际返回,不再硬编码固定清单。相机文档 nightow_onvif_RuleDescription.md:
+ *   <tan:RuleOptions Name="ClassFilter" ...><tt:StringList>Human Vehicle Face</tt:StringList></...>
+ * 既用于 ClassFilter(类名) 也用于 Direction(Left/Right/Any)。 */
+static void parse_stringlist(const char *xml, char *out, int size)
 {
-    static const char *k[] = { "Human", "Vehicle", "Face", "Animal", "Person", NULL };
-    int i, first = 1;
     out[0] = '\0';
-    if (!xml) return;
-    for (i = 0; k[i]; i++) {
-        if (strstr(xml, k[i])) {
+    if (!xml || size <= 1) return;
+    const char *p = strstr(xml, "StringList");
+    if (p) { p = strchr(p, '>'); if (p) p++; }   /* 跳到 <tt:StringList> 之后 */
+    else   p = xml;                               /* 无该标签:退化为整段(取标签间文本) */
+    int first = 1;
+    while (p && *p) {
+        if (*p == '<') {                          /* 遇到标签:若是 StringList 内容结束则停;否则跳过该标签 */
+            if (p[1] == '/') break;               /* </...StringList> 结束 */
+            while (*p && *p != '>') p++;
+            if (*p) p++;
+            continue;
+        }
+        while (*p && (*p==' '||*p=='\t'||*p=='\r'||*p=='\n'||*p==',')) p++;
+        if (!*p || *p == '<') continue;
+        const char *st = p;
+        while (*p && *p!=' ' && *p!='\t' && *p!='\r' && *p!='\n' && *p!=',' && *p!='<') p++;
+        int len = (int)(p - st);
+        if (len > 0 && len < 40 && (isalpha((unsigned char)st[0]))) {
             int off = (int)strlen(out);
-            snprintf(out + off, size - off, "%s%s", first ? "" : ",", k[i]);
-            first = 0;
+            if (off + len + 2 < size) {
+                snprintf(out + off, size - off, "%s%.*s", first ? "" : ",", len, st);
+                first = 0;
+            }
         }
     }
 }
+static void parse_classes(const char *xml, char *out, int size)    { parse_stringlist(xml, out, size); }
+static void parse_directions(const char *xml, char *out, int size) { parse_stringlist(xml, out, size); }
 
 /* Read the integer inside the first "...Max>NN</...Max>" of an IntRange frag. */
 static int parse_range_max(const char *xml)
@@ -690,28 +749,14 @@ static int parse_range_max(const char *xml)
     return p ? atoi(p + 4) : 0;
 }
 
-/* Append known direction tokens found in a Direction StringList to a CSV. */
-static void parse_directions(const char *xml, char *out, int size)
-{
-    static const char *k[] = { "Left", "Right", "Any", NULL };
-    int i, first = 1;
-    out[0] = '\0';
-    if (!xml) return;
-    for (i = 0; k[i]; i++) {
-        if (strstr(xml, k[i])) {
-            int off = (int)strlen(out);
-            snprintf(out + off, size - off, "%s%s", first ? "" : ",", k[i]);
-            first = 0;
-        }
-    }
-}
-
 int nop_onvif_analytics_get_ai_caps(nop_onvif_device_t *device,
                                     const char *config_token,
                                     nop_onvif_ai_caps_t *out)
 {
     if (!device || !config_token || !out)
         return -1;
+    if (nop_onvif_device_cached_ai(device, config_token, out) == 0)
+        return 0;
     memset(out, 0, sizeof(*out));
 
     /* GetSupportedRules -> presence + @maxInstances per rule type. */
@@ -762,6 +807,7 @@ int nop_onvif_analytics_get_ai_caps(nop_onvif_device_t *device,
             onvif_free_ConfigOptions(&res.RuleOptions);
         }
     }
+    nop_onvif_device_ai_cache_put(device, config_token, out);
     return 0;
 }
 
@@ -770,26 +816,23 @@ int nop_onvif_get_device_caps(nop_onvif_device_t *device, const char *source_tok
 {
     if (!device || !out)
         return -1;
+    if (nop_onvif_device_cached_caps(device, source_token, out) == 0)
+        return 0;
     memset(out, 0, sizeof(*out));
 
-    /* OR the ConfigurationSet flags across all Media2 profiles of this source
-     * (main may carry PTZ while sub carries Analytics, etc.). source_token ""
-     * locks onto the first source. */
-    {
-        tr2_GetProfiles_REQ req;
-        tr2_GetProfiles_RES res;
-        char target[100] = "";
-        memset(&req, 0, sizeof(req));
-        memset(&res, 0, sizeof(res));
-        if (source_token && source_token[0])
-            strncpy(target, source_token, sizeof(target) - 1);
-        if (!onvif_tr2_GetProfiles(&device->dev, &req, &res))
-            return -2;
-        for (MediaProfileList *p = res.Profiles; p; p = p->next) {
+    char target[100] = "";   /* resolved VideoSource token (imaging/focus probe 用) */
+
+    if (source_token && source_token[0])
+        strncpy(target, source_token, sizeof(target) - 1);
+
+    /* 连接时已拉过的 profiles 直接读，不再每次 GetProfiles。 */
+    if (device->dev.media_profiles) {
+        for (MediaProfileList *p = device->dev.media_profiles; p; p = p->next) {
             onvif_MediaProfile *mp = &p->MediaProfile;
+            const char *src;
             if (!mp->Configurations.VideoSourceFlag)
                 continue;
-            const char *src = mp->Configurations.VideoSource.SourceToken;
+            src = mp->Configurations.VideoSource.SourceToken;
             if (target[0] == '\0')
                 strncpy(target, src, sizeof(target) - 1);
             if (strcmp(src, target) != 0)
@@ -800,19 +843,37 @@ int nop_onvif_get_device_caps(nop_onvif_device_t *device, const char *source_tok
             if (mp->Configurations.AnalyticsFlag)   out->has_analytics = 1;
             if (mp->Configurations.MetadataFlag)    out->has_metadata = 1;
         }
-        onvif_free_MediaProfiles(&res.Profiles);
+    }
+    if (device->dev.profiles) {
+        for (ONVIF_PROFILE *p = device->dev.profiles; p; p = p->next) {
+            if (p->a_src_cfg || p->a_enc_cfg) out->has_mic = 1;
+            if (p->va_cfg)                    out->has_analytics = 1;
+        }
     }
 
-    if (!out->has_ptz)
-        return 0;   /* no PTZ on this profile -> nothing more to probe */
+    /* focus: Imaging Move 支持。无 VideoSourceToken 则跳过，不空等。 */
+    if (target[0]) {
+        img_GetMoveOptions_REQ mreq;
+        img_GetMoveOptions_RES mres;
+        memset(&mreq, 0, sizeof(mreq));
+        memset(&mres, 0, sizeof(mres));
+        strncpy(mreq.VideoSourceToken, target, sizeof(mreq.VideoSourceToken) - 1);
+        if (onvif_img_GetMoveOptions(&device->dev, &mreq, &mres)) {
+            onvif_MoveOptions20 *mo = &mres.MoveOptions;
+            out->ptz_focus = (mo->AbsoluteFlag || mo->RelativeFlag || mo->ContinuousFlag) ? 1 : 0;
+        }
+    }
 
-    /* PTZ Node -> pan/tilt/zoom, preset, home, patrol. */
-    if (GetNodes(&device->dev) && device->dev.ptz_node) {
+    /* PTZ 节点：已缓存则不再 GetNodes。 */
+    if (!device->dev.ptz_node)
+        GetNodes(&device->dev);
+    if (device->dev.ptz_node) {
+        out->has_ptz = 1;
         onvif_PTZNode   *nd = &device->dev.ptz_node->PTZNode;
         onvif_PTZSpaces *sp = &nd->SupportedPTZSpaces;
         out->ptz_pan  = out->ptz_tilt = sp->ContinuousPanTiltVelocitySpaceFlag ? 1 : 0;
         out->ptz_zoom = sp->ContinuousZoomVelocitySpaceFlag ? 1 : 0;
-        if (!out->ptz_pan && !out->ptz_zoom)   /* device omitted spaces -> basic move */
+        if (!out->ptz_pan && !out->ptz_zoom)
             out->ptz_pan = out->ptz_tilt = out->ptz_zoom = 1;
         out->ptz_max_presets = nd->MaximumNumberOfPresets;
         out->ptz_preset      = nd->MaximumNumberOfPresets > 0 ? 1 : 0;
@@ -824,8 +885,8 @@ int nop_onvif_get_device_caps(nop_onvif_device_t *device, const char *source_tok
         }
     }
 
-    /* hdTrack: PTZ service capabilities MoveAndTrack. */
-    {
+    /* hdTrack: 仅在已判定有 PTZ 时探一次。 */
+    if (out->has_ptz) {
         ptz_GetServiceCapabilities_REQ req;
         ptz_GetServiceCapabilities_RES res;
         memset(&req, 0, sizeof(req));
@@ -833,7 +894,97 @@ int nop_onvif_get_device_caps(nop_onvif_device_t *device, const char *source_tok
         if (onvif_ptz_GetServiceCapabilities(&device->dev, &req, &res))
             out->ptz_hdtrack = res.Capabilities.MoveAndTrack[0] ? 1 : 0;
     }
+    nop_onvif_device_caps_cache_put(device, source_token, out);
     return 0;
+}
+
+static void resolve_rank_venc(nop_onvif_source_tokens_t *out, const char *token, int area,
+                              int *main_area, int *sub_area)
+{
+    if (!token || !token[0])
+        return;
+    if (area > *main_area) {
+        strncpy(out->sub_venc, out->main_venc, sizeof(out->sub_venc) - 1);
+        *sub_area = *main_area;
+        strncpy(out->main_venc, token, sizeof(out->main_venc) - 1);
+        *main_area = area;
+    } else if (area > *sub_area && strcmp(token, out->main_venc) != 0) {
+        strncpy(out->sub_venc, token, sizeof(out->sub_venc) - 1);
+        *sub_area = area;
+    }
+}
+
+static int resolve_from_media2_list(MediaProfileList *head, const char *source_token,
+                                    nop_onvif_source_tokens_t *out)
+{
+    char target[100] = "";
+    int found = 0, main_area = -1, sub_area = -1;
+    if (source_token && source_token[0])
+        strncpy(target, source_token, sizeof(target) - 1);
+    for (MediaProfileList *p = head; p; p = p->next) {
+        onvif_MediaProfile *mp = &p->MediaProfile;
+        const char *src;
+        if (!mp->Configurations.VideoSourceFlag)
+            continue;
+        src = mp->Configurations.VideoSource.SourceToken;
+        if (target[0] == '\0')
+            strncpy(target, src, sizeof(target) - 1);
+        if (strcmp(src, target) != 0)
+            continue;
+        if (!found) {
+            strncpy(out->source_token, src, sizeof(out->source_token) - 1);
+            strncpy(out->profile, mp->token, sizeof(out->profile) - 1);
+            strncpy(out->vsc_token, mp->Configurations.VideoSource.token,
+                    sizeof(out->vsc_token) - 1);
+            found = 1;
+        }
+        if (mp->Configurations.AnalyticsFlag && out->analytics_cfg[0] == '\0')
+            strncpy(out->analytics_cfg, mp->Configurations.Analytics.token,
+                    sizeof(out->analytics_cfg) - 1);
+        if (mp->Configurations.VideoEncoderFlag) {
+            const onvif_VideoEncoder2Configuration *ve = &mp->Configurations.VideoEncoder;
+            resolve_rank_venc(out, ve->token, ve->Resolution.Width * ve->Resolution.Height,
+                              &main_area, &sub_area);
+        }
+    }
+    return found ? 0 : -1;
+}
+
+static int resolve_from_media1_list(ONVIF_PROFILE *head, const char *source_token,
+                                    nop_onvif_source_tokens_t *out)
+{
+    char target[100] = "";
+    int found = 0, main_area = -1, sub_area = -1;
+    if (source_token && source_token[0])
+        strncpy(target, source_token, sizeof(target) - 1);
+    for (ONVIF_PROFILE *p = head; p; p = p->next) {
+        const char *src;
+        if (!p->v_src_cfg)
+            continue;
+        src = p->v_src_cfg->Configuration.SourceToken;
+        if (!src[0])
+            continue;
+        if (target[0] == '\0')
+            strncpy(target, src, sizeof(target) - 1);
+        if (strcmp(src, target) != 0)
+            continue;
+        if (!found) {
+            strncpy(out->source_token, src, sizeof(out->source_token) - 1);
+            strncpy(out->profile, p->token, sizeof(out->profile) - 1);
+            strncpy(out->vsc_token, p->v_src_cfg->Configuration.token,
+                    sizeof(out->vsc_token) - 1);
+            found = 1;
+        }
+        if (p->va_cfg && out->analytics_cfg[0] == '\0')
+            strncpy(out->analytics_cfg, p->va_cfg->Configuration.token,
+                    sizeof(out->analytics_cfg) - 1);
+        if (p->v_enc_cfg) {
+            const onvif_VideoEncoderConfiguration *ve = &p->v_enc_cfg->Configuration;
+            resolve_rank_venc(out, ve->token, ve->Resolution.Width * ve->Resolution.Height,
+                              &main_area, &sub_area);
+        }
+    }
+    return found ? 0 : -1;
 }
 
 int nop_onvif_resolve_source(nop_onvif_device_t *device, const char *source_token,
@@ -843,98 +994,87 @@ int nop_onvif_resolve_source(nop_onvif_device_t *device, const char *source_toke
         return -1;
     memset(out, 0, sizeof(*out));
 
+    if (device->dev.media_profiles &&
+        resolve_from_media2_list(device->dev.media_profiles, source_token, out) == 0)
+        return 0;
+    if (device->dev.profiles &&
+        resolve_from_media1_list(device->dev.profiles, source_token, out) == 0)
+        return 0;
+
+    /* 连接前偶发调用：handle 上还没有 profiles 时才上线 GetProfiles。 */
     tr2_GetProfiles_REQ req;
     tr2_GetProfiles_RES res;
+    int rc;
     memset(&req, 0, sizeof(req));
     memset(&res, 0, sizeof(res));
     if (!onvif_tr2_GetProfiles(&device->dev, &req, &res))
         return -2;
-
-    /* Target source: given token, or lock onto the first profile's source. */
-    char target[100] = "";
-    if (source_token && source_token[0])
-        strncpy(target, source_token, sizeof(target) - 1);
-
-    int found = 0, main_area = -1, sub_area = -1;
-    for (MediaProfileList *p = res.Profiles; p; p = p->next) {
-        onvif_MediaProfile *mp = &p->MediaProfile;
-        if (!mp->Configurations.VideoSourceFlag)
-            continue;
-        const char *src = mp->Configurations.VideoSource.SourceToken;
-        if (target[0] == '\0')
-            strncpy(target, src, sizeof(target) - 1);     /* lock to first source */
-        if (strcmp(src, target) != 0)
-            continue;                                     /* only this source's profiles */
-        if (!found) {
-            strncpy(out->source_token, src, sizeof(out->source_token) - 1);
-            strncpy(out->profile, mp->token, sizeof(out->profile) - 1);
-            strncpy(out->vsc_token, mp->Configurations.VideoSource.token,
-                    sizeof(out->vsc_token) - 1);
-            found = 1;
-        }
-        /* analytics config often lives on the sub-stream profile of the source */
-        if (mp->Configurations.AnalyticsFlag && out->analytics_cfg[0] == '\0')
-            strncpy(out->analytics_cfg, mp->Configurations.Analytics.token,
-                    sizeof(out->analytics_cfg) - 1);
-        /* rank this source's encoders by resolution -> main (largest) / sub. */
-        if (mp->Configurations.VideoEncoderFlag) {
-            const onvif_VideoEncoder2Configuration *ve = &mp->Configurations.VideoEncoder;
-            int area = ve->Resolution.Width * ve->Resolution.Height;
-            if (area > main_area) {
-                strncpy(out->sub_venc, out->main_venc, sizeof(out->sub_venc) - 1);
-                sub_area = main_area;
-                strncpy(out->main_venc, ve->token, sizeof(out->main_venc) - 1);
-                main_area = area;
-            } else if (area > sub_area && strcmp(ve->token, out->main_venc) != 0) {
-                strncpy(out->sub_venc, ve->token, sizeof(out->sub_venc) - 1);
-                sub_area = area;
-            }
-        }
-    }
+    rc = resolve_from_media2_list(res.Profiles, source_token, out);
     onvif_free_MediaProfiles(&res.Profiles);
-    return found ? 0 : -3;
+    return rc == 0 ? 0 : -3;
+}
+
+static int list_push_src(char tokens[][100], int *n, int max, const char *src)
+{
+    int i;
+    if (!src || !src[0] || *n >= max)
+        return *n;
+    for (i = 0; i < *n; i++)
+        if (!strcmp(tokens[i], src))
+            return *n;
+    strncpy(tokens[*n], src, 99);
+    tokens[*n][99] = '\0';
+    (*n)++;
+    return *n;
 }
 
 int nop_onvif_list_sources(nop_onvif_device_t *device, char tokens[][100], int max)
 {
+    int n = 0;
     if (!device || !tokens || max <= 0)
         return -1;
-    /* ── 主路径:Media1 tds/media GetVideoSources ──
-     * 直接返回设备的物理视频源(每个 token = 一路物理输入)。CM-EA 系列(disc media2=-1)
-     * 只支持 Media1;GetVideoSources 在 Media1/Media2 设备上都可用,是最可靠的物理源枚举。
-     * 实测 CM-EA-Q4TH-BU 返回 VideoSourceToken_1/_2(2 源)。 */
+
+    /* 已在 handle 上的 VideoSources：连接时 GetVideoSources 过就不再打。 */
+    if (device->dev.v_src) {
+        for (VideoSourceList *v = device->dev.v_src; v && n < max; v = v->next)
+            list_push_src(tokens, &n, max, v->VideoSource.token);
+        if (n > 0)
+            return n;
+    }
     if (GetVideoSources(&device->dev)) {
-        int n = 0;
-        for (VideoSourceList *v = device->dev.v_src; v && n < max; v = v->next) {
-            if (!v->VideoSource.token[0])
-                continue;
-            strncpy(tokens[n], v->VideoSource.token, 99);
-            tokens[n][99] = '\0';
-            n++;
+        for (VideoSourceList *v = device->dev.v_src; v && n < max; v = v->next)
+            list_push_src(tokens, &n, max, v->VideoSource.token);
+        if (n > 0)
+            return n;
+    }
+    if (device->dev.media_profiles) {
+        for (MediaProfileList *p = device->dev.media_profiles; p; p = p->next) {
+            if (p->MediaProfile.Configurations.VideoSourceFlag)
+                list_push_src(tokens, &n, max,
+                              p->MediaProfile.Configurations.VideoSource.SourceToken);
         }
         if (n > 0)
             return n;
     }
-    /* ── 回退:Media2 tr2 GetProfiles,按 VideoSource.SourceToken 去重 ── */
+    if (device->dev.profiles) {
+        for (ONVIF_PROFILE *p = device->dev.profiles; p; p = p->next) {
+            if (p->v_src_cfg)
+                list_push_src(tokens, &n, max, p->v_src_cfg->Configuration.SourceToken);
+        }
+        if (n > 0)
+            return n;
+    }
+
     tr2_GetProfiles_REQ req;
     tr2_GetProfiles_RES res;
     memset(&req, 0, sizeof(req));
     memset(&res, 0, sizeof(res));
     if (!onvif_tr2_GetProfiles(&device->dev, &req, &res))
         return -2;
-    int n = 0;
-    for (MediaProfileList *p = res.Profiles; p && n < max; p = p->next) {
-        if (!p->MediaProfile.Configurations.VideoSourceFlag)
-            continue;
-        const char *src = p->MediaProfile.Configurations.VideoSource.SourceToken;
-        int seen = 0, i;
-        for (i = 0; i < n; i++)
-            if (!strcmp(tokens[i], src)) { seen = 1; break; }
-        if (!seen) {
-            strncpy(tokens[n], src, 99);
-            tokens[n][99] = '\0';
-            n++;
-        }
+    for (MediaProfileList *p = res.Profiles; p; p = p->next) {
+        if (p->MediaProfile.Configurations.VideoSourceFlag)
+            list_push_src(tokens, &n, max,
+                          p->MediaProfile.Configurations.VideoSource.SourceToken);
     }
     onvif_free_MediaProfiles(&res.Profiles);
     return n;
@@ -942,25 +1082,34 @@ int nop_onvif_list_sources(nop_onvif_device_t *device, char tokens[][100], int m
 
 int nop_onvif_analytics_config_token(nop_onvif_device_t *device, char *out, int size)
 {
+    nop_onvif_source_tokens_t st;
     if (!device || !out || size <= 0)
         return -1;
-    tr2_GetProfiles_REQ req;
-    tr2_GetProfiles_RES res;
-    memset(&req, 0, sizeof(req));
-    memset(&res, 0, sizeof(res));
-    if (!onvif_tr2_GetProfiles(&device->dev, &req, &res))
-        return -2;
-    int rc = -3;
-    for (MediaProfileList *p = res.Profiles; p; p = p->next) {
-        if (p->MediaProfile.Configurations.AnalyticsFlag) {
-            strncpy(out, p->MediaProfile.Configurations.Analytics.token, size - 1);
-            out[size - 1] = '\0';
-            rc = 0;
-            break;
+    out[0] = '\0';
+    if (nop_onvif_device_cached_source(device, NULL, &st) == 0 && st.analytics_cfg[0]) {
+        strncpy(out, st.analytics_cfg, size - 1);
+        out[size - 1] = '\0';
+        return 0;
+    }
+    if (device->dev.media_profiles) {
+        for (MediaProfileList *p = device->dev.media_profiles; p; p = p->next) {
+            if (p->MediaProfile.Configurations.AnalyticsFlag) {
+                strncpy(out, p->MediaProfile.Configurations.Analytics.token, size - 1);
+                out[size - 1] = '\0';
+                return 0;
+            }
         }
     }
-    onvif_free_MediaProfiles(&res.Profiles);
-    return rc;
+    if (device->dev.profiles) {
+        for (ONVIF_PROFILE *p = device->dev.profiles; p; p = p->next) {
+            if (p->va_cfg && p->va_cfg->Configuration.token[0]) {
+                strncpy(out, p->va_cfg->Configuration.token, size - 1);
+                out[size - 1] = '\0';
+                return 0;
+            }
+        }
+    }
+    return -3;
 }
 
 int nop_onvif_analytics_get_rules(nop_onvif_device_t *device, const char *config_token,
@@ -1225,11 +1374,32 @@ int nop_onvif_get_media_caps(nop_onvif_device_t *device, nop_onvif_media_caps_t 
     if (!device || !out)
         return -1;
     memset(out, 0, sizeof(*out));
+
+    if (device->dev.media_profiles) {
+        for (MediaProfileList *p = device->dev.media_profiles; p; p = p->next) {
+            onvif_ConfigurationSet *c = &p->MediaProfile.Configurations;
+            if (c->AudioSourceFlag)  out->mic = 1;
+            if (c->AudioOutputFlag)  out->audio_out = 1;
+            if (c->AudioDecoderFlag) out->audio_dec = 1;
+            if (c->PTZFlag)          out->ptz = 1;
+            if (c->AnalyticsFlag)    out->analytics = 1;
+        }
+    }
+    if (device->dev.profiles) {
+        for (ONVIF_PROFILE *p = device->dev.profiles; p; p = p->next) {
+            if (p->a_src_cfg || p->a_enc_cfg) out->mic = 1;
+            if (p->va_cfg)                    out->analytics = 1;
+            if (p->ptz_cfg)                   out->ptz = 1;
+        }
+    }
+    if (out->mic || out->ptz || out->analytics || out->audio_out || out->audio_dec)
+        return 0;
+
+    /* 连接前偶发：handle 上还没有 profiles 时才上线。 */
     tr2_GetProfiles_REQ req;
     tr2_GetProfiles_RES res;
     memset(&req, 0, sizeof(req));
     memset(&res, 0, sizeof(res));
-    /* ① Media2(tr2)主:profile 的 ConfigurationSet 标志。部分相机 media2 profile 精简/无音频。 */
     if (onvif_tr2_GetProfiles(&device->dev, &req, &res)) {
         for (MediaProfileList *p = res.Profiles; p; p = p->next) {
             onvif_ConfigurationSet *c = &p->MediaProfile.Configurations;
@@ -1241,13 +1411,11 @@ int nop_onvif_get_media_caps(nop_onvif_device_t *device, nop_onvif_media_caps_t 
         }
         onvif_free_MediaProfiles(&res.Profiles);
     }
-    /* ② Media1(trt)兜底/补充:很多相机(如 CM-EA-*)音频/分析只在 media1 profile 暴露。
-     * happytime 把 media1 profile 解析进 device->dev.profiles(a_src_cfg/a_enc_cfg/va_cfg;
-     * 注意:ONVIF_PROFILE 无音频输出字段,speaker 只能靠 media2 的 AudioOutput/AudioDecoder)。 */
     if (GetProfiles(&device->dev)) {
         for (ONVIF_PROFILE *p = device->dev.profiles; p; p = p->next) {
-            if (p->a_src_cfg || p->a_enc_cfg) out->mic = 1;      /* AudioSource → mic */
-            if (p->va_cfg)                    out->analytics = 1;/* VideoAnalytics → sensor */
+            if (p->a_src_cfg || p->a_enc_cfg) out->mic = 1;
+            if (p->va_cfg)                    out->analytics = 1;
+            if (p->ptz_cfg)                   out->ptz = 1;
         }
     }
     return 0;
@@ -1274,7 +1442,7 @@ int nop_onvif_analytics_get_supported(nop_onvif_device_t *device, nop_onvif_anal
     /* 解析分析配置 token:media2 优先,media1 va_cfg 兜底。 */
     char token[ONVIF_TOKEN_LEN] = {0};
     if (nop_onvif_analytics_config_token(device, token, sizeof(token)) != 0 || !token[0]) {
-        if (GetProfiles(&device->dev)) {
+        if (device->dev.profiles) {
             for (ONVIF_PROFILE *p = device->dev.profiles; p; p = p->next) {
                 if (p->va_cfg && p->va_cfg->Configuration.token[0]) {
                     strncpy(token, p->va_cfg->Configuration.token, sizeof(token) - 1);
@@ -1334,4 +1502,52 @@ int nop_onvif_analytics_get_supported(nop_onvif_device_t *device, nop_onvif_anal
         /* ConfigOptions.any 是 malloc 的原始串,happytime 无专用 free,随 device 生命周期;此处不单独释放。 */
     }
     return 0;
+}
+
+int nop_onvif_get_network_mac(nop_onvif_device_t *device, const char *want_ip,
+                              char *out, int cap)
+{
+    tds_GetNetworkInterfaces_REQ req;
+    tds_GetNetworkInterfaces_RES res;
+    NetworkInterfaceList *p;
+    const char *ip_match = NULL, *enabled = NULL, *any = NULL;
+
+    if (!device || !out || cap <= 0)
+        return -1;
+    out[0] = '\0';
+    memset(&req, 0, sizeof(req));
+    memset(&res, 0, sizeof(res));
+    if (!onvif_tds_GetNetworkInterfaces(&device->dev, &req, &res))
+        return -2;
+
+    for (p = res.NetworkInterfaces; p; p = p->next) {
+        const onvif_NetworkInterface *ni = &p->NetworkInterface;
+        const char *hw = (ni->InfoFlag && ni->Info.HwAddress[0]) ? ni->Info.HwAddress : NULL;
+        uint32 i;
+        if (!hw)
+            continue;
+        if (!any)
+            any = hw;
+        if (ni->Enabled && !enabled)
+            enabled = hw;
+        if (!(want_ip && want_ip[0] && ni->Enabled && ni->IPv4Flag && ni->IPv4.Enabled))
+            continue;
+        for (i = 0; i < ni->IPv4.Config.sizeAddress; i++) {
+            if (strcmp(ni->IPv4.Config.Address[i].Address, want_ip) == 0) {
+                ip_match = hw;
+                break;
+            }
+        }
+        if (ip_match)
+            break;
+    }
+    {
+        const char *pick = ip_match ? ip_match : (enabled ? enabled : any);
+        if (pick) {
+            strncpy(out, pick, (size_t)cap - 1);
+            out[cap - 1] = '\0';
+        }
+    }
+    onvif_free_NetworkInterfaces(&res.NetworkInterfaces);
+    return out[0] ? 0 : -3;
 }

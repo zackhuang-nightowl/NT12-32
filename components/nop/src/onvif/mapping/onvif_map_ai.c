@@ -31,6 +31,7 @@ static const struct { const char *onvif; const char *nop; } k_class_map[] = {
     { "Vehicle", "vehicle" },
     { "Face",    "face"    },
     { "Animal",  "animal"  },
+    { "Package", "package" },
     { "Person",  "human"   },
 };
 
@@ -80,12 +81,22 @@ static void triggers_to_csv(const nop_json_t *triggers, char *out, int size)
     n = nop_json_arr_size(triggers);
     for (i = 0; i < n; i++) {
         const char *t = nop_json_as_str(nop_json_arr_at(triggers, i), NULL);
-        const char *cls = t ? nop_trigger_to_class(t) : NULL;
-        if (cls) {
-            int off = (int)strlen(out);
-            snprintf(out + off, size - off, "%s%s", first ? "" : ",", cls);
-            first = 0;
+        const char *cls;
+        char        buf[32];
+        int         off;
+        if (!t || !t[0]) continue;
+        cls = nop_trigger_to_class(t);
+        if (!cls) {
+            /* Unknown NOP trigger -> pass through with a capitalized first char
+             * (inverse of csv_to_triggers' lowercasing) so vendor classes
+             * round-trip on write instead of being silently dropped. */
+            snprintf(buf, sizeof(buf), "%s", t);
+            if (buf[0] >= 'a' && buf[0] <= 'z') buf[0] = (char)(buf[0] - 'a' + 'A');
+            cls = buf;
         }
+        off = (int)strlen(out);
+        snprintf(out + off, size - off, "%s%s", first ? "" : ",", cls);
+        first = 0;
     }
 }
 
@@ -102,7 +113,11 @@ static nop_json_t *csv_to_triggers(const char *csv)
         if (len > 0 && len < (int)sizeof(tok)) {
             memcpy(tok, p, len); tok[len] = '\0';
             nop = class_to_nop_trigger(tok);
-            if (nop) nop_json_arr_push_str(arr, nop);
+            if (!nop) {   /* 未知 ONVIF 类 → 首字母小写透传(通用:反映设备真实类别,不丢) */
+                if (tok[0] >= 'A' && tok[0] <= 'Z') tok[0] = (char)(tok[0] - 'A' + 'a');
+                nop = tok;
+            }
+            if (nop && nop[0]) nop_json_arr_push_str(arr, nop);
         }
         if (!comma) break;
         p = comma + 1;
@@ -129,6 +144,33 @@ static nop_status_t ai_get_rules(nop_onvif_map_backend_t *be, int ch,
     }
     n = nop_onvif_analytics_get_rules(onvif_session_dev(s), cfg, onvif_type,
                                       rules, AI_MAX_RULES);
+    /* ★ 空规则但相机**支持**该类型(GetSupportedRules 含 LineDetector/FieldDetector)→ 先建一条默认
+     * (全帧几何)规则,让 GUI 有实例可显示/编辑,用户再改。见相机文档 §3 @fixed=false 补建策略。 */
+    if (n == 0) {
+        nop_onvif_ai_caps_t caps;
+        int is_line = (strcmp(onvif_type, "LineDetector") == 0);
+        int supported = 0;
+        if (nop_onvif_analytics_get_ai_caps(onvif_session_dev(s), cfg, &caps) == 0)
+            supported = is_line ? caps.line_present : caps.field_present;
+        if (supported) {
+            nop_onvif_rule_t r;
+            memset(&r, 0, sizeof(r));
+            snprintf(r.name, sizeof(r.name), "%s_1", is_line ? "LineCross" : "FieldIntrusion");
+            snprintf(r.type, sizeof(r.type), "%s", onvif_type);
+            if (is_line) {
+                snprintf(r.direction, sizeof(r.direction), "%s", "Any");
+                r.x[0] = -1.0f; r.y[0] =  1.0f; r.x[1] = 1.0f; r.y[1] = -1.0f;
+                r.point_count = 2;
+            } else {
+                r.x[0] = -1.0f; r.y[0] =  1.0f; r.x[1] = 1.0f; r.y[1] =  1.0f;
+                r.x[2] =  1.0f; r.y[2] = -1.0f; r.x[3] = -1.0f; r.y[3] = -1.0f;
+                r.point_count = 4;
+            }
+            if (nop_onvif_analytics_create_rule(onvif_session_dev(s), cfg, &r) == 0)
+                n = nop_onvif_analytics_get_rules(onvif_session_dev(s), cfg, onvif_type,
+                                                  rules, AI_MAX_RULES);   /* 重取,含新建的 */
+        }
+    }
     onvif_session_end(be);
     if (n < 0) return NOP_ERR_IO;
 
@@ -274,10 +316,6 @@ nop_status_t onvif_map_AI_setChannelFieldIntrusionDetect(nop_onvif_map_backend_t
 /* ---- §8 Object detection: sensor config <-> ObjectDetection rules ------- */
 /* One ObjectDetection rule per class (ClassFilter). enable => rule present. */
 
-/* Object-detection sensor classes we expose (pixelChange == motion, handled
- * by the activity-zone/CellMotion path, not here). */
-static const char *k_obj_sensors[] = { "human", "vehicle", "animal", "face" };
-
 /* Is class @p onvif_class present in any fetched ObjectDetection rule? */
 static int class_enabled(const nop_onvif_rule_t *rules, int n, const char *onvif_class)
 {
@@ -291,31 +329,60 @@ static int class_enabled(const nop_onvif_rule_t *rules, int n, const char *onvif
 nop_status_t onvif_map_getChannelSensorConfig(nop_onvif_map_backend_t *be, int ch,
                                               const nop_request_t *req, nop_response_t *resp)
 {
-    onvif_session_t *s;
-    nop_onvif_rule_t rules[AI_MAX_RULES];
-    char             cfg[100];
-    nop_json_t      *arr;
-    int              n, i;
+    onvif_session_t           *s;
+    nop_onvif_rule_t           obj_rules[AI_MAX_RULES], mot_rules[AI_MAX_RULES];
+    nop_onvif_analytics_caps_t supp;
+    char                       cfg[100];
+    nop_json_t                *arr;
+    int                        nobj, nmot, have_supp, i;
     (void)req;
 
     s = onvif_session_begin(be, ch);
     if (!s) return NOP_ERR_IO;
-    if (onvif_session_analytics_cfg(s, cfg, sizeof(cfg)) != 0) {
-        onvif_session_end(be); return NOP_ERR_IO;
+    /* NOPMappingONVIF.md「sensor 靠 getSupportRules 去映射」:sensor 清单必须按设备真实能力构建。
+     * GetSupportedRules/AnalyticsModules 无 CellMotion → 不列 motion;无 ObjectDetection → 不列
+     * human/vehicle/animal/face。enable 再按 GetRules 的 ClassFilter 判定。
+     * 无 Analytics 配置(相机不支持分析)→ 不报错,回空 sensors(与 getDeviceCapabilities 一致)。 */
+    have_supp = 0; nobj = 0; nmot = 0;
+    if (onvif_session_analytics_cfg(s, cfg, sizeof(cfg)) == 0) {
+        have_supp = (nop_onvif_analytics_get_supported(onvif_session_dev(s), &supp) == 0);
+        nobj = nop_onvif_analytics_get_rules(onvif_session_dev(s), cfg, "ObjectDetection",
+                                             obj_rules, AI_MAX_RULES);
+        nmot = nop_onvif_analytics_get_rules(onvif_session_dev(s), cfg, "CellMotion",
+                                             mot_rules, AI_MAX_RULES);
+        if (nobj < 0) nobj = 0;
+        if (nmot < 0) nmot = 0;
     }
-    n = nop_onvif_analytics_get_rules(onvif_session_dev(s), cfg, "ObjectDetection",
-                                      rules, AI_MAX_RULES);
     onvif_session_end(be);
-    if (n < 0) return NOP_ERR_IO;
 
     arr = nop_json_arr();
-    for (i = 0; i < (int)(sizeof(k_obj_sensors) / sizeof(k_obj_sensors[0])); i++) {
-        const char *cls = nop_trigger_to_class(k_obj_sensors[i]);
+
+    /* motion(pixelChange):按 CellMotion 判断(文档:sensor=motion ← CellMotion)。 */
+    if (have_supp && supp.motion) {
         nop_json_t *e = nop_json_obj();
-        nop_json_add_str(e, "sensor", k_obj_sensors[i]);
-        nop_json_add_bool(e, "enable", cls ? class_enabled(rules, n, cls) : false);
+        nop_json_add_str(e, "sensor", "pixelChange");
+        nop_json_add_bool(e, "enable", nmot > 0);
         nop_json_add_int(e, "eventInterval", 30);
         nop_json_arr_push(arr, e);
+    }
+
+    /* ObjectDetection 各类:仅列设备真支持的类(GetSupportedRules 含该类),enable 按 ClassFilter。 */
+    {
+        struct { const char *sensor; const char *cls; int supported; } objs[] = {
+            { "human",   "Human",   have_supp && supp.obj_human   },
+            { "vehicle", "Vehicle", have_supp && supp.obj_vehicle },
+            { "animal",  "Animal",  have_supp && supp.obj_animal  },
+            { "face",    "Face",    have_supp && supp.obj_face    },
+        };
+        for (i = 0; i < (int)(sizeof(objs) / sizeof(objs[0])); i++) {
+            nop_json_t *e;
+            if (!objs[i].supported) continue;
+            e = nop_json_obj();
+            nop_json_add_str(e, "sensor", objs[i].sensor);
+            nop_json_add_bool(e, "enable", class_enabled(obj_rules, nobj, objs[i].cls));
+            nop_json_add_int(e, "eventInterval", 30);
+            nop_json_arr_push(arr, e);
+        }
     }
 
     resp->content = nop_json_obj();
@@ -513,10 +580,16 @@ nop_status_t onvif_map_X_NightOwl_getDeviceCapabilities(nop_onvif_map_backend_t 
     s = onvif_session_begin(be, ch);
     if (!s) return NOP_ERR_IO;
     dev  = onvif_session_dev(s);
-    /* One capability entry PER VIDEO SOURCE (§10): a dual-source camera reports
-     * two channels, each with that source's tokens/caps. Fall back to a single
-     * (first) source when the device advertises none distinctly. */
-    nsrc = nop_onvif_list_sources(dev, srcs, NOP_ONVIF_MAX_SOURCES);
+    /* 源列表用连接时缓存，不再 GetVideoSources/GetProfiles。 */
+    nsrc = nop_onvif_device_cached_nsrc(dev);
+    if (nsrc > NOP_ONVIF_MAX_SOURCES)
+        nsrc = NOP_ONVIF_MAX_SOURCES;
+    for (i = 0; i < nsrc; i++) {
+        nop_onvif_source_tokens_t st;
+        srcs[i][0] = '\0';
+        if (nop_onvif_device_cached_source_at(dev, i, &st) == 0)
+            snprintf(srcs[i], sizeof(srcs[i]), "%s", st.source_token);
+    }
     if (nsrc <= 0) { srcs[0][0] = '\0'; nsrc = 1; }
 
     resp->content = nop_json_obj();
@@ -530,10 +603,26 @@ nop_status_t onvif_map_X_NightOwl_getDeviceCapabilities(nop_onvif_map_backend_t 
         int                        have_ai = 0;
         nop_json_t                *chan, *caps, *ptz, *sensors;
 
-        if (nop_onvif_get_device_caps(dev, srcs[i], &dc) != 0)
-            continue;
-        if (nop_onvif_resolve_source(dev, srcs[i], &st) == 0 && st.analytics_cfg[0])
+        /* ★ best-effort:探测失败也**照常加这条 channel**(至少 signal/videoSourceToken),
+         * 能拿到的能力字段就带、拿不到就空 —— 而不是整条跳过导致 channels 空、GUI 能力集空。 */
+        memset(&dc, 0, sizeof(dc));
+        nop_onvif_get_device_caps(dev, srcs[i], &dc);
+        /* 分析 token 用连接缓存；不再 resolve_source（又一次 GetProfiles）。 */
+        nop_onvif_analytics_caps_t supp;
+        memset(&supp, 0, sizeof(supp));
+        memset(&st, 0, sizeof(st));
+        int have_supp = 0;
+        if (nop_onvif_device_cached_source(dev, srcs[i], &st) == 0 && st.analytics_cfg[0])
             have_ai = (nop_onvif_analytics_get_ai_caps(dev, st.analytics_cfg, &ai) == 0);
+        if (!have_ai && nop_onvif_device_cached_ai(dev, srcs[i], &ai) == 0)
+            have_ai = 1;
+        /* 连接时已探过能力：无 analytics 就不要再 GetSupportedRules。 */
+        if (!have_ai && !dc.has_analytics)
+            have_supp = 0;
+        else if (!have_ai)
+            have_supp = (nop_onvif_analytics_get_supported(dev, &supp) == 0 &&
+                         (supp.motion || supp.objdet));
+        if (have_ai || have_supp) dc.has_analytics = 1;
 
         chan = nop_json_obj();
         /* channel = the NVR channel bound to this source (‑1 if not yet added);
@@ -541,29 +630,39 @@ nop_status_t onvif_map_X_NightOwl_getDeviceCapabilities(nop_onvif_map_backend_t 
         nop_json_add_int(chan, "channel", onvif_backend_channel_for_source(be, ch, srcs[i]));
         if (srcs[i][0])
             nop_json_add_str(chan, "videoSourceToken", srcs[i]);
+        /* signal: ONVIF/IP 相机固定 IPC(规范 required,枚举 TVI/AHD/CVI/IPC)。 */
+        nop_json_add_str(chan, "signal", "IPC");
 
-        caps = nop_json_obj();
-        nop_json_add_bool(caps, "ptz", dc.has_ptz != 0);
-        nop_json_add_bool(caps, "mic", dc.has_mic != 0);
-        nop_json_add_bool(caps, "speaker", dc.has_speaker != 0);
-        nop_json_add_bool(caps, "full_duplex", (dc.has_mic && dc.has_speaker) != 0);
-        nop_json_add_bool(caps, "sensor", dc.has_analytics != 0);
+        /* capabilities[]: 规范(X_NightOwl_getDeviceCapabilities)是**字符串数组**(enum),
+         * 不是布尔对象。只推被支持的项;ONVIF 无法判定的(light/floodlight/audioAlert/
+         * accelerometer/cloudRecording)不发。映射见 NOPMappingONVIF.md §channels[].capabilities。 */
+        caps = nop_json_arr();
+        if (dc.has_mic)                   nop_json_arr_push_str(caps, "mic");
+        if (dc.has_speaker)               nop_json_arr_push_str(caps, "speaker");
+        if (dc.has_mic && dc.has_speaker) nop_json_arr_push_str(caps, "full_duplex");
+        if (dc.has_analytics)             nop_json_arr_push_str(caps, "sensor");
+        if (dc.has_ptz)                   nop_json_arr_push_str(caps, "ptz");
         nop_json_add(chan, "capabilities", caps);
 
-        /* ptz[]: supported feature names (NOPMappingONVIF.md §2 判定用). */
+        /* ptz[]: 规范枚举 = pan/tilt/zoom/nodes/patrol/hdTrack。
+         * nodes = SetPreset/GotoPreset(ptz_preset);`home` 非规范枚举,不发。 */
         ptz = nop_json_arr();
         if (dc.ptz_pan)     nop_json_arr_push_str(ptz, "pan");
         if (dc.ptz_tilt)    nop_json_arr_push_str(ptz, "tilt");
+        if (dc.ptz_pan && dc.ptz_tilt)    nop_json_arr_push_str(ptz, "diagonal");
         if (dc.ptz_zoom)    nop_json_arr_push_str(ptz, "zoom");
-        if (dc.ptz_preset)  nop_json_arr_push_str(ptz, "preset");
-        if (dc.ptz_home)    nop_json_arr_push_str(ptz, "home");
+        if (dc.ptz_focus)   nop_json_arr_push_str(ptz, "focus");   /* Imaging 对焦 */
+        if (dc.ptz_preset)  nop_json_arr_push_str(ptz, "nodes");
+        if (dc.ptz_preset)  nop_json_arr_push_str(ptz, "preset");   /* 规范枚举:支持预置位(SetPreset/GotoPreset) */
         if (dc.ptz_patrol)  nop_json_arr_push_str(ptz, "patrol");
         if (dc.ptz_hdtrack) nop_json_arr_push_str(ptz, "hdTrack");
         nop_json_add(chan, "ptz", ptz);
 
-        /* sensors[]: motion + objectDetection with the classes this source reports. */
+        /* sensors[]: motion + objectDetection。tr2 get_ai_caps 优先,Media1 用 GetSupportedRules 兜底。 */
         sensors = nop_json_arr();
-        if (have_ai && ai.motion_present) {
+        int has_motion = (have_ai && ai.motion_present) || (have_supp && supp.motion);
+        int has_objdet = (have_ai && ai.object_present && ai.object_classes[0]) || (have_supp && supp.objdet);
+        if (has_motion) {
             nop_json_t *e = nop_json_obj();
             nop_json_t *modes = nop_json_arr();
             nop_json_add_str(e, "sensor", "motion");
@@ -571,13 +670,26 @@ nop_status_t onvif_map_X_NightOwl_getDeviceCapabilities(nop_onvif_map_backend_t 
             nop_json_add(e, "modes", modes);
             nop_json_arr_push(sensors, e);
         }
-        if (have_ai && ai.object_present && ai.object_classes[0]) {
+        if (has_objdet) {
             nop_json_t *e = nop_json_obj();
             nop_json_add_str(e, "sensor", "objectDetection");
-            nop_json_add(e, "modes", csv_to_triggers(ai.object_classes));
+            nop_json_t *modes;
+            if (have_ai && ai.object_classes[0]) {
+                modes = csv_to_triggers(ai.object_classes);
+            } else {   /* Media1:按 GetSupportedRules 归类的类别构建 modes */
+                modes = nop_json_arr();
+                if (supp.obj_human)   nop_json_arr_push_str(modes, "human");
+                if (supp.obj_vehicle) nop_json_arr_push_str(modes, "vehicle");
+                if (supp.obj_animal)  nop_json_arr_push_str(modes, "animal");
+                if (supp.obj_face)    nop_json_arr_push_str(modes, "face");
+            }
+            nop_json_add(e, "modes", modes);
             nop_json_arr_push(sensors, e);
         }
         nop_json_add(chan, "sensors", sensors);
+
+        /* hasBattery: 规范 required(bool);ONVIF 无直接对应 → 恒 false。 */
+        nop_json_add_bool(chan, "hasBattery", 0);
 
         nop_json_arr_push(channels, chan);
     }

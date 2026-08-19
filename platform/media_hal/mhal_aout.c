@@ -79,7 +79,7 @@ static int resolve_out_dev(int out_dev)
     if (out_dev >= 0) return out_dev;
     const char *e = getenv("MHAL_AOUT_DEV");
     if (e && e[0]) return atoi(e);
-    return 0; /* 默认喇叭/DAC */
+    return 2; /* 默认 HDMI(回放跟画面走同一输出)；MHAL_AOUT_DEV=0 可改喇叭 */
 }
 
 static int ensure_modules(void)

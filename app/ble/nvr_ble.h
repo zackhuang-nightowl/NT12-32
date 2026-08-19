@@ -41,6 +41,7 @@ typedef struct {
     char                model[48];     /* 广播设备名 NO_<model> */
     char                mac[24];       /* "54:2b:57:.." 或无冒号 */
     char                serial[40];    /* SN */
+    char                crypt_key[32]; /* AES 密码：有 ble.key 用它，否则 MAC_SN 前 16 */
     int                 mtu;           /* 协商 MTU（默认 40） */
 } nvr_ble_cfg_t;
 
@@ -54,6 +55,16 @@ int  nvr_ble_on_rx  (nvr_ble_t *b, const uint8_t *pkt, int len);
 
 /* 绑定/锁定状态变化时刷新广播（bound=是否已绑定账户；unlocked=本地是否已登录解锁）。 */
 void nvr_ble_update_adv(nvr_ble_t *b, int bound, int unlocked);
+
+/* 热更新 AES 密码（新连接生效；当前连接保持不变时由上层勿在会话中途调用）。空串则回落 MAC_SN 前 16。 */
+void nvr_ble_set_crypt_key(nvr_ble_t *b, const char *key);
+
+/* 生成 16 位十六进制 BLEKey（对齐文档例 0F8BB4A05C92A8F3），写入 out（≥17）。成功返回 0。 */
+int  nvr_ble_gen_key16(char *out, int out_cap);
+
+/* 解析当前应使用的 AES 密码：优先 ble_key；否则 MAC无冒号_SN 前 16 字符。 */
+void nvr_ble_resolve_crypt_key(const char *ble_key, const char *mac, const char *serial,
+                               char *out, int out_cap);
 
 /* ---- 分包/组包底层（导出供单测；真机链路一般不直接用） ---- */
 /* 把 payload 按 MTU 切成若干 BLE 包，逐个回调 emit。enc: 0 明文 / 1 加密。返回包数或<0。 */

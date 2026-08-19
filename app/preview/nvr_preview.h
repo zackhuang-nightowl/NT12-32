@@ -1,8 +1,9 @@
 /***************************************************************************************
  *  nvr_preview.h — 预览分屏编排（app 集成层，计划 §B2）
  *
- *  职责：唯一调用 mhal_vout_* 的模块。持有 通道→窗口 映射、布局/分页、OSD、状态图标、
+ *  职责：唯一调用 mhal_vout_* 的模块。持有 通道→窗口 映射、布局/分页、
  *        码流选择（多分屏子码流 / 单画面主码流）。
+ *        OSD（通道名/时间/事件图标）由 GUI 根据 longPolling 自绘，本层不叠。
  *  说明：mhal 当前支持 1/4/9/16；6/12 在本层用 9/16 网格只绑 N 窗实现（不改平台）。
  ***************************************************************************************/
 #ifndef NVR_PREVIEW_H
@@ -17,19 +18,11 @@ extern "C" {
 
 typedef enum { PV_L1 = 1, PV_L4 = 4, PV_L6 = 6, PV_L9 = 9, PV_L12 = 12, PV_L16 = 16 } pv_layout_t;
 
-/* 状态图标位（与 nvr_event 一致） */
-#define PV_ICON_MOTION 0x1
-#define PV_ICON_HUMAN  0x2
-#define PV_ICON_FACE   0x4
-#define PV_ICON_REC    0x8
-
 typedef struct nvr_preview nvr_preview_t;
 
 typedef struct {
     nvr_stream_mgr_t *sm;         /* borrowed：缩放/全屏切主码流 */
     nvr_chan_mgr_t   *cm;         /* borrowed：按显示模式切通道主/子码流(经 ONVIF 重解析) */
-    int  osd_name;                /* OSD 显示通道名 */
-    int  osd_datetime;            /* OSD 显示时间 */
     int  hdmi_w, hdmi_h;          /* HDMI 输出分辨率（悬浮块千分比换算基准） */
 } nvr_preview_cfg_t;
 
@@ -50,7 +43,9 @@ void nvr_preview_deinit(nvr_preview_t *p);
 int  nvr_preview_set_mode(nvr_preview_t *p, int display_mode, int display_page);
 /* 通道映射表（1-based 输入，内部转 0-based）；不持久化，仅本次调用生效并按当前 mode 重排。 */
 int  nvr_preview_set_mapping(nvr_preview_t *p, const int *map1based, int n);
-/* 悬浮块列表（覆盖式设置；n=0 清空所有悬浮块）。 */
+/* 自由矩形 liveView（GUI_setDeviceDisplayExt）。调用时宫格 liveView 已关。
+ * 只在指定千分比矩形开对应通道/码流；n=0 或 b=NULL 清空全部。
+ * 返回 0 成功，-1 参数错，-2 超出解码能力。 */
 int  nvr_preview_set_ext(nvr_preview_t *p, const nvr_pv_ext_t *b, int n);
 int  nvr_preview_set_hdmi(nvr_preview_t *p, int w, int h, int *eff_w, int *eff_h);  /* 分辨率热切 */
 
@@ -70,7 +65,7 @@ int  nvr_preview_page      (nvr_preview_t *p, int page);        /* 翻页（下�
 int  nvr_preview_map       (nvr_preview_t *p, int win, int chn);
 int  nvr_preview_unmap     (nvr_preview_t *p, int win);
 
-/* 通道上/下线（由 channel_mgr 回调经 app 转发）：映射到可见窗口 / 画无信号 OSD。 */
+/* 通道上/下线（由 channel_mgr 回调经 app 转发）：上线则按当前页开解码；掉线不叠 OSD（GUI 画）。 */
 int  nvr_preview_on_channel_online (nvr_preview_t *p, int chn);
 int  nvr_preview_on_channel_offline(nvr_preview_t *p, int chn);
 
@@ -79,21 +74,16 @@ int  nvr_preview_fullscreen (nvr_preview_t *p, int chn);
 int  nvr_preview_single_zoom(nvr_preview_t *p, int chn, int on);
 
 /* 数字变焦(ZoomPan,X_NightOwl_setChannelZoomPan)。chn0 为 0-based 通道号。
- *  入:enable、CenterPointXY/FocusPointXY 千分比(0..1000)、ratio(100=1.00x,MAX 500)。
- *  出:实际生效 CenterPointXY + ratio(被夹取后回填);result 文案见下。
- *  裁剪 ROI = 源画面按 ratio 等比缩小、以 CenterPointXY 为中心并夹在帧内 → VPE 放大填满窗口。 */
+ *  入:enable、CenterPointXY/FocusPointXY 千分比(0..1000)、ZoomRatio(0..1000, 100=1.00x)。
+ *  出:实际生效 CenterPointXY + ZoomRatio; result=OK / Exceeds the zoom range / Exceeds zoom capabilities。
+ *  ROI 宽高 = 原画 × (100/ZoomRatio)，保持原画宽高比；VPE 把 ROI 放大填窗。
+ *  FocusPointXY≠(500,500) 时按当前已放大画面映射回原画，缩放后焦点仍落在同一 GUI 位置。 */
 int  nvr_preview_set_zoom(nvr_preview_t *p, int chn0, int enable,
                           int cx, int cy, int focusx, int focusy, int ratio,
                           int *out_cx, int *out_cy, int *out_ratio, const char **out_result);
 /* 读回某通道当前变焦状态(掉电/重启回默认 500,500,100)。 */
 int  nvr_preview_get_zoom(nvr_preview_t *p, int chn0,
                           int *enable, int *cx, int *cy, int *ratio);
-
-/* 状态图标（由 event hub 设置）。 */
-void nvr_preview_set_icons(nvr_preview_t *p, int chn, unsigned icon_bits);
-
-/* 周期：刷新时间 OSD。 */
-void nvr_preview_tick(nvr_preview_t *p);
 
 #ifdef __cplusplus
 }

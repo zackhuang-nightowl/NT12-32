@@ -22,8 +22,10 @@
 extern "C" {
 #endif
 
-/* 所有本地 handler 共享的上下文(由 router 装配填充)。 */
-typedef struct {
+/* 所有本地 handler 共享的上下文(由 router 装配填充)。
+ * 带 tag(nvr_cmd_ctx_t)以便 nvr_cmd_util.h 用 `struct nvr_cmd_ctx_t` 前向声明,
+ * 否则匿名 struct 与 struct-tag 前向声明为不同类型→nvr_cmd_nop_dispatch 类型冲突。 */
+typedef struct nvr_cmd_ctx_t {
     nvr_settings_t     *settings;     /* KV + 结构化表 */
     nvr_chan_mgr_t     *cm;           /* channel→设备 解析 / 状态 / LAN 增删 */
     nvr_storage_t      *stg;          /* 存储信息/格式化/健康 */
@@ -35,6 +37,7 @@ typedef struct {
     struct nvr_playback *pb;          /* 本机回放引擎(GUI_playbackControl) */
     struct nvr_evt_hub *eh;           /* 事件中枢:longPolling 的 Motion/Human/Face/Car 位图 */
     nvr_chan_persist_t *persist;      /* 出图↔channel 映射(channels.json) */
+    struct nvr_talk    *talk;         /* 双向对讲 */
     void               *disp_user;    /* 分辨率热切回调上下文(app) */
     void              (*on_set_resolution)(void *disp_user, int w, int h);  /* setSysDisplay 热切 */
     int                 dev_nop_port; /* 透传到设备的 NOP 端口,默认 8089 */
@@ -97,10 +100,24 @@ char *cmd_reboot(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_X_NightOwl_resetToFactorySettings(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_X_NightOwl_setOwner(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_X_NightOwl_getOwner(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_X_NightOwl_updateP2PCredential(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_X_NightOwl_loginUser(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_GUI_getRemoteAccessState(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_GUI_setRemoteAccessState(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_GUI_getFeatureList(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_getIotcAuthKey(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getIotcUID(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getAvPassword(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getAvAccount(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getProfile(cJSON *a, const nvr_cmd_ctx_t *c);
+/* P2P APP 远程媒体(nvr_cmd_p2p.c) */
+char *cmd_getLiveCapabilities(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_startLiveStream(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_stopLiveStream(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getSpeakerCapabilities(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_startSpeaker(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_stopSpeaker(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_buildTunnel(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_setIotcAuthKey(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_GUI_getUID(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_GUI_getAutoRebootSetting(cJSON *a, const nvr_cmd_ctx_t *c);
@@ -114,6 +131,7 @@ char *cmd_GUI_LoginPage(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_GUI_getLoginStatus(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_GUI_createUser(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_GUI_deleteUser(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_GUI_setUser(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_GUI_getUsers(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_GUI_getUserGroupPermissions(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_GUI_forgetPassword(cJSON *a, const nvr_cmd_ctx_t *c);
@@ -196,6 +214,7 @@ char *cmd_GUI_StopChannelBackup(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_GUI_getChannelEventRecordingSchedule(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_GUI_setChannelEventRecordingSchedule(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_getChannelRecordingTime(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_setChannelRecordingTime(cJSON *a, const nvr_cmd_ctx_t *c);
 
 /* --- ota 升级(nvr_cmd_ota.c) --- */
 char *cmd_upgradeFirmware(cJSON *a, const nvr_cmd_ctx_t *c);
@@ -206,6 +225,10 @@ char *cmd_X_NightOwl_queryEventList(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_X_NightOwl_queryEventCalendar(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_X_NightOwl_queryContinuousCalendar(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_X_NightOwl_queryRecordingInterval(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_AI_getEventExtInfo(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_AI_getEventExtInfoBatchByReverseTime(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_AI_getEventExtInfoConfig(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_AI_setEventExtInfoConfig(cJSON *a, const nvr_cmd_ctx_t *c);
 
 #ifdef __cplusplus
 }

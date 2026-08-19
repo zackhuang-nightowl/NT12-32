@@ -15,7 +15,7 @@
 |------|------|------|------|
 | **Server_OTA** | `server_request.c`（nop_ota_*） | ✅ 已实现 | `<urlBase>/<company>/<product>/<model>`；版本号 `Model_x.y.z` 比对 |
 | **Server_PushNotification** | `server_push.c`（待加） | ⏳ | 图片上传 `https://smart-notifications.nowlsp.com/filestorage/api/v1/upload`（stg: `asia-upload-tutk-stg.kalay.us`）；push `https://push-staging.kalay.us/tpns`；带 UID；发送间隔 ≥1s。**由 `svc_push` 策略引擎的 `nop_push_send_fn` 回调驱动** |
-| **Server_NOP_Account** | `server_account.c`（待加） | ⏳ | AWS Cognito / GraphQL：prod `https://protect.nowlsp.com/graphql`（pool oX4P9V0Ig, region us-east-1, client 7a7t4ds667njvemo0e6aobotce）；stg `protect-staging.nowlsp.com` |
+| **Server_NOP_Account** | `nvr_cognito.c` + `nvr_graphql.c`（addDevice）+ `nvr_cmd_account.c` | ✅ | Cognito InitiateAuth；GraphQL addDevice → `cloudToken`(=stoken)；prod/stg 随 `-DNVR_STAGE` |
 | **Server_GoogleHome** | `server_googlehome.c`（待加） | ⏳ | Google Home / Chromecast 对接（多为云侧/固件侧） |
 
 ## 约定

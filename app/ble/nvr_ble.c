@@ -9,12 +9,16 @@
  *  与 nop_doc 例子逐字节一致（enc 位在首包第 6 字节，0 明文/1 加密）。
  ***************************************************************************************/
 #include "nvr_ble.h"
+#include "nvr_crypto.h"
 #include "nvr_log.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <time.h>
 
 #define BLE_PKT_FIRST  0x01
 #define BLE_PKT_MID    0x02
@@ -33,6 +37,60 @@ struct nvr_ble {
     int       asm_enc;     /* 本条是否加密 */
     int       asm_active;  /* 是否正在组一条 */
 };
+
+void nvr_ble_resolve_crypt_key(const char *ble_key, const char *mac, const char *serial,
+                               char *out, int out_cap)
+{
+    if (!out || out_cap < 2) return;
+    out[0] = 0;
+    if (ble_key && ble_key[0]) {
+        snprintf(out, (size_t)out_cap, "%s", ble_key);
+        return;
+    }
+    /* 无 Blekey：广播 MAC_SN 前 16（与 BLE_helper 一致） */
+    char mac_nocolon[24] = {0};
+    int j = 0;
+    for (const char *p = mac ? mac : ""; *p && j < (int)sizeof(mac_nocolon) - 1; p++)
+        if (*p != ':' && *p != '-') mac_nocolon[j++] = (char)toupper((unsigned char)*p);
+    char mfg[80];
+    snprintf(mfg, sizeof(mfg), "%s_%s", mac_nocolon, serial ? serial : "");
+    snprintf(out, (size_t)out_cap, "%.16s", mfg);
+}
+
+int nvr_ble_gen_key16(char *out, int out_cap)
+{
+    if (!out || out_cap < 17) return -1;
+    unsigned char rnd[8];
+    int filled = 0;
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd >= 0) {
+        ssize_t n = read(fd, rnd, sizeof(rnd));
+        close(fd);
+        if (n == (ssize_t)sizeof(rnd)) filled = 1;
+    }
+    if (!filled) {
+        srand((unsigned)time(NULL) ^ (unsigned)getpid());
+        for (int i = 0; i < 8; i++) rnd[i] = (unsigned char)(rand() & 0xFF);
+    }
+    static const char *H = "0123456789ABCDEF";
+    for (int i = 0; i < 8; i++) {
+        out[i * 2]     = H[(rnd[i] >> 4) & 0xF];
+        out[i * 2 + 1] = H[rnd[i] & 0xF];
+    }
+    out[16] = 0;
+    return 0;
+}
+
+void nvr_ble_set_crypt_key(nvr_ble_t *b, const char *key)
+{
+    if (!b) return;
+    if (key && key[0])
+        snprintf(b->cfg.crypt_key, sizeof(b->cfg.crypt_key), "%s", key);
+    else
+        nvr_ble_resolve_crypt_key(NULL, b->cfg.mac, b->cfg.serial,
+                                  b->cfg.crypt_key, (int)sizeof(b->cfg.crypt_key));
+    NVR_LOGI("ble", "crypt_key 已更新 len=%d", (int)strlen(b->cfg.crypt_key));
+}
 
 /* ---------------- 分包（encode） ---------------- */
 int nvr_ble_frame_encode(const uint8_t *payload, int len, int enc, int mtu,
@@ -95,20 +153,61 @@ static int emit_notify(void *ud, const uint8_t *pkt, int n)
     return b->cfg.link.notify(b->cfg.link.ud, pkt, n);
 }
 
-/* 组好一整条 → 派发 → 应答分包回 notify */
+/* 组好一整条 → 解密(可选) → 派发 → 应答加密(可选) → 分包 notify */
 static void deliver(struct nvr_ble *b)
 {
-    /* NUL 结尾便于当 C 串处理（NOP JSON 为文本；加密体则由 dispatch 内解） */
-    if (asm_reserve(b, b->asm_len + 1) == 0) b->asm_buf[b->asm_len] = 0;
-    NVR_LOGI("ble", "组包完成 %d 字节 (enc=%d) → dispatch", b->asm_len, b->asm_enc);
+    const uint8_t *payload = b->asm_buf;
+    int payload_len = b->asm_len;
+    uint8_t *dec_buf = NULL;
+    int enc = b->asm_enc;
+
+    if (enc) {
+        int cap = ((b->asm_len + 15) & ~15) + 16;
+        dec_buf = (uint8_t *)malloc((size_t)cap + 1);
+        if (!dec_buf) { asm_reset(b); return; }
+        int n = nvr_ble_aes_dec(b->cfg.crypt_key, b->asm_buf, b->asm_len, dec_buf, cap);
+        if (n < 0) {
+            NVR_LOGW("ble", "AES 解密失败（crypt_key len=%d）", (int)strlen(b->cfg.crypt_key));
+            free(dec_buf);
+            asm_reset(b);
+            return;
+        }
+        /* 去掉 zero-pad 尾零，便于当 JSON C 串 */
+        while (n > 0 && dec_buf[n - 1] == 0) n--;
+        dec_buf[n] = 0;
+        payload = dec_buf;
+        payload_len = n;
+    } else {
+        if (asm_reserve(b, b->asm_len + 1) == 0) b->asm_buf[b->asm_len] = 0;
+        payload = b->asm_buf;
+        payload_len = b->asm_len;
+    }
+
+    NVR_LOGI("ble", "组包完成 %d 字节 (enc=%d) → dispatch", payload_len, enc);
 
     char *resp = NULL;
     if (b->cfg.dispatch)
-        resp = b->cfg.dispatch(b->cfg.dispatch_ud, (const char *)b->asm_buf, b->asm_enc);
+        resp = b->cfg.dispatch(b->cfg.dispatch_ud, (const char *)payload, enc);
     if (!resp) resp = strdup("{\"statusCode\":500,\"statusMsg\":\"no dispatch\"}");
+    free(dec_buf);
 
-    nvr_ble_frame_encode((const uint8_t *)resp, (int)strlen(resp), b->asm_enc,
-                         b->cfg.mtu, emit_notify, b);
+    const uint8_t *out_payload = (const uint8_t *)resp;
+    int out_len = (int)strlen(resp);
+    uint8_t *enc_buf = NULL;
+    if (enc) {
+        int cap = ((out_len + 15) & ~15) + 16;
+        enc_buf = (uint8_t *)malloc((size_t)cap);
+        if (enc_buf) {
+            int n = nvr_ble_aes_enc(b->cfg.crypt_key, (const uint8_t *)resp, out_len, enc_buf, cap);
+            if (n > 0) { out_payload = enc_buf; out_len = n; }
+            else { free(enc_buf); enc_buf = NULL; enc = 0; }
+        } else {
+            enc = 0;
+        }
+    }
+
+    nvr_ble_frame_encode(out_payload, out_len, enc, b->cfg.mtu, emit_notify, b);
+    free(enc_buf);
     free(resp);
     asm_reset(b);
 }
@@ -185,9 +284,13 @@ int nvr_ble_create(const nvr_ble_cfg_t *cfg, nvr_ble_t **out)
     if (!b) return -1;
     b->cfg = *cfg;
     if (b->cfg.mtu < 7) b->cfg.mtu = 40;
+    if (!b->cfg.crypt_key[0])
+        nvr_ble_resolve_crypt_key(NULL, b->cfg.mac, b->cfg.serial,
+                                  b->cfg.crypt_key, (int)sizeof(b->cfg.crypt_key));
     *out = b;
-    NVR_LOGI("ble", "BLE 通路就绪 (model=%s mtu=%d, 链路%s)",
-             b->cfg.model, b->cfg.mtu, cfg->link.notify ? "已接" : "未接(stub)");
+    NVR_LOGI("ble", "BLE 通路就绪 (model=%s mtu=%d crypt_len=%d, 链路%s)",
+             b->cfg.model, b->cfg.mtu, (int)strlen(b->cfg.crypt_key),
+             cfg->link.notify ? "已接" : "未接(stub)");
     return 0;
 }
 

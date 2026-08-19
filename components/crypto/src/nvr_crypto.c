@@ -4,6 +4,7 @@
 #include "nvr_crypto.h"
 
 #include <openssl/evp.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -55,15 +56,122 @@ int nvr_aes256_ecb_enc(const uint8_t k[32], const uint8_t *in, int len, uint8_t 
 int nvr_aes256_ecb_dec(const uint8_t k[32], const uint8_t *in, int len, uint8_t *out)
 { return aes_run(EVP_aes_256_ecb(), 0, k, NULL, in, len, out); }
 
+/* ---------------- BLE AES-128-ECB ---------------- */
+static void ble_key16(const char *password, uint8_t key[16])
+{
+    memset(key, 0, 16);
+    if (!password) return;
+    size_t n = strlen(password);
+    if (n > 16) n = 16;
+    memcpy(key, password, n);
+}
+
+static int aes128_ecb(int enc, const uint8_t key[16], const uint8_t *in, int len, uint8_t *out)
+{
+    if (!in || !out || len <= 0 || (len % 16) != 0) return -1;
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return -1;
+    int rc = -1, outl = 0, tmpl = 0;
+    /* IV 同 key（与 BLE_helper 一致；ECB 实际忽略 IV，但 CreateEncryptor 会设） */
+    if (EVP_CipherInit_ex(ctx, EVP_aes_128_ecb(), NULL, key, key, enc) != 1) goto done;
+    EVP_CIPHER_CTX_set_padding(ctx, 0);
+    if (EVP_CipherUpdate(ctx, out, &outl, in, len) != 1) goto done;
+    if (EVP_CipherFinal_ex(ctx, out + outl, &tmpl) != 1) goto done;
+    rc = outl + tmpl;
+done:
+    EVP_CIPHER_CTX_free(ctx);
+    return rc;
+}
+
+int nvr_ble_aes_enc(const char *password, const uint8_t *in, int in_len,
+                    uint8_t *out, int out_cap)
+{
+    if (!password || !in || in_len < 0 || !out) return -1;
+    int pad = (16 - (in_len % 16)) % 16;
+    int total = in_len + pad;
+    if (total > out_cap) return -1;
+    uint8_t key[16];
+    ble_key16(password, key);
+    if (pad) {
+        /* 需临时缓冲（in 可能不可写） */
+        uint8_t *tmp = (uint8_t *)malloc((size_t)total);
+        if (!tmp) return -1;
+        memcpy(tmp, in, (size_t)in_len);
+        memset(tmp + in_len, 0, (size_t)pad);
+        int rc = aes128_ecb(1, key, tmp, total, out);
+        free(tmp);
+        return rc;
+    }
+    return aes128_ecb(1, key, in, in_len, out);
+}
+
+int nvr_ble_aes_dec(const char *password, const uint8_t *in, int in_len,
+                    uint8_t *out, int out_cap)
+{
+    if (!password || !in || in_len < 0 || !out) return -1;
+    int pad = (16 - (in_len % 16)) % 16;
+    int total = in_len + pad;
+    if (total > out_cap) return -1;
+    uint8_t key[16];
+    ble_key16(password, key);
+    if (pad) {
+        uint8_t *tmp = (uint8_t *)malloc((size_t)total);
+        if (!tmp) return -1;
+        memcpy(tmp, in, (size_t)in_len);
+        memset(tmp + in_len, 0, (size_t)pad);
+        int rc = aes128_ecb(0, key, tmp, total, out);
+        free(tmp);
+        return rc;
+    }
+    return aes128_ecb(0, key, in, in_len, out);
+}
+
 /* ==================== 口令派生（NightOwl） ====================
  * ⚠️⚠️ 下面 4 个常量为 NightOwl 私有，**请填真实值**（现为演示/空占位）。
  *   NVR_ENH_KEY_X / NVR_ENH_KEY_Y —— 增强模式 SHA256 前后缀密钥（见 BIND_IPC_FLOW §5）。
- *   NVR_ACT_AES_KEY[32] / NVR_ACT_AES_IV[16] —— 激活密码 AES-256-CBC 的密钥与盐(IV)。
- * 填写后 nvr_pw_algo_ready() 返回 1；未填时增强/激活密码不可用（连接回退空/admin/123456）。 */
-#define NVR_ENH_KEY_X ""        /* ← 填 NightOwl 提供的 key[x] */
-#define NVR_ENH_KEY_Y ""        /* ← 填 NightOwl 提供的 key[y] */
-static const uint8_t NVR_ACT_AES_KEY[32] = {0};   /* ← 填 32 字节激活 AES 密钥 */
-static const uint8_t NVR_ACT_AES_IV[16]  = {0};   /* ← 填 16 字节盐(IV) */
+ *   NVR_ACT_AES_KEY[32] —— 激活密码 AES-256-ECB 密钥（ASCII 后补 0）。 */
+/* BIND_IPC_FLOW §5 文档向量（可被 nvr_pw_set_keys / 设置库 factory.* 覆盖）。 */
+#define NVR_ENH_KEY_X "eT79Uo51sK"
+#define NVR_ENH_KEY_Y "SzxGJDZxjJ"
+/* key = ASCII eT79Uo51sK + 22 个 0，凑满 32 字节。只要 key，ECB 不要 IV。 */
+static const uint8_t NVR_ACT_AES_KEY[32] = {
+    'e','T','7','9','U','o','5','1','s','K'
+};
+
+static char    g_key_x[64] = NVR_ENH_KEY_X;
+static char    g_key_y[64] = NVR_ENH_KEY_Y;
+static uint8_t g_aes_key[32];
+static int     g_aes_set;
+
+static int parse_hex(const char *hex, uint8_t *out, int nbytes)
+{
+    if (!hex || !out) return -1;
+    int n = 0;
+    for (const char *p = hex; *p && n < nbytes; ) {
+        while (*p == ' ' || *p == ':') p++;
+        if (!p[0] || !p[1]) break;
+        unsigned v = 0;
+        if (sscanf(p, "%2x", &v) != 1) return -1;
+        out[n++] = (uint8_t)v;
+        p += 2;
+    }
+    return n == nbytes ? 0 : -1;
+}
+
+int nvr_pw_set_keys(const char *key_x, const char *key_y,
+                    const char *aes_key_hex, const char *aes_iv_hex)
+{
+    if (key_x && key_x[0]) snprintf(g_key_x, sizeof(g_key_x), "%s", key_x);
+    if (key_y && key_y[0]) snprintf(g_key_y, sizeof(g_key_y), "%s", key_y);
+    (void)aes_iv_hex;   /* ECB 不用 IV */
+    if (aes_key_hex && aes_key_hex[0]) {
+        if (parse_hex(aes_key_hex, g_aes_key, 32) == 0)
+            g_aes_set = 1;
+        else
+            return -1;
+    }
+    return 0;
+}
 
 /* 取前 n 个「字母数字」字符（对 hex 串即前 n 个字符）。 */
 int nvr_first_alnum(const char *in, int n, char *out, size_t out_cap)
@@ -94,7 +202,7 @@ int nvr_pw_enhanced_calc(const char *key_x, const char *random, const char *key_
 
 int nvr_pw_from_random(const char *random, char *out, size_t out_cap)
 {
-    return nvr_pw_enhanced_calc(NVR_ENH_KEY_X, random, NVR_ENH_KEY_Y, out, out_cap);
+    return nvr_pw_enhanced_calc(g_key_x, random, g_key_y, out, out_cap);
 }
 
 /* ② 8012：first16Alnum(MD5(username_ts : "8012" : auth_pwd)) */
@@ -124,23 +232,33 @@ int nvr_pw_activate(const char *nvr_sn, const char *dev_sn, char *out, size_t ou
     return k;
 }
 
-/* ④ setDeviceActive 密码字段：hex(AES-256-CBC(P_act, KEY, IV))。P_act=16B 正好一个 block。 */
+/* ④ setDeviceActive 密码字段：hex(AES-256-ECB(P_act, KEY))。P_act=16B 正好一个 block。 */
 int nvr_pw_act_encrypt(const char *nvr_sn, const char *dev_sn, char *out, size_t out_cap)
 {
     char pact[17];
     if (nvr_pw_activate(nvr_sn, dev_sn, pact, sizeof(pact)) != 16) return -1;   /* 16 字节明文 */
     uint8_t enc[16];
-    if (nvr_aes256_cbc_enc(NVR_ACT_AES_KEY, NVR_ACT_AES_IV, (const uint8_t *)pact, 16, enc) != 16)
+    const uint8_t *key = g_aes_set ? g_aes_key : NVR_ACT_AES_KEY;
+    if (nvr_aes256_ecb_enc(key, (const uint8_t *)pact, 16, enc) != 16)
         return -1;
     if (out_cap < 33) return -1;
-    nvr_hex(enc, 16, out, out_cap);        /* 32 hex chars（编码格式如需 base64 可改） */
+    nvr_hex(enc, 16, out, out_cap);
     return (int)strlen(out);
+}
+
+int nvr_pw_enh_ready(void)
+{
+    return (g_key_x[0] && g_key_y[0]) ? 1 : 0;
+}
+
+int nvr_pw_act_ready(void)
+{
+    if (g_aes_set) return 1;
+    for (int i = 0; i < 32; i++) if (NVR_ACT_AES_KEY[i]) return 1;
+    return 0;
 }
 
 int nvr_pw_algo_ready(void)
 {
-    int enh_ok = (NVR_ENH_KEY_X[0] != 0) && (NVR_ENH_KEY_Y[0] != 0);
-    int act_ok = 0;
-    for (int i = 0; i < 32; i++) if (NVR_ACT_AES_KEY[i]) { act_ok = 1; break; }
-    return (enh_ok && act_ok) ? 1 : 0;
+    return nvr_pw_enh_ready();
 }

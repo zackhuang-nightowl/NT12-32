@@ -20,6 +20,18 @@ extern "C" {
 
 #define NVR_MAX_CH 32   /* 整机通道:16 PoE + 16 LAN(与 app nvr_channel.h / mhal MHAL_MAX_CH 一致) */
 
+/* 预录环一帧(拥有编码码流拷贝);仅事件待命模式用。主/子各一环。 */
+#define NVR_PRE_FPS_ASSUME   15
+#define NVR_PRE_FRAMES_MAX   450   /* 30s×15fps 上限 */
+typedef struct {
+    uint8_t  *data;
+    uint32_t  len;
+    uint32_t  ts;
+    uint8_t   is_key;
+    uint8_t   codec;
+    uint8_t   frame_type;
+} stream_pre_frame_t;
+
 struct stream_chan;
 
 /* 单路码流(主或子)拉取上下文:各自 RTSP client / codec / 参数集缓存 / 帧计数。 */
@@ -48,6 +60,13 @@ typedef struct stream_pull {
     unsigned         vframes;
     unsigned long    vbytes;
     unsigned         last_idr_f;
+
+    /* 事件预录环(本路独占;主/子 puller 各写各的,无跨线程争用) */
+    stream_pre_frame_t *pre_frames;
+    int              pre_cap;
+    int              pre_count;
+    int              pre_head;
+    int              pre_flushed;   /* 本事件片段是否已 flush 本路预录 */
 } stream_pull_t;
 
 /* 单通道运行上下文。 */
@@ -64,12 +83,20 @@ typedef struct stream_chan {
     int              decode_stream; /* 当前喂解码器的码流:NVR_STREAM_MAIN/SUB(单宫格=主,多宫格=子) */
     int              decode_denied; /* 1=解码预算超限被拒(只录不显) */
     int              show_win;      /* 显示目标格:-1=隐藏(只拉+录,不解码);>=0=可见格号 */
+    volatile int     decode_dirty;  /* 命令/preview 线程置1:解码状态(show_win/decode_stream)变了,
+                                      * 由 puller 线程在自己线程内 open/close 解码器(避免与 mhal_vdec_send
+                                      * 并发 → use-after-free 野 chn)。与 writer 的 pend_event 同模式。 */
 
     /* 录像:主/子各一 writer(独立段;slot.stream 区分)。音频写主流。 */
     rsdk_writer_t   *writer_main;
     rsdk_writer_t   *writer_sub;
     int              rec_gated_main;/* 主路录像关键帧门控(从 IDR 起) */
     int              rec_gated_sub; /* 子路录像关键帧门控 */
+
+    /* 仅事件待命(连续 record=0 时):主/子各自预录环 + 触发后双轨写盘。 */
+    int              event_arm;         /* 1=待命预录 */
+    int              pre_record_s;      /* 预录秒数 */
+    volatile int     event_clip;        /* 1=事件片段进行中(puller 写盘) */
 
     rsdk_group_t    *grp;           /* 录像盘组:延迟到就绪后开 router 时用 */
     /* 事件标记(命令/事件线程置,puller 线程 owns writer 时应用,避免并发写 writer):

@@ -178,6 +178,7 @@ int mhal_vout_commit(void)
 
     HD_PATH_ID dec[MHAL_MAX_CH], proc[MHAL_MAX_CH], vout[MHAL_MAX_CH];
     int n = 0, rc = 0;
+    int prev_started = g_disp.started_n;   /* 清黑判定:纯增长(加窗)不清黑,缩小/持平才清 */
     for (int i = 0; i < MHAL_MAX_CH; i++) {
         struct mhal_vdec *d = g_disp.ch[i];
         /* vout_win≥0=宫格窗; -2=自由矩形(bind_rect,回放 0.8 区/displayExt)。二者都在显,须进 start_list。 */
@@ -213,7 +214,12 @@ int mhal_vout_commit(void)
             memcpy(g_disp.started_vout, vout, n * sizeof(HD_PATH_ID));
             g_disp.started_n = n;
             NVR_LOGD("mhal", "commit: %d 窗一次成图(start_list)", n);
-            mhal_vout_clear_black();   /* 空白区清稳定黑(空格不闪) */
+            /* ★ 只在"可能出现空格"时清整屏黑:布局/分辨率变化(need_clear)或在显集合缩小/持平(移窗/换窗)。
+             * 纯增量加窗(n>prev_started 且无布局变化)不清 → 已有窗不被一起刷黑,消除加设备的整屏黑闪。 */
+            if (g_disp.need_clear || n <= prev_started) {
+                mhal_vout_clear_black();   /* 空白区清稳定黑(空格不闪) */
+                g_disp.need_clear = 0;
+            }
         }
     }
     mhal_unlock();
@@ -255,6 +261,7 @@ int mhal_vout_init(mhal_out_t out, int width, int height)
     memset(&g_disp, 0, sizeof(g_disp));
     g_disp.out    = out;
     g_disp.layout = MHAL_LAYOUT_16;
+    g_disp.need_clear = 1;   /* 首次成图清整屏(空格黑);此后纯增量加窗不清 */
 
     /* 1) 平台公共初始化 + 各引擎 init（dec/proc/out）。
      * hd_common_init 的入参与 DRAM/chip 数相关，取值随板级 dts；见样例 §hd_common_init 注释。 */
@@ -381,6 +388,7 @@ int mhal_vout_set_resolution(int w, int h)
     if (!g_disp.inited) { mhal_unlock(); return -1; }
     apply_hdmi_resolution(w, h);
     mhal_vout_clear_black();
+    g_disp.need_clear = 1;   /* 分辨率热切 → 下次 commit 也清整屏 */
     mhal_unlock();
     return 0;
 }
@@ -390,6 +398,7 @@ int mhal_vout_set_layout(mhal_layout_t layout)
     mhal_lock();
     if (!g_disp.inited) { mhal_unlock(); return -1; }
     g_disp.layout = layout;
+    g_disp.need_clear = 1;   /* 切布局 → 下次 commit 清整屏(空格黑);增量加窗不清 */
     /* 对已开通道重算窗口矩形并下发（proc_out.rect + videoout IN_WIN_ATTR）。
      * 单窗口属性下发见 mhal_vdec.c 里 apply_window()（open 时用同一函数）。 */
     for (int i = 0; i < MHAL_MAX_CH; i++)
@@ -483,19 +492,37 @@ int mhal_vout_unbind(int decoder_chn)
 
 /* 数字变焦:把解码源(d->w×d->h)的一块 ROI 送 VPE 放大填满窗口。ROI 用源画面千分比给,
  * 转像素后 4 对齐并夹在帧内。全画面(x=0,y=0,w=h=1000)= 取消变焦。
- * 机制:videoproc 输入裁剪 HD_VIDEOPROC_PARAM_IN_CROP —— VPE 只取 ROI 再缩放到 OUT 窗口。 */
+ * 机制:videoproc 输入裁剪 HD_VIDEOPROC_PARAM_IN_CROP —— VPE 只取 ROI 再缩放到 OUT 窗口。
+ *
+ * HDAL: IN_CROP 模式 OFF→ON 必须在路径 stop 时 set、再 start 才生效。预览已经 start_list
+ * 跑着时，只 set 再对已启动路径 start() 是空操作，画面不变。已在 started 集合里的路：
+ * 先 stop 该 proc → set → start；尚未 start 的路只 set，等 commit/start_list。 */
 static int align4_down(int v) { return v & ~3; }
 static int align4_up(int v)   { return (v + 3) & ~3; }
 
-int mhal_vout_set_crop(int decoder_chn, int x_pm, int y_pm, int w_pm, int h_pm)
-{
-    mhal_lock();
-    if (!g_disp.inited || decoder_chn < 0 || decoder_chn >= MHAL_MAX_CH) { mhal_unlock(); return -1; }
-    struct mhal_vdec *d = g_disp.ch[decoder_chn];
-    if (!d || !d->opened || !d->proc_path) { mhal_unlock(); return -1; }
+static struct { int valid, x, y, w, h; } g_crop_pm[MHAL_MAX_CH];
 
-    /* 千分比 → 源像素(d->w/h 已 64 对齐);裁剪窗 4 对齐并夹在帧内 */
+static int proc_is_started_locked(const struct mhal_vdec *d)
+{
+    if (!d || !d->proc_path) return 0;
+    for (int i = 0; i < g_disp.started_n; i++)
+        if (g_disp.started_proc[i] == d->proc_path) return 1;
+    return 0;
+}
+
+static int apply_crop_locked(struct mhal_vdec *d, int x_pm, int y_pm, int w_pm, int h_pm)
+{
+    if (!d || !d->opened || !d->proc_path) return -1;
     int sw = d->w, sh = d->h;
+    if (sw <= 0 || sh <= 0) return -1;
+    /* ★ 8K 主码流走 sub-yuv 2x 下采样:解码器直吐 1/2 小图(如 7680x2176→3840x1088)给 videoproc,
+     * 故 videoproc 的**输入分辨率是下采样后的**。IN_CROP 坐标必须按下采样后算,否则 ROI 越界 → -10。
+     * (阈值/比率与 mhal_vdec.c 的 MHAL_SUBYUV_W_THLD=4096 / 2x 一致。) */
+    if (d->w > 4096) { sw = d->w / 2; sh = d->h / 2; }
+
+    /* 全帧(x/y=0,w/h≥1000 千分)=取消裁剪 → HD_CROP_OFF(避免 CROP_ON 满帧被某些 proc 路拒 -10)。 */
+    int full = (x_pm <= 0 && y_pm <= 0 && w_pm >= 1000 && h_pm >= 1000);
+
     int cw = align4_up((int)((long)w_pm * sw / 1000));
     int ch = align4_up((int)((long)h_pm * sh / 1000));
     int cx = align4_down((int)((long)x_pm * sw / 1000));
@@ -505,31 +532,60 @@ int mhal_vout_set_crop(int decoder_chn, int x_pm, int y_pm, int w_pm, int h_pm)
     if (cx < 0) cx = 0; if (cx > sw - cw) cx = sw - cw;
     if (cy < 0) cy = 0; if (cy > sh - ch) cy = sh - ch;
 
+    int running = proc_is_started_locked(d);
+    if (running) hd_videoproc_stop(d->proc_path);
+
     HD_VIDEOPROC_CROP crop; memset(&crop, 0, sizeof(crop));
-    crop.mode = HD_CROP_ON;                 /* 恒 ON;取消变焦=全帧 rect,不切模式(免重启) */
-    crop.win.coord.w = 0; crop.win.coord.h = 0;   /* {0,0}=像素坐标 */
+    crop.mode = full ? HD_CROP_OFF : HD_CROP_ON;
+    /* ★ coord = 输入坐标空间的参考分辨率(=videoproc 实际输入分辨率),rect 在该空间内取 ROI。
+     * SDK 样例 playback_with_digital_zoom.c:coord.w=ALIGN_FLOOR(w,8)、coord.h=ALIGN_FLOOR(h,2)。
+     * 之前误设 {0,0} → hd_videoproc_set(IN_CROP) 返 -10(裁剪恒失败,数字放大无效)。 */
+    crop.win.coord.w = sw & ~7;   /* ALIGN_FLOOR 8 */
+    crop.win.coord.h = sh & ~1;   /* ALIGN_FLOOR 2 */
     crop.win.rect.x = cx; crop.win.rect.y = cy;
     crop.win.rect.w = cw; crop.win.rect.h = ch;
     HD_RESULT ret = hd_videoproc_set(d->proc_path, HD_VIDEOPROC_PARAM_IN_CROP, &crop);
     if (ret != HD_OK) {
         NVR_LOGE("mhal", "chn%d 设输入裁剪失败 %d (ROI %d,%d %dx%d / 源 %dx%d)",
-                 decoder_chn, ret, cx, cy, cw, ch, sw, sh);
-        mhal_unlock();
+                 d->chn, ret, cx, cy, cw, ch, sw, sh);
+        if (running) hd_videoproc_start(d->proc_path);
         return -1;
     }
-    /* 首次 OFF→ON 切了 crop 模式 → 按 HDAL 要求重启该 videoproc 路径(之后仅改 rect 无需重启)。 */
-    if (!d->crop_on) { hd_videoproc_start(d->proc_path); d->crop_on = 1; }
-    NVR_LOGI("mhal", "chn%d 数字变焦 ROI=%d,%d %dx%d (源 %dx%d)", decoder_chn, cx, cy, cw, ch, sw, sh);
-    mhal_unlock();
+    if (running) hd_videoproc_start(d->proc_path);
+    d->crop_on = 1;
+    NVR_LOGI("mhal", "chn%d 数字变焦 ROI=%d,%d %dx%d (源 %dx%d%s)",
+             d->chn, cx, cy, cw, ch, sw, sh, running ? ", restart proc" : ", pending start");
     return 0;
 }
 
-int mhal_vout_osd(int win_idx, const char *text)
+void mhal_crop_apply_pending(struct mhal_vdec *d)
 {
-    (void)win_idx; (void)text;
-    /* TODO(板级): 通道名/时间/事件 OSD 叠加走 GFX/OSG 图层
-     * （hd_gfx_* 或 videoout OSD 参数），见样例 display_with_osg.c / draw_lines_to_display.c。 */
-    return 0;
+    if (!d || d->chn < 0 || d->chn >= MHAL_MAX_CH) return;
+    if (!g_crop_pm[d->chn].valid) return;
+    apply_crop_locked(d, g_crop_pm[d->chn].x, g_crop_pm[d->chn].y,
+                      g_crop_pm[d->chn].w, g_crop_pm[d->chn].h);
+}
+
+int mhal_vout_set_crop(int decoder_chn, int x_pm, int y_pm, int w_pm, int h_pm)
+{
+    mhal_lock();
+    if (!g_disp.inited || decoder_chn < 0 || decoder_chn >= MHAL_MAX_CH) { mhal_unlock(); return -1; }
+    g_crop_pm[decoder_chn].valid = 1;
+    g_crop_pm[decoder_chn].x = x_pm;
+    g_crop_pm[decoder_chn].y = y_pm;
+    g_crop_pm[decoder_chn].w = w_pm;
+    g_crop_pm[decoder_chn].h = h_pm;
+
+    struct mhal_vdec *d = g_disp.ch[decoder_chn];
+    if (!d || !d->opened || !d->proc_path) {
+        NVR_LOGI("mhal", "chn%d 数字变焦暂存 ROI=%d,%d %dx%d (解码器未开,等 open 再下)",
+                 decoder_chn, x_pm, y_pm, w_pm, h_pm);
+        mhal_unlock();
+        return 0;
+    }
+    int rc = apply_crop_locked(d, x_pm, y_pm, w_pm, h_pm);
+    mhal_unlock();
+    return rc;
 }
 
 void mhal_vout_deinit(mhal_out_t out)

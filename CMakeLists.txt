@@ -90,4 +90,4 @@ endif()
 # 整机可执行(nvr_app)在 app/CMakeLists 内由 NVR_WITH_ONBOARD 决定是否链接。
 add_subdirectory(app)
 
-message(STATUS "nvr_firmware: nop/recorder/storage/streaming/config/app + platform 已纳入；onvif/cloud_tutk glue 待补充")
+message(STATUS "nvr_firmware: nop/recorder/storage/streaming/onvif/tutk/config/app + platform 已纳入")

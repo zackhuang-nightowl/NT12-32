@@ -68,6 +68,7 @@ struct nvr_playback {
     long               pause_at_ms;
     volatile int       alive_feeders;
     volatile uint32_t  max_decoded_wall;
+    volatile uint32_t  min_decoded_wall;   /* 倒放解码到的最早 wall(倒放时间轴取此,随倒放递减) */
     volatile int       clock_reanchored;
     int                dec_open;
     int                dec_chlist[NVR_PB_MAX_CELLS];
@@ -375,6 +376,8 @@ static int pb_send_vframe(nvr_playback_t *pb, pb_feeder_ctx_t *ctx, mhal_vdec_t 
     }
     if (tmp) free(tmp);
     if ((uint32_t)h->wall_time > pb->max_decoded_wall) pb->max_decoded_wall = (uint32_t)h->wall_time;
+    if (pb->min_decoded_wall == 0 || (uint32_t)h->wall_time < pb->min_decoded_wall)
+        pb->min_decoded_wall = (uint32_t)h->wall_time;   /* 倒放递减边界 → 时间轴倒退 */
 
     if (pb->frame_step) {
         pb->paused = 1; pb->pause_at_ms = now_ms();
@@ -481,6 +484,12 @@ static void *pb_feeder_bwd(void *arg)
     rsdk_group_player_t *gp = NULL;
     if (rsdk_group_play_open(g, segs, nseg, &gp) != RSDK_OK || !gp) { free(segs); return NULL; }
 
+    /* par 提前分配,预扫时顺带抓一次参数集(SPS/PPS 恒定)。 */
+    uint8_t *par = (uint8_t *)malloc(65536);
+    int par_len = 0, par_building = 0, synced = 0, trace = 0;
+    int par_captured = 0;
+    uint64_t prev_pts = 0;
+
     pb_ikey_t *keys = (pb_ikey_t *)malloc(sizeof(pb_ikey_t) * PB_IKEY_MAX);
     int nk = 0;
     if (keys) {
@@ -488,8 +497,15 @@ static void *pb_feeder_bwd(void *arg)
             rsdk_frame_hdr_t h; const uint8_t *data = NULL; uint32_t len = 0; int disk = 0;
             if (rsdk_group_play_next(gp, &h, &data, &len, &disk) != RSDK_OK) break;
             if (h.rec_kind != RSDK_RK_FRAME) continue;
-            if (h.frame_type != RSDK_FRAME_I) continue;
             if ((int)h.stream != want_stream) continue;
+            /* ★ 崩溃根因修复:倒放只 seek 到 IDR、跳过其前的 SPS/PPS → 送无参数 IDR 进解码 =
+             *   "scan first header error" 风暴 → nvr_app 崩。此处抓一次参数集,显示时前置到每个 IDR。 */
+            if (!par_captured && par) {
+                nal_class_t nc; nal_classify(data, (int)len, (h.codec == RSDK_CODEC_H265) ? 1 : 0, &nc);
+                if (nc.is_param) { if (par_len + (int)len <= 65536) { memcpy(par + par_len, data, len); par_len += (int)len; } }
+                else if (nc.is_key && par_len > 0) par_captured = 1;   /* 首个 IDR 前参数已齐 → 冻结 */
+            }
+            if (h.frame_type != RSDK_FRAME_I) continue;
             if ((uint32_t)h.wall_time < t0 || (uint32_t)h.wall_time > start_wall) continue;
             keys[nk].wall = (uint32_t)h.wall_time;
             keys[nk].pts = h.pts;
@@ -497,11 +513,7 @@ static void *pb_feeder_bwd(void *arg)
         }
     }
     rsdk_group_play_close(gp);
-    NVR_LOGI("pb", "chn%d ◀倒放 扫到 %d 个 I 帧", chn0 + 1, nk);
-
-    uint8_t *par = (uint8_t *)malloc(65536);
-    int par_len = 0, par_building = 0, synced = 0, trace = 0;
-    uint64_t prev_pts = 0;
+    NVR_LOGI("pb", "chn%d ◀倒放 扫到 %d 个 I 帧(参数集 %d 字节)", chn0 + 1, nk, par_len);
 
     for (int i = nk - 1; i >= 0 && pb->running; i--) {
         while (pb->paused && pb->running) usleep(40000);
@@ -606,6 +618,7 @@ static void pb_start_feeders_locked(nvr_playback_t *pb)
     pb->running = 1;
     pb->alive_feeders = pb->nth;
     pb->max_decoded_wall = pb->start_wall;
+    pb->min_decoded_wall = pb->start_wall;
     for (int k = 0; k < pb->nth; k++)
         pb->fctx[k].thread_ok = (pthread_create(&pb->th[k], NULL, pb_feeder, &pb->fctx[k]) == 0);
     snprintf(pb->status, sizeof(pb->status), "playing");
@@ -711,7 +724,26 @@ int nvr_playback_control(nvr_playback_t *pb, const char *action, int chn1,
     int same_seek = is_play && start_wall > 0 && start_wall == pb->start_wall &&
                     pb->nth > 0 && (pb->running || pb->paused);
 
-    if (is_pause) {
+    /* ★ 方向翻转(正↔倒)最优先:不管走哪个 action 分支,都从**当前播放位置**按新方向重启
+     * feeder + 重锚时钟/解码边界。否则会出现"direction=backward 已设,但实际仍是正放 feeder
+     * 在跑、时间轴不动"(resume/同 seek 无翻转/caps 早退等路径都会漏掉重启)。 */
+    int dir_flipped = (direction && direction[0] && old_bwd != pb->backward &&
+                       pb->nth > 0 && (pb->running || pb->paused) && !is_stop);
+
+    if (dir_flipped) {
+        uint32_t curpos = pb_master_wall(pb);
+        if (curpos == 0) curpos = pb->start_wall;
+        pb_stop_feeders_locked(pb);
+        pb->start_wall = curpos;
+        pb->day_end_wall = day_end_of(curpos);
+        pb->i_only = (pb->speed_milli > 4000) || pb->backward;
+        pb->play_base_ms = now_ms(); pb->play_base_wall = curpos;
+        pb->clock_reanchored = 0; pb->paused = 0; pb->pause_at_ms = 0;
+        pb->cur_wall = curpos;
+        pb->max_decoded_wall = curpos; pb->min_decoded_wall = curpos;
+        pb_start_feeders_locked(pb);
+        snprintf(pb->status, sizeof(pb->status), "playing");
+    } else if (is_pause) {
         if (pb->nth > 0 && !pb->paused) {
             pb->paused = 1; pb->pause_at_ms = now_ms();
             snprintf(pb->status, sizeof(pb->status), "paused");
@@ -848,8 +880,8 @@ void nvr_playback_get_status(nvr_playback_t *pb, char *status, char *speed,
         if (pb->nth <= 0 || pb->play_base_ms == 0) cur = pb->start_wall;
         else {
             uint32_t sc = pb_master_wall(pb);
-            uint32_t md = pb->max_decoded_wall;
-            if (pb->backward) cur = (sc > md) ? sc : md; /* 倒放取较新解码边界 */
+            uint32_t md = pb->backward ? pb->min_decoded_wall : pb->max_decoded_wall;
+            if (pb->backward) cur = (sc > md) ? sc : md; /* 倒放:主时钟与最早解码边界取较新(不早于实解) */
             else cur = (sc < md) ? sc : md;
         }
         *cur_wall = cur;

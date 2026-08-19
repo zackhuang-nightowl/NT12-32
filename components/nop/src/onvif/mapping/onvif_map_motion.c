@@ -1,8 +1,9 @@
 /**
  * @file onvif_map_motion.c
- * @brief §8 Motion handlers — NOP X_NightOwl_get/setChannelTriggerActivityZone
- *        <-> ONVIF CellMotionDetector rule (ActiveCells bitmap + Sensitivity).
+ * @brief §8 Motion handlers — NOP X_NightOwl_getChannelActivityZoneTypes
+ *        / get/setChannelTriggerActivityZone <-> ONVIF CellMotionDetector.
  *
+ *   Types: GetRules Type 含 Motion（或 GetSupportedRules CellMotion）→ triggers=["pixelChange"].
  *   activityZonePoints [[col,row]] <-> ActiveCells bitmap (row*cols+col bit).
  *   sensitivity level string <-> ONVIF Sensitivity 0..100. Grid = width x height
  *   (default 22x18). Values otherwise pass straight through.
@@ -25,18 +26,71 @@
 static int bit_get(const unsigned char *b, int idx) { return (b[idx >> 3] >> (7 - (idx & 7))) & 1; }
 static void bit_set(unsigned char *b, int idx) { b[idx >> 3] |= (unsigned char)(0x80 >> (idx & 7)); }
 
-/* NOP sensitivity level string <-> ONVIF 0..100. */
-static int level_to_sens(const char *lvl)
+/* NOP sensitivity level <-> ONVIF CellMotion MinCount (spec §8: sensitivity ↔
+ * MinCount). MinCount is the minimum number of adjacent active cells needed to
+ * fire, so it is INVERSE to sensitivity: high sensitivity == few cells needed.
+ * (The exact curve is "待补充" in the spec; this monotone mapping is the
+ * agreed placeholder.) The camera's separate Sensitivity(0..100) is left at its
+ * current value. */
+static int level_to_mincount(const char *lvl)
 {
-    if (lvl && !strcmp(lvl, "low"))  return 30;
-    if (lvl && !strcmp(lvl, "high")) return 80;
-    return 50;   /* "middle" / default */
+    if (lvl && !strcmp(lvl, "high")) return 1;   /* most sensitive */
+    if (lvl && !strcmp(lvl, "low"))  return 3;   /* least sensitive */
+    return 2;                                     /* "middle" / default */
 }
-static const char *sens_to_level(int s)
+static const char *mincount_to_level(int mc)
 {
-    if (s < 40) return "low";
-    if (s < 70) return "middle";
-    return "high";
+    if (mc <= 1) return "high";
+    if (mc >= 3) return "low";
+    return "middle";
+}
+
+/* GetRules Type 含 Motion/CellMotion，或 GetSupportedRules 宣称 CellMotionDetector。 */
+static int motion_supported(nop_onvif_device_t *dev, const char *cfg)
+{
+    nop_onvif_rule_t    rules[MOT_MAX_RULES];
+    nop_onvif_ai_caps_t ai;
+    int n;
+
+    n = nop_onvif_analytics_get_rules(dev, cfg, "Motion", rules, MOT_MAX_RULES);
+    if (n > 0)
+        return 1;
+    memset(&ai, 0, sizeof(ai));
+    if (nop_onvif_device_cached_ai(dev, cfg, &ai) == 0 && ai.motion_present)
+        return 1;
+    if (nop_onvif_analytics_get_ai_caps(dev, cfg, &ai) == 0 && ai.motion_present)
+        return 1;
+    return 0;
+}
+
+nop_status_t onvif_map_X_NightOwl_getChannelActivityZoneTypes(nop_onvif_map_backend_t *be,
+                                                              int ch,
+                                                              const nop_request_t *req,
+                                                              nop_response_t *resp)
+{
+    onvif_session_t *s;
+    char             cfg[100];
+    int              has_motion;
+    nop_json_t      *triggers;
+    (void)req;
+
+    s = onvif_session_begin(be, ch);
+    if (!s) return NOP_ERR_IO;
+    if (onvif_session_analytics_cfg(s, cfg, sizeof(cfg)) != 0) {
+        onvif_session_end(be);
+        return NOP_ERR_NOTIMPL;
+    }
+    has_motion = motion_supported(onvif_session_dev(s), cfg);
+    onvif_session_end(be);
+    if (!has_motion)
+        return NOP_ERR_NOTIMPL;
+
+    resp->content = nop_json_obj();
+    if (!resp->content) return NOP_ERR_NOMEM;
+    triggers = nop_json_arr();
+    nop_json_arr_push_str(triggers, "pixelChange");
+    nop_json_add(resp->content, "triggers", triggers);
+    return NOP_OK;
 }
 
 nop_status_t onvif_map_X_NightOwl_getChannelTriggerActivityZone(nop_onvif_map_backend_t *be,
@@ -76,7 +130,7 @@ nop_status_t onvif_map_X_NightOwl_getChannelTriggerActivityZone(nop_onvif_map_ba
     nop_json_add_int(resp->content, "channel", ch);
     nop_json_add_int(resp->content, "width", cm.columns);
     nop_json_add_int(resp->content, "height", cm.rows);
-    nop_json_add_str(resp->content, "sensitivity", sens_to_level(cm.sensitivity));
+    nop_json_add_str(resp->content, "sensitivity", mincount_to_level(cm.min_count));
     nop_json_add(resp->content, "activityZonePoints", onvif_map_cells_to_json(cells, ncell));
     return NOP_OK;
 }
@@ -104,8 +158,7 @@ nop_status_t onvif_map_X_NightOwl_setChannelTriggerActivityZone(nop_onvif_map_ba
     memset(&cm, 0, sizeof(cm));
     cm.columns     = w;
     cm.rows        = h;
-    cm.sensitivity = level_to_sens(nop_json_str(req->args, "sensitivity", "middle"));
-    cm.min_count   = 1;
+    cm.min_count   = level_to_mincount(nop_json_str(req->args, "sensitivity", "middle"));
     ncell = onvif_map_json_to_cells(nop_json_get(req->args, "activityZonePoints"),
                                     cells, MOT_MAX_CELLS);
     for (i = 0; i < ncell; i++) {
@@ -118,6 +171,15 @@ nop_status_t onvif_map_X_NightOwl_setChannelTriggerActivityZone(nop_onvif_map_ba
     if (!s) return NOP_ERR_IO;
     if (onvif_session_analytics_cfg(s, cfg, sizeof(cfg)) != 0) {
         onvif_session_end(be); return NOP_ERR_IO;
+    }
+    /* Preserve the camera's current Sensitivity(0..100): sensitivity ↔ MinCount
+     * per §8, so we only drive MinCount + ActiveCells here. */
+    {
+        nop_onvif_cellmotion_t cur;
+        memset(&cur, 0, sizeof(cur));
+        cur.columns = w; cur.rows = h;
+        if (nop_onvif_analytics_get_cellmotion(onvif_session_dev(s), cfg, &cur) >= 0)
+            cm.sensitivity = cur.sensitivity;
     }
     /* Replace: drop existing CellMotion rules, then create the new one. */
     n = nop_onvif_analytics_get_rules(onvif_session_dev(s), cfg, "CellMotion",

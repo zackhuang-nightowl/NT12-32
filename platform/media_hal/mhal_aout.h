@@ -22,7 +22,8 @@ typedef enum {
 } mhal_acodec_t;
 
 /* 打开/确保音频通路就绪(惰性:首次 send 或显式 open)。
- * sample_rate: Hz, 0→默认 16000。out_dev: 0=DAC/喇叭 1=ADDA 2=HDMI, <0 读环境变量。 */
+ * sample_rate: Hz, 0→默认 16000。out_dev: 0=DAC/喇叭 1=ADDA 2=HDMI；
+ * <0 读 MHAL_AOUT_DEV，未设则默认 HDMI。 */
 int  mhal_aout_open(mhal_acodec_t codec, int sample_rate, int out_dev);
 void mhal_aout_close(void);
 

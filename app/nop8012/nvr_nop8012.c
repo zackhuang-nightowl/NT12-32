@@ -10,6 +10,7 @@
 #include "nvr_nop8012_proto.h"
 #include "nvr_event.h"              /* nvr_evt_detect_from_msgtype */
 #include "nvr_dev_classify.h"           /* NVR_DEV_KIND_NOP */
+#include "nvr_crypto.h"                 /* nvr_pw_8012_digest */
 #include "nvr_log.h"
 
 #include <stdlib.h>
@@ -78,17 +79,13 @@ static void slot_backoff(slot_t *s, time_t now)
     s->next_retry = now + s->backoff;
 }
 
-/* 选登录密码:通道 pass 非空 → 用之;否则本机 ownerId → 用之;否则 "admin"。 */
+/* 选登录账密:
+ *   通道 pass 非空 = digest 已开 → 上层用时间戳 + 8012 digest(P_enh)；
+ *   通道 pass 空 = digest 已关 → 空密码交互。 */
 static void pick_password(nvr_nop8012_t *c, const slot_t *s, char *out, size_t cap)
 {
-    if (s->pass[0]) { snprintf(out, cap, "%s", s->pass); return; }
-    if (c->cfg.settings) {
-        nvr_owner_row_t ow;
-        if (nvr_settings_owner_get(c->cfg.settings, &ow) == 0 && ow.owner_id[0]) {
-            snprintf(out, cap, "%s", ow.owner_id); return;
-        }
-    }
-    snprintf(out, cap, "%s", "admin");
+    (void)c;
+    snprintf(out, cap, "%s", s->pass[0] ? s->pass : "");
 }
 
 /* 从 nvr_chan_mgr 同步 NOP 通道到 slot[](按通道号索引)。 */
@@ -104,9 +101,10 @@ static void sync_slots(nvr_nop8012_t *c)
         if (!ch->enabled || ch->kind != NVR_DEV_KIND_NOP || !ch->onvif_ip[0]) continue;
         present[ch->chn] = 1;
         slot_t *s = &c->slot[ch->chn];
-        /* IP/凭据变化 → 重置连接以用新参数 */
+        /* IP/凭据变化 → 重置连接以用新参数（含开关 digest 后的 P_enh ↔ 空） */
         if (s->used && (strcmp(s->ip, ch->onvif_ip) != 0 ||
-                        strcmp(s->user, ch->user[0] ? ch->user : "admin") != 0)) {
+                        strcmp(s->user, ch->user[0] ? ch->user : "admin") != 0 ||
+                        strcmp(s->pass, ch->pass) != 0)) {
             slot_close(s); s->used = 0;
         }
         if (!s->used) {
@@ -154,12 +152,25 @@ static void slot_send_login(nvr_nop8012_t *c, slot_t *s, time_t now)
         NVR_LOGW("8012", "ch%d 连接 %s 失败: %s", s->chn, s->ip, strerror(err ? err : errno));
         slot_backoff(s, now); return;
     }
-    char pass[64]; pick_password(c, s, pass, sizeof(pass));
+    char user[32], pass[64];
+    if (s->pass[0] && nvr_pw_enh_ready()) {
+        char ts[24], dig[24];
+        snprintf(ts, sizeof(ts), "%ld", (long)now);
+        if (nvr_pw_8012_digest(ts, s->pass, dig, sizeof(dig)) != 16) {
+            slot_backoff(s, now); return;
+        }
+        snprintf(user, sizeof(user), "%s", ts);
+        snprintf(pass, sizeof(pass), "%s", dig);
+    } else {
+        snprintf(user, sizeof(user), "%s", s->user[0] ? s->user : "admin");
+        pick_password(c, s, pass, sizeof(pass));
+    }
     uint8_t pkt[NVR_N8012_HDR_SIZE + NVR_N8012_LOGIN_SIZE];
-    int plen = nvr_n8012_pack_login(pkt, s->user, pass);
+    int plen = nvr_n8012_pack_login(pkt, user, pass);
     if (send(s->fd, pkt, (size_t)plen, MSG_NOSIGNAL) != plen) { slot_backoff(s, now); return; }
     s->state = ST_LOGIN_WAIT; s->login_deadline = now + LOGIN_TIMEOUT_S;
-    NVR_LOGI("8012", "ch%d 登录 %s:%d (user=%s)", s->chn, s->ip, c->port, s->user);
+    NVR_LOGI("8012", "ch%d 登录 %s:%d (user=%s digest=%s)",
+             s->chn, s->ip, c->port, user, s->pass[0] ? "on" : "off");
 }
 
 /* 处理一条完整帧(已在 s->buf[0..need))。返回 0 正常, -1 需关连接。 */
@@ -173,9 +184,31 @@ static int handle_frame(nvr_nop8012_t *c, slot_t *s, time_t now)
             s->state = ST_ONLINE; s->backoff = 0; s->last_hb = now;
             NVR_LOGI("8012", "ch%d 登录成功(ACK_OK)", s->chn);
             break;
-        case N8012_CMD_ACK_FAIL:
-            NVR_LOGW("8012", "ch%d 登录被拒(ACK_FAIL) — 检查账密", s->chn);
+        case N8012_CMD_ACK_FAIL: {
+            char rnd[13];
+            memcpy(rnd, s->buf + 28, 12);
+            rnd[12] = 0;
+            {
+                int i;
+                for (i = 0; i < 12 && rnd[i]; i++)
+                    if (rnd[i] < 32 || rnd[i] > 126) { rnd[i] = 0; break; }
+            }
+            if (rnd[0] && nvr_pw_enh_ready()) {
+                char penh[24];
+                if (nvr_pw_from_random(rnd, penh, sizeof(penh)) == 16) {
+                    NVR_LOGW("8012", "ch%d ACK_FAIL random=%s → 更新 P_enh 重登", s->chn, rnd);
+                    nvr_chan_set_enh(c->cfg.cm, s->chn, rnd, penh);
+                    snprintf(s->pass, sizeof(s->pass), "%s", penh);
+                }
+            } else if (s->pass[0]) {
+                /* 增强登录被拒且头里没有 random → 退回普通模式（等同 HTTP 402） */
+                NVR_LOGW("8012", "ch%d ACK_FAIL 无 random → 清 digest", s->chn);
+                nvr_chan_set_enh(c->cfg.cm, s->chn, "", "");
+                s->pass[0] = 0;
+            } else
+                NVR_LOGW("8012", "ch%d 登录被拒(ACK_FAIL)", s->chn);
             return -1;
+        }
         case N8012_CMD_SEND_MSG: {
             nop_detect_type_t type = nvr_evt_detect_from_msgtype(h.msg_type);
             if (type == NOP_DETECT_TYPE_MAX) break;           /* 未知类型忽略 */

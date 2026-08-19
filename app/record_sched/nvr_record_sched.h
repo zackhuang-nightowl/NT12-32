@@ -25,6 +25,9 @@ typedef struct {
     void         *meta;           /* rsdk_meta ctx（云存事件登记）；可 NULL */
     int           hdd_full_policy;/* RSDK_HDDFULL_OVERWRITE / _STOP */
     int           post_record_s;  /* 事件时窗后录秒（默认 10） */
+    void         *end_user;       /* on_event_end 上下文（nvr_app）；可 NULL */
+    /* 后录窗口结束：编排层去 NOP 相机取 EventExtInfo。不在本模块 HTTP。 */
+    void        (*on_event_end)(void *user, int chn, uint64_t event_id, uint32_t start_epoch);
 } nvr_rec_sched_cfg_t;
 
 int  nvr_rec_sched_init  (const nvr_rec_sched_cfg_t *cfg, nvr_rec_sched_t **out);
@@ -34,8 +37,8 @@ void nvr_rec_sched_deinit(nvr_rec_sched_t *r);
 int  nvr_rec_channel_up  (nvr_rec_sched_t *r, int chn, int codec);
 int  nvr_rec_channel_down(nvr_rec_sched_t *r, int chn);
 
-/* AI 事件触发：按时窗登记/延长云存事件（连续轨）。返回 event_id（0=未登记）。 */
-uint64_t nvr_rec_trigger_event(nvr_rec_sched_t *r, int chn, int rectype, uint32_t start_epoch);
+/* AI 事件触发：按时窗登记/延长云存事件（连续轨）。post_s≤0 用 cfg.post_record_s。返回 event_id（0=未登记）。 */
+uint64_t nvr_rec_trigger_event(nvr_rec_sched_t *r, int chn, int rectype, uint32_t start_epoch, int post_s);
 
 /* 满盘/盘事件（app on_storage_evt 转发）：STOP 策略下置全局停录标志。 */
 void nvr_rec_on_storage_evt(nvr_rec_sched_t *r, nvr_stg_evt_t e);

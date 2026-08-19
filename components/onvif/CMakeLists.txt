@@ -7,13 +7,13 @@ add_library(nvr_dev_classify STATIC src/nvr_dev_classify.c)
 target_include_directories(nvr_dev_classify PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set_target_properties(nvr_dev_classify PROPERTIES C_STANDARD 11)
 
-add_library(nvr_onvif STATIC src/nvr_onvif.c)
+add_library(nvr_onvif STATIC src/nvr_onvif.c src/nvr_lan34569.c)
 
 target_include_directories(nvr_onvif PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../nop/include        # nop_sdk/nop_onvif.h
 )
-target_link_libraries(nvr_onvif PUBLIC nvr_dev_classify)
+target_link_libraries(nvr_onvif PUBLIC nvr_dev_classify pthread)
 # 链接 nop 的 onvif 客户端（NOP_WITH_ONVIF=ON 时 nopcore 内含 nop_onvif_* 实现）
 if(TARGET nopcore_static)
     target_link_libraries(nvr_onvif PUBLIC nopcore_static)

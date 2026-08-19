@@ -77,11 +77,20 @@ extern "C" rsdk_err_t nvr_stream_add_channel(nvr_stream_mgr_t *m, const nvr_stre
 extern "C" rsdk_err_t nvr_stream_set_url(nvr_stream_mgr_t *m, int chn, int stream, const char *url)
 {
     stream_chan_t *c = slot(m, chn);
-    if (!c || !url || !url[0]) return RSDK_E_PARAM;
+    if (!c || !url || !url[0]) {
+        NVR_LOGW("stream", "set_url ch%d stream=%d 拒绝: used=%d slot=%p url=%s",
+                 chn, stream,
+                 (m && chn >= 0 && chn < NVR_MAX_CH) ? m->used[chn] : -1,
+                 (void *)c, url ? url : "(null)");
+        return RSDK_E_PARAM;
+    }
     stream_pull_t *p = pull_of(c, stream);
     if (strcmp(p->url, url) == 0 && p->puller) return RSDK_OK;   /* 同 URL 且在跑 */
     if (p->puller) stream_pull_stop(p);
     snprintf(p->url, sizeof(p->url), "%s", url);
+    NVR_LOGI("stream", "set_url ch%d stream=%d active=%d → %s url=%s",
+             chn, stream, m->active[chn],
+             m->active[chn] ? "起puller" : "仅存URL(未active)", url);
     if (m->active[chn]) stream_pull_start(p, m->cfg.conn_timeout, m->cfg.rx_timeout);
     return RSDK_OK;
 }
@@ -91,14 +100,9 @@ extern "C" rsdk_err_t nvr_stream_set_display(nvr_stream_mgr_t *m, int chn, int w
 {
     stream_chan_t *c = slot(m, chn);
     if (!c) return RSDK_E_NOTFOUND;
-    c->show_win = win;
-    if (!c->router_open) return RSDK_OK;      /* 未连上:连上后由 pull_on_connected 兑现 */
-    if (win >= 0) {
-        if (!c->vdec) stream_decode_open(c, win);
-        else          mhal_vout_bind(win, chn);
-    } else {
-        stream_decode_close(c);
-    }
+    /* ★ 不在命令/preview 线程直接开关解码器(会与 puller 线程 mhal_vdec_send 并发 → use-after-free)。
+     * 只改目标 + 置脏,由 puller 线程在自己线程内兑现。变化才置脏,避免同格重复重开(黑闪)。 */
+    if (c->show_win != win) { c->show_win = win; c->decode_dirty = 1; }
     return RSDK_OK;
 }
 
@@ -110,11 +114,8 @@ extern "C" rsdk_err_t nvr_stream_set_decode_stream(nvr_stream_mgr_t *m, int chn,
     if (!c) return RSDK_E_NOTFOUND;
     if (c->decode_stream == stream) return RSDK_OK;
     c->decode_stream = stream;
-    if (c->vdec && c->show_win >= 0) {        /* 正在显示 → 换解码源重开(用新码流 codec/分辨率) */
-        int win = c->show_win;
-        stream_decode_close(c);
-        stream_decode_open(c, win);
-    }
+    /* 换解码源同样交由 puller 线程重开(见 nvr_stream_set_display 注释)。 */
+    if (c->show_win >= 0) c->decode_dirty = 1;
     return RSDK_OK;
 }
 
@@ -139,8 +140,10 @@ extern "C" rsdk_err_t nvr_stream_stop(nvr_stream_mgr_t *m, int chn)
 extern "C" rsdk_err_t nvr_stream_start_all(nvr_stream_mgr_t *m)
 {
     if (!m) return RSDK_E_PARAM;
+    int cnt = 0;
     for (int i = 0; i < NVR_MAX_CH; i++)
-        if (m->used[i]) nvr_stream_start(m, i);
+        if (m->used[i]) { nvr_stream_start(m, i); cnt++; }
+    NVR_LOGI("stream", "start_all: 激活 %d 个已注册通道", cnt);
     return RSDK_OK;
 }
 
@@ -159,7 +162,8 @@ extern "C" rsdk_err_t nvr_stream_switch_stream(nvr_stream_mgr_t *m, int chn, int
 }
 
 /* 事件标记(命令/事件线程调用,只置 pend_*;puller 线程 owns writer 时应用写盘,避免并发):
- * event_id=0 清除标签;否则打标 + 写内联 EVENT 记录(供 queryEventList/scan)。end 为事件窗口末(自动清)。 */
+ * event_id=0 清除标签;否则打标 + 写内联 EVENT 记录(供 queryEventList/scan)。end 为事件窗口末(自动清)。
+ * 若 event_arm:启动事件片段(预录 flush + 开写盘)。 */
 extern "C" rsdk_err_t nvr_stream_set_event(nvr_stream_mgr_t *m, int chn, uint64_t event_id,
                                            int rectype, uint32_t start, uint32_t end)
 {
@@ -169,6 +173,15 @@ extern "C" rsdk_err_t nvr_stream_set_event(nvr_stream_mgr_t *m, int chn, uint64_
     c->pend_event_start   = start;
     c->pend_event_end     = end;
     c->pend_event_id      = event_id;   /* 最后置 id(puller 见 pend!=applied 触发应用) */
+    if (event_id && c->event_arm && !c->cfg.record) {
+        if (!c->event_clip) {
+            c->pmain.pre_flushed = 0;
+            c->psub.pre_flushed = 0;
+        }
+        c->event_clip = 1;
+    } else if (!event_id && c->event_arm) {
+        /* 显式清事件:片段收尾由 puller 在写路径关 writer;此处仅允许自然过期 */
+    }
     return RSDK_OK;
 }
 
@@ -184,8 +197,30 @@ extern "C" rsdk_err_t nvr_stream_set_record(nvr_stream_mgr_t *m, int chn, int on
      *       通道拆除(puller 已停)时才由 stream_router_close 关,无竞态。 */
     c->cfg.record = on;
     if (on) {
+        c->event_arm = 0;             /* 连续录像优先,退出仅事件待命 */
+        c->event_clip = 0;
+        c->pmain.pre_flushed = 0;
+        c->psub.pre_flushed = 0;
         if (!c->writer_main || !c->writer_sub) stream_open_writer(c, m->cfg.group);
         c->rec_gated_main = 0; c->rec_gated_sub = 0;
+    }
+    return RSDK_OK;
+}
+
+/* 仅事件待命:arm=1 时主+子双路预录;触发 set_event 后双轨写盘至 post 窗结束。与连续录像互斥。
+ * 预录环由各路 puller 按 pre_record_s 懒分配(避免命令线程与写路径并发 free)。 */
+extern "C" rsdk_err_t nvr_stream_set_event_arm(nvr_stream_mgr_t *m, int chn, int arm, int pre_s)
+{
+    stream_chan_t *c = slot(m, chn);
+    if (!c) return RSDK_E_NOTFOUND;
+    if (pre_s < 0) pre_s = 0;
+    if (pre_s > 30) pre_s = 30;
+    c->pre_record_s = pre_s;
+    if (arm && !c->cfg.record) {
+        c->event_arm = 1;
+    } else {
+        c->event_arm = 0;
+        /* 环释放交 puller:见 stream_route_video 在 !event_arm 时 pre_free */
     }
     return RSDK_OK;
 }
@@ -197,7 +232,9 @@ extern "C" uint32_t nvr_stream_recording_mask(nvr_stream_mgr_t *m)
     uint32_t mask = 0;
     if (!m) return 0;
     for (int i = 0; i < NVR_MAX_CH && i < 32; i++)
-        if (m->used[i] && (m->ch[i].writer_main || m->ch[i].writer_sub) && m->ch[i].cfg.record) mask |= (1u << i);  /* 开关关=不算录像中 */
+        if (m->used[i] && (m->ch[i].writer_main || m->ch[i].writer_sub) &&
+            (m->ch[i].cfg.record || m->ch[i].event_clip))
+            mask |= (1u << i);  /* 连续开或事件片段中=录像中 */
     return mask;
 }
 
@@ -230,8 +267,10 @@ extern "C" uint32_t nvr_stream_mgr_pause_recording(nvr_stream_mgr_t *m)
     for (int i = 0; i < NVR_MAX_CH; i++) {
         if (!m->used[i]) continue;
         stream_chan_t *c = &m->ch[i];
-        if (c->cfg.record) was |= (1u << i);
+        if (c->cfg.record || c->event_clip) was |= (1u << i);
         c->cfg.record = 0;            /* puller 下一帧起跳过写盘 */
+        c->event_arm = 0;
+        c->event_clip = 0;
     }
     usleep(150 * 1000);               /* drain:等已越过 record 检查的在途 write_frame 完成 */
     int closed = 0;

@@ -13,6 +13,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <pthread.h>
+#include <dirent.h>       /* GUI_getFileList: 列存储器根目录文件 */
+#include <sys/stat.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <errno.h>
@@ -86,8 +88,7 @@ char *cmd_getPlaybackCapabilities(cJSON *a, const nvr_cmd_ctx_t *c)
     (void)a;
     cJSON *o = cJSON_CreateObject();
     cJSON *proto = cJSON_AddArrayToObject(o, "protocol");
-    /* 本地 GUI 回放不经 protocol 字段;App 远程未就绪 → 空数组更诚实。可按需扩展。 */
-    (void)proto;
+    cJSON_AddItemToArray(proto, cJSON_CreateString("rtsp-iotc-tunnel"));
 
     cJSON *st = cJSON_AddArrayToObject(o, "streamType");
     cJSON_AddItemToArray(st, cJSON_CreateString("video"));
@@ -296,12 +297,37 @@ char *cmd_GUI_StopChannelBackup(cJSON *a, const nvr_cmd_ctx_t *c)
 
 /* ============================ 其它暂回落 / 桩 ============================ */
 
-#define NVR_NOP(name) \
-char *cmd_##name(cJSON *a, const nvr_cmd_ctx_t *c) { return nvr_cmd_nop_dispatch(a, c, #name); }
-
-NVR_NOP(GUI_getFileList)
-NVR_NOP(GUI_getChannelEventRecordingSchedule)
-NVR_NOP(GUI_setChannelEventRecordingSchedule)
-NVR_NOP(getChannelRecordingTime)
-
-#undef NVR_NOP
+/* GUI_getFileList:列指定存储器**根目录**下的文件名(FW 升级前找 upgradeFile_*.bin 等)。
+ * 见 nop_api_doc/System/GUI_getFileList.txt:args.storage(默认 usb;usb/usb2/sdcard/hdd/hdd2),
+ * 返回 content.FileList=[文件名...]。usb/usb2/sdcard 有文件系统可列;hdd/hdd2 是裸盘(直写录像,
+ * 无 fs)→ 空表。只列根目录、只列普通文件(不含子目录/隐藏项)。 */
+char *cmd_GUI_getFileList(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)c;
+    const char *storage = nvr_jstr(a, "storage", "usb");
+    char dir[64];
+    cJSON *o = cJSON_CreateObject();
+    cJSON *arr = cJSON_AddArrayToObject(o, "FileList");
+    if (bak_resolve_dir(storage, dir, sizeof(dir)) == 0) {
+        DIR *d = opendir(dir);
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d)) != NULL) {
+                if (e->d_name[0] == '.') continue;              /* 跳过 . .. 及隐藏 */
+                char full[320];
+                snprintf(full, sizeof(full), "%s/%s", dir, e->d_name);
+                struct stat st;
+                if (stat(full, &st) == 0 && S_ISREG(st.st_mode)) /* 仅根目录下的普通文件 */
+                    cJSON_AddItemToArray(arr, cJSON_CreateString(e->d_name));
+            }
+            closedir(d);
+            NVR_LOGI("file", "getFileList storage=%s dir=%s -> %d 文件",
+                     storage, dir, cJSON_GetArraySize(arr));
+        } else {
+            NVR_LOGW("file", "getFileList: %s(%s) 打不开——未挂载?", dir, storage);
+        }
+    } else {
+        NVR_LOGW("file", "getFileList: storage=%s 无可列文件系统(裸盘/未挂载)", storage);
+    }
+    return nvr_resp_content(o);   /* {statusCode:200, content:{FileList:[...]}} */
+}

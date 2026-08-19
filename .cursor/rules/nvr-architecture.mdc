@@ -5,7 +5,7 @@ alwaysApply: true
 
 # NT12-32 NVR 固件 — 架构记忆
 
-**产品**：NightOwl 32 路 PoE NVR（16 PoE + 16 IP）· aarch64 Linux 4.19 · HDMI 出图 · 裸盘录像 · NOP 8089 协议
+**产品**：NightOwl 32 路（16 PoE + 16 LAN）· 机型 **NOP12-32** · NT98633/NA51090 · aarch64 Linux 4.19 · HDMI 硬解出图 · 裸盘录像 · 固件 `1.0.0` · NOP 8089
 
 ## 分层（单向依赖，禁止反向/跨层）
 
@@ -13,54 +13,84 @@ alwaysApply: true
 app/ → components/ → platform/media_hal → third_party + BSP(hdal)
 ```
 
-- **app/**：整机编排（channel/preview/record_sched/event/router/config），模块间不横向调用
-- **components/**：六大功能 + 辅助库（见下表）
-- **platform/media_hal/**：唯一允许调用 na51090 hdal 的地方（mhal_vdec/mhal_vout）
-- **third_party/**：Happytime ONVIF/RTSP · TUTK · cJSON · sqlite3（intact，只经 glue 使用）
+- **app/**：整机编排。模块间不横向调用，只经 `nvr_app.c` 连回调。
+- **components/**：六大功能 + 辅助库。
+- **platform/media_hal/**：唯一允许调 hdal 的地方（`mhal_vdec` / `mhal_vout` / `mhal_aout`）。
+- **third_party/**：Happytime / TUTK / cJSON / sqlite3 保持 intact，只经 glue 使用。
 
-## 六大功能模块
+## 六大功能 + 辅助
 
 | # | 目录 | 职责 | 关键 API |
 |---|------|------|----------|
-| ① | `components/nop` | NOP 2.0 协议核 + cap handler + ONVIF 映射 | `nop_app_create/dispatch` |
-| ② | `components/onvif` | ONVIF 客户端 + 设备三分类 | `nvr_onvif_get_url`, `nvr_dev_classify` |
-| ③ | `components/streaming` | RTSP 拉流 → 硬解上屏 + 旁路录像 | `nvr_stream_mgr_*` |
-| ④ | `components/cloud_tutk` | TUTK P2P 远程 | `nvr_tutk_*` |
-| ⑤ | `components/recorder` | 裸盘录像/索引/回放/导出 MP4 | `rsdk_*` |
+| ① | `components/nop` | NOP 2.0 核 + cap + ONVIF 映射 | `nop_app_*` / `nop_http_server` |
+| ② | `components/onvif` | ONVIF 客户端 + 设备三分类 + 34569 | `nvr_onvif_get_url` / `nvr_dev_classify` / `nvr_lan34569_*` |
+| ③ | `components/streaming` | 主+子常拉 → 硬解上屏 + 双 writer 录像 | `nvr_stream_mgr_*` |
+| ④ | `components/cloud_tutk` | 本机 live RTSP（`nvr_rtsp_live` :8554） | `nvr_rtsp_live_*` |
+| ⑤ | `components/recorder` | 裸盘/索引/回放/导出 MP4 | `rsdk_*` |
 | ⑥ | `components/storage` | 盘发现/格式化/装配/热插拔 | `nvr_storage_*` |
 
-辅助：`config`(SQLite 设置库) · `crypto`(MD5/SHA/AES) · `cloud_uploader`(VSaaS 云存)
+辅助：`config`（SQLite `nvr_settings` + 身份 `nvr_identity`）· `crypto` · `cloud_uploader`(VSaaS)
+
+**P2P 不走 `nvr_tutk_init`**。实码拉起 ODC agent：`/dvr/tutk_cloud_agent/device.sh` → `AVAPIs_Server_CLI`（真 license）。`nvr_tutk.c` 是遗留 glue，勿当现行路径。
 
 ## 核心数据流
 
-**出图**：ONVIF 发现(②) → CRtspClient 拉流 → `mhal_vdec` 硬解 → `mhal_vout` HDMI（**禁止 ffmpeg 软解 16 路上屏**）
+**出图**：PoE 口 P → VLAN `(2001+P)` = **2002..2017**（2001 管理口），NVR `198.18.P.100`，相机常 `.1`。LAN 显式添加。主+子双拉 → 可见窗 `mhal_vdec` → `mhal_vout` HDMI（禁止 ffmpeg 软解多路上屏）。电子放大 `X_NightOwl_setChannelZoomPan` → `mhal_vout_set_crop`。
 
-**录像**：video_cb → `rsdk_rec_write_frame` → storage 裸盘(AES-256-CTR)
+**录像**：主/子各一 writer（`slot.stream=0/1`），音频挂主流 → storage 裸盘(AES-256-CTR)
 
-**远程**：App → 8089 NOP / TUTK P2P → nop router → app 编排 → streaming/recorder
+**远程**：App → ODC TUTK agent → 本机（不对外直连）。命令 **`iotc-tunnel:6061`**（与 8089 同 `nvr_cmd_dispatch`）；GUI/缩略图 **8089**（含 GET `/eventSnap`）；live **`rtsp://iotc-tunnel:8554/live/chN`**；对讲 **`127.0.0.1:7000`**。远程回放 RTSP 未做。
 
-**界面**：独立 LVGL 进程 → `127.0.0.1:8089/APPJsonCmd` → `nvr_cmd_router`
+**界面**：独立 LVGL → `127.0.0.1:8089/APPJsonCmd` → `nvr_cmd_router`（中央表 `g_nvr_cmd_table`）
 
-## 构建
+**身份**（`/User` 文件权威，OTA 不覆盖；勿写 settings 的 sn/mac/uid）：
+- SN ← `/User/OWLSerialNumber`（只读）
+- MAC eth0/eth1 ← `/User/mac_addr_v2` / `.eth1`（缺则 `/sys/class/net`）
+- UID ↔ `/User/tutk_agent_udid`；IOTCKey/AVKey ↔ `/User/OWL/tutkdata.json`；MODEL ↔ `/User/OWLModel`（缺省 `NOP12-32`，DHCP Option 12 / getDeviceInfo 同源）
 
-```bash
-# 主机（12 库 + ctest 4/4）
-cmake -S . -B build && cmake --build build -j && ctest --test-dir build
+**账户**：本地 Admin/Technician/Viewer（SHA256，失败 3 次锁 1h）。`GUI_login` aws → Cognito `InitiateAuth`；owner 空则 GraphQL `addDevice` 写 `nop_owner`+stoken，并清本地用户。`GUI_forgetPassword` = UID 前 6 位 + 当日 ResetCode。
 
-# 目标机（nvr_app 可执行）
-cmake -S . -B build_arm -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64-ca53.cmake \
-  -DNVR_WITH_ONBOARD=ON -DBSP_ROOT=<na51090_linux_sdk>
-```
+**事件**：相机 8012 客户端 + ONVIF 轮询 → `nop_event_hub` → `nvr_evt` → 录像/longPolling 位图/云存 + **异步抓拍**（8012 JPEG 或 ONVIF GetSnapshot → `rsdk_pic`）。NOP 上线 `AI_setEventExtInfoConfig enable=true`；后录结束 `AI_getEventExtInfo` 取回写入 `meta_doc(AI_EVENT)`；App 查 NVR 本地四接口（不透传）。OSD 由 GUI 自绘，固件不叠 HDMI。`GUI_longPolling` 有变化立刻推（最多挂 25s）。
+
+**对讲**：`app/talk`。`startSpeaker` 本机处理。NOP 相机 TCP `:7000`；ONVIF/nopOnvif 走 RTSP backchannel。App 音频经隧道打到 `iotc-tunnel:7000`。
+
+**OTA**：`.rom` 下载/本地 → 必校 payload **MD5**；包版本必须高于 `system.fw_version`，除非强制（`force` / 头 `force=1` / `nopUpgrade` 无 version）。通过后 `nvr_do_update.sh` 写非活动 rootfs（mtd6/mtd7），当前槽备份。
+
+## 绑定 / 鉴权 / 一机一 handle
+
+- **发现**：ONVIF WS-Discovery 为主；UDP **34569** LocalLAN 备用（应答带 MAC）。发现口 = 命令口（勿写死 8089）。LAN 掉线按 MAC 找回当前 IP（34569 优先，再 WS-Discovery）；PoE 按口/网段，不做 MAC 钉死。NVR 本机听 34569 供 App 找回管理地址。
+- **取流**：三类设备都走 ONVIF `GetStreamUri`（`nop_onvif_device_t`）。
+- **一机一 handle**：`host:port` 全生命周期一只 `nop_onvif_device_t`。连接时一次 GetCapabilities + GetServices + profiles + 各源 token/caps/OSD/venc。mapping **不得**再建第二只（`retain` 已连接的）；后续 SOAP 用缓存 token，不再 GetProfiles 重建。
+- **首次添加**（PoE 发现 / `GUI_LanAddDevice`）：立刻把 discovery 已有字段写入 camera 表并回复；tick 后台试一轮凭据，失败停等用户密码（status **4**），不再自动重打。`GUI_setLanDevice` 改密后再试一轮。已落库重连仍限次+退避。凭据组装在 `nvr_chan_bind.c`。
+- **凭据顺序**（`nvr_chan_auth_candidates`）：用户密码（非空且非 `123456`）→ 已开 digest 的 `P_enh` → `P_act` → 无鉴权。`admin/123456` = 无鉴权。NOP digest 开/关只走 `GUI_setLanDevice.enhancedSecurity`（true=NVR SET random 并用 `P_enh`；false=SET `random=""` 后空凭据，不以官方 `random_empty_error` 为准）；连接路径不自动 SET。**random 与 `P_enh` 入库，NVR reset 才清。** HTTP 401+`Random:` 重算重试；402 / GET 501 清本地回普通模式。相机接口无 `X_NightOwl_` 前缀；`args.channel` 默认 1，转发用 `dev_chn`。8012 `ACK_FAIL` 的 random 在头 reserved（offset 28，12 字节）。
+- **密码算法**：增强 `eT79Uo51sK` / `SzxGJDZxjJ`。激活 AES-**256-ECB**（无 IV），key = ASCII `eT79Uo51sK` 补 0 到 32 字节。
+- **通道状态**：0=无物理机；3=已发现/已 Add 未出图或连不上；**4=鉴权失败**（等密码）；1=出图。优先级 7>4>6>2>5>3>1>0。
+- **LAN 扫描 status**：`GUI_LanSearch` 默认 1（active）；仅 discovery 含 `nopState/inactive` 才为 0。
+- **MAC 找回**：discovery 无 mac 则 ONVIF 连上后补；ARP 优先于 GetNetworkInterfaces；统一 `aa:bb:cc:dd:ee:ff`。
+- **空 PoE 口**保持 0，直到发现（`poe_present`）。LAN Add 有 IP 即算有设备。
+- **多视频源**：`videoSources[{source,enabled}]` 决定启用哪路源（可只开源2、不开源1）。每启用源占一 NVR channel（`dev_chn` + `video_source_token`）；NOP 透传 `args.channel` 改成该路 `dev_chn`。`GUI_LanDelDevice` 按同 IP 删掉该物理台全部源通道。
+
+## 8089 三档 + mapping token
+
+GUI 走 **8089**；App 经 agent 走 **6061**（同 handler）。未命中 `g_nvr_cmd_table` 且带 `channel`：
+- `backend==0`（NOP）→ POST 该路相机 `/APPJsonCmd`（`channel` 改成该路 `dev_chn`）
+- **例外** `X_NightOwl_getChannelActivityZoneTypes` / `getChannelTriggerActivityZone`：NOP 透传失败 → ONVIF mapping（GetRules 含 Motion 才报 `triggers:["pixelChange"]`；区域从 CellMotion 取）
+- **nopOnvif 仅协议那几条**（`kind==NOPONVIF` + `nightowl_protocol.md`：白灯 / 警笛 / 一键报警 / 激活）→ POST 发现口 `/APPJsonCmd`。PTZ / OSD / 编码 / AI 等**仍走 ONVIF SOAP**。上线时 GET 两个开关，**200** 写入 `capabilities[]`（`light` / `audioAlert`），**501** 不支持。
+- 其余 `backend!=0`（含 nopOnvif 非白名单 + 通用 ONVIF）→ 按该路 `host:port` **发 ONVIF SOAP**
+
+远程媒体命令在 `nvr_cmd_p2p.c`：`startLiveStream` / `startSpeaker` / `buildTunnel`。
+
+mapping 请求必须带对 token：PTZ=`ProfileToken`（本源 `src_profile`）；对焦=`VideoSourceToken`（物理源，不是 VSC）；OSD/Mask=`VideoSourceConfigurationToken`；AI/移动侦测=`AnalyticsCfg`；编码=`venc token`。这些在连接时写入 handle 缓存，后续 mapping 直接用，禁止再 GetProfiles 重建。
 
 ## 编码约束
 
-- 新功能放对应 layer；app 只做编排与回调连接
-- ONVIF/RTSP 不直接改 third_party 源码，写 glue
-- hdal 调用只在 `platform/media_hal/`
-- 弱符号钩子（如 `nvr_onvif_get_url`）供模块可选接入
+- 新功能放对应 layer；app 只做编排与回调（`talk` / `channel` / `router` / `event` 不互相 include）
+- 不改 third_party 源码，写 glue；hdal 只在 `platform/media_hal/`
+- 新增本地 NOP 接口 = `g_nvr_cmd_table` 一行 + `cmd_<func>` handler
+- 弱符号钩子 `nvr_onvif_get_url` 供 ONVIF 可选接入
+- 身份只经 `nvr_identity_*`；P2P 只拉起/杀掉 ODC agent
+- 外网不直连；本机口：8089 GUI、6061 agent cgi、8554 live、7000 对讲、UDP 34569
 
 ## 文档入口
 
-- 架构详情：`docs/ARCHITECTURE.md`
-- 实现状态：`docs/STATUS.md`
-- 文档索引：`docs/INDEX.md`
+- 架构：`docs/ARCHITECTURE.md` · 状态：`docs/STATUS.md` · 绑定：`docs/BIND_IPC_FLOW.md` · 待办：`docs/待完成功能.md` · 索引：`docs/INDEX.md`

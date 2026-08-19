@@ -23,8 +23,8 @@ App ──P2PTunnel(UID + IOTC authkey)──► nvr_tutk (IOTC_Listen + P2PTunn
 | Key | 说明 |
 |-----|------|
 | `tutk.uid` | TUTK UID |
-| `tutk.authkey` | 8 字符 IOTC key（`getIotcAuthKey` / `setIotcAuthKey`） |
-| `tutk.license_key` | 可选 `TUTK_SDK_Set_License_Key` |
+| `tutk.authkey` | 8 字符 IOTC key（默认 `88888888`） |
+| `tutk.license_key` | TUTK license（默认 `000000`） |
 | `tutk.max_sessions` | 最大并发 P2P 会话，默认 8 |
 
 ## NOP 命令

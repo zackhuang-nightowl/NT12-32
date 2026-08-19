@@ -8,6 +8,7 @@
 #include "nvr_log.h"
 #include "nvr_onvif.h"      /* nvr_onvif_set_time_now:给相机 ONVIF 授时 */
 #include "nvr_channel.h"
+#include "nvr_identity.h"   /* nvr_identity_get_model:eth0 DHCP 主机名=设备 model */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,6 +43,9 @@ static int run(const char *fmt, ...)
 #define NVR_ETH0 "eth0"
 #define NVR_ETH1 "eth1"
 #define NVR_UDHCPC_SCRIPT "/usr/share/udhcpc/default.script"
+/* eth0 上次成功 DHCP 的 IP(持久化在 /SYS ubifs;default.script 的 bound 钩子写)。
+ * 下次开机 udhcpc 用 -r 请求它 → 默认复用旧 IP;被占用(ACD)才换。 */
+#define NVR_ETH0_LASTIP   "/SYS/dhcp_eth0.ip"
 
 static int is_dhcp_type(const char *network_type)
 {
@@ -338,8 +342,32 @@ int nvr_net_apply_eth0(nvr_settings_t *s)
     if (is_dhcp_type(lk.network_type)) {
         run("killall udhcpc 2>/dev/null");
         run("ifconfig %s up 2>/dev/null", NVR_ETH0);
-        run("udhcpc -i %s -b -q -s %s 2>/dev/null &", NVR_ETH0, NVR_UDHCPC_SCRIPT);
-        NVR_LOGI("net", "%s = DHCP (udhcpc)", NVR_ETH0);
+        /* -r <上次IP>:默认复用旧 IP(default.script bound 时写 NVR_ETH0_LASTIP);
+         *   被占用则 default.script 的 RFC5227 ACD 退让,udhcpc 再申请新 IP。
+         * -x hostname:<model>:DHCP Option 12 上报设备 model(权威 /User/OWLModel),
+         *   路由器/上级设备清单可按型号识别本机。 */
+        char ropt[80] = "", hopt[112] = "";
+        {
+            char lastip[64] = "";
+            FILE *lf = fopen(NVR_ETH0_LASTIP, "r");
+            if (lf) {
+                if (fgets(lastip, sizeof(lastip), lf))
+                    lastip[strcspn(lastip, " \r\n\t")] = 0;
+                fclose(lf);
+            }
+            if (lastip[0])
+                snprintf(ropt, sizeof(ropt), "-r %s ", lastip);
+            char model[48] = "";
+            nvr_identity_get_model(model, sizeof(model));
+            if (model[0]) {
+                snprintf(hopt, sizeof(hopt), "-x hostname:%s ", model);
+                run("hostname %s 2>/dev/null", model);   /* 本机主机名也设为 model */
+            }
+        }
+        run("udhcpc -i %s -b -q %s%s-s %s 2>/dev/null &",
+            NVR_ETH0, ropt, hopt, NVR_UDHCPC_SCRIPT);
+        NVR_LOGI("net", "%s = DHCP (udhcpc %s%s)", NVR_ETH0,
+                 ropt[0] ? ropt : "", hopt[0] ? hopt : "-x hostname:? ");
     } else {
         run("killall udhcpc 2>/dev/null");
         run("ifconfig %s %s netmask %s up 2>/dev/null", NVR_ETH0, lk.ip, lk.subnet_mask);
@@ -376,13 +404,11 @@ int nvr_net_apply(nvr_settings_t *s)
         NVR_LOGW("net", "eth0 应用失败,继续 PoE 口配置");
 
     /* eth1：PoE 汇聚口 —— 每 PoE 口一个 VLAN(2001..2016)，网段 198.18.<口>.0/24。
-     * ⚠️ 与原厂(S30eth1vlan + dhcpd_vlan.conf)对齐：
-     *   · NVR 侧接口取 .100（网关/DHCP 服务地址）— 原厂 SET_ETH_IP_2 2001 198.18.1.100
-     *   · udhcpd 只发 198.18.<口>.1（单地址），option router/dns = .100
-     *     相机固定落在 198.18.<口>.1；按第 3 段(=口号)入通道 口-1
-     *   （原厂用 ISC dhcpd + NOIPC host-name class 只认自家相机；此处 busybox udhcpd
-     *     以单地址池近似，NightOwl PoE 相机上报主机名 NOIPC 亦兼容）
-     * conf 运行期生成到 /tmp，自包含无需预置文件。 */
+     * ★ VLAN DHCP 服务端已统一到**基座 ISC dhcpd**(/etc/init.d/service.dhcpd +
+     *   /etc/dhcpd_vlan.conf,init.d 先于 nvr_app 起,持久租约落 /SYS)。此处不再另起
+     *   busybox udhcpd —— 否则两个 DHCP server 抢 eth1.<vid> UDP:67(端口占用竞态、
+     *   规则不一致)。本函数只负责把 VLAN 接口与 NVR 侧 .100 网关地址拉起(与基座
+     *   S30eth1vlan 幂等重合),供 ISC dhcpd 绑定与发现取流用源地址。 */
     int poe = nvr_settings_get_int(s, "system.poe_ports", 16);
     int vlan_base = nvr_settings_get_int(s, "network.eth1.vlan_base", NVR_DEF_VLAN_BASE);
     run("ifconfig %s up 2>/dev/null", NVR_ETH1);
@@ -394,26 +420,8 @@ int nvr_net_apply(nvr_settings_t *s)
         int vid = vlan_base + p;
         run("vconfig add %s %d 2>/dev/null", NVR_ETH1, vid);
         run("ifconfig eth1.%d 198.18.%d.100 netmask 255.255.255.0 up 2>/dev/null", vid, p);
-        /* 生成该 VLAN 的 udhcpd.conf 并起服务：相机固定 .1，网关/DNS 指向 NVR .100 */
-        char conf[64]; snprintf(conf, sizeof(conf), "/tmp/udhcpd.eth1.%d.conf", vid);
-        FILE *f = fopen(conf, "w");
-        if (f) {
-            fprintf(f,
-                "interface eth1.%d\n"
-                "start 198.18.%d.1\n"
-                "end 198.18.%d.1\n"
-                "option subnet 255.255.255.0\n"
-                "option router 198.18.%d.100\n"
-                "option dns 198.18.%d.100\n"
-                "max_leases 1\n"
-                "lease_file /tmp/udhcpd.eth1.%d.leases\n"
-                "pidfile /tmp/udhcpd.eth1.%d.pid\n",
-                vid, p, p, p, p, vid, vid);
-            fclose(f);
-            run("udhcpd %s 2>/dev/null &", conf);
-        }
     }
-    NVR_LOGI("net", "eth1 PoE 汇聚: %d 个 VLAN(%d..%d), NVR 侧 198.18.<口>.100, 相机固定 198.18.<口>.1",
+    NVR_LOGI("net", "eth1 PoE 汇聚: %d 个 VLAN(%d..%d), NVR 侧 198.18.<口>.100；DHCP=基座 ISC dhcpd",
              poe, vlan_base + 1, vlan_base + poe);
     nvr_net_upnp_apply(s);
     return 0;
@@ -732,15 +740,25 @@ typedef struct { int n; nvr_camera_row_t rows[NVR_TZ_CAM_CAP]; } cam_push_ctx_t;
 static void *cam_push_thread(void *arg)
 {
     cam_push_ctx_t *c = (cam_push_ctx_t *)arg;
-    int ok = 0;
+    int ok = 0, attempted = 0;
     for (int i = 0; i < c->n; i++) {
         nvr_camera_row_t *r = &c->rows[i];
         if (!r->enabled || !r->ip[0]) continue;
+        attempted++;
+        /* 统一走 ONVIF SetSystemDateAndTime(含 NOP 设备——其亦支持 ONVIF;service_url=NULL 时
+         * nvr_onvif_connect 内部 WS-Discovery 会纠正真实 ONVIF 端点)。授时含 UTC 时间 + 时区
+         * (见 onvif_api.cpp SetSystemDateAndTime:补了 TimeZone,否则相机时区不随 NVR→显示不同步)。 */
         int port = r->onvif_port > 0 ? r->onvif_port : 80;
-        if (nvr_onvif_set_time_now(r->ip, port, r->username, r->password) == 0) ok++;
-        else NVR_LOGW("time", "相机授时失败 ip=%s", r->ip);
+        int done = 0;
+        for (int attempt = 1; attempt <= 3; attempt++) {   /* 失败重试 3 次(含发现,偶发超时) */
+            if (nvr_onvif_set_time_now(r->ip, port, r->username, r->password) == 0) { done = 1; break; }
+            NVR_LOGW("time", "相机授时失败(第%d/3次) ip=%s port=%d backend=%d", attempt, r->ip, port, r->backend);
+            if (attempt < 3) sleep(2);   /* 退避后重试 */
+        }
+        if (done) ok++;
+        else NVR_LOGW("time", "相机授时最终失败(已重试3次) ip=%s port=%d", r->ip, port);
     }
-    NVR_LOGI("time", "相机 ONVIF 授时完成: %d/%d 成功", ok, c->n);
+    NVR_LOGI("time", "相机 ONVIF 授时完成: %d/%d 成功", ok, attempted);
     free(c);
     return NULL;
 }
@@ -823,6 +841,9 @@ int nvr_time_apply(nvr_settings_t *s)
 void nvr_time_tick(nvr_settings_t *s)
 {
     ntp_sync_async(s);   /* 未同步则再试(内部按 time_sync/g_synced/g_ntp_busy 门控) */
+    /* 每 10 分钟以 NVR 为主时间下发所有相机,纠正相机时钟漂移(本 tick 每 60s 调用一次 → 10 次=10min) */
+    static unsigned cam_push_min = 0;
+    if (++cam_push_min >= 10) { cam_push_min = 0; nvr_time_push_cameras(s); }
 }
 
 int nvr_time_synced(void) { return g_synced; }

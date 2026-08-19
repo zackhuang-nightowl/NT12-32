@@ -112,18 +112,22 @@ typedef struct nop_onvif_mask {
  * GetMasks: list all privacy masks into @p out (capped at @p max).
  * @return the mask count (>=0), or negative on failure.
  */
+/** GetMasks. @p config_token 非空则只取该 VSC 的 mask（写入 ConfigurationToken）。 */
 int nop_onvif_media2_get_masks(nop_onvif_device_t *device,
-                               nop_onvif_mask_t *out, int max);
+                               nop_onvif_mask_t *out, int max,
+                               const char *config_token);
 
 /**
  * CreateMask from a polygon. @p config_token binds the mask to a video source
  * configuration (see nop_onvif_media2_video_source_token). @p type is the ONVIF
  * mask type ("Color"/"Pixelated"/"Blurred"; "" -> "Color").
+ * 成功时把设备分配的 Mask Token 写入 @p out_token（可为 NULL）。
  */
 int nop_onvif_media2_create_mask(nop_onvif_device_t *device,
                                  const char *config_token,
                                  const float *xs, const float *ys, int npoints,
-                                 int enabled, const char *type);
+                                 int enabled, const char *type,
+                                 char *out_token, int out_size);
 
 /** DeleteMask by token. */
 int nop_onvif_media2_delete_mask(nop_onvif_device_t *device, const char *token);
@@ -170,15 +174,18 @@ typedef struct nop_onvif_osd {
     char img_path[256];      /**< image OSD URI                             */
 } nop_onvif_osd_t;
 
-/** GetOSDs into @p out (capped at @p max). @return count (>=0) or negative. */
+/** GetOSDs. @p config_token 非空则只取该 VSC 的 OSD（写入 ConfigurationToken）。 */
 int nop_onvif_media2_get_osds(nop_onvif_device_t *device,
-                              nop_onvif_osd_t *out, int max);
+                              nop_onvif_osd_t *out, int max,
+                              const char *config_token);
 
 /** SetOSD (update an existing OSD identified by @p osd->token). */
 int nop_onvif_media2_set_osd(nop_onvif_device_t *device, const nop_onvif_osd_t *osd);
 
-/** CreateOSD (token empty; @p osd->config_token required). */
-int nop_onvif_media2_create_osd(nop_onvif_device_t *device, const nop_onvif_osd_t *osd);
+/** CreateOSD (token empty; @p osd->config_token required).
+ *  成功时把设备分配的 OSDToken 写入 @p out_token（可为 NULL）。 */
+int nop_onvif_media2_create_osd(nop_onvif_device_t *device, const nop_onvif_osd_t *osd,
+                                char *out_token, int out_size);
 
 /** DeleteOSD by token. */
 int nop_onvif_media2_delete_osd(nop_onvif_device_t *device, const char *token);
@@ -270,9 +277,39 @@ typedef struct nop_onvif_source_tokens {
 } nop_onvif_source_tokens_t;
 
 /** Resolve the token set for @p source_token (""/NULL = the first source).
- *  Groups GetProfiles by VSC.SourceToken. @return 0 or negative. */
+ *  优先走连接时已在 handle 上的 profiles，不再打 GetProfiles。@return 0 or negative. */
 int nop_onvif_resolve_source(nop_onvif_device_t *device, const char *source_token,
                              nop_onvif_source_tokens_t *out);
+/** 读连接时缓存的源 token（不再打 GetProfiles）。空 source_token=首源。0=ok。 */
+int nop_onvif_device_cached_source(nop_onvif_device_t *device, const char *source_token,
+                                   nop_onvif_source_tokens_t *out);
+/** 连接时缓存的源个数。 */
+int nop_onvif_device_cached_nsrc(nop_onvif_device_t *device);
+/** 按序号读缓存源。0=ok。 */
+int nop_onvif_device_cached_source_at(nop_onvif_device_t *device, int index,
+                                      nop_onvif_source_tokens_t *out);
+
+/** 连接时 / 上次 GET 刷新的 OSD 列表。@p key 为 VideoSourceToken 或 VSC。
+ *  @return 条数（>=0）或 -1（尚未缓存）。 */
+int nop_onvif_device_cached_osds(nop_onvif_device_t *device, const char *key,
+                                 nop_onvif_osd_t *out, int max);
+int nop_onvif_device_cached_vencs(nop_onvif_device_t *device, const char *source_token,
+                                  nop_onvif_venc_t *out, int max);
+int nop_onvif_device_cached_masks(nop_onvif_device_t *device, const char *key,
+                                  nop_onvif_mask_t *out, int max);
+
+/** SET 成功后回写缓存（避免下次 SET 再 GetOSDs/GetVencs/GetMasks）。 */
+int nop_onvif_device_osd_cache_put(nop_onvif_device_t *device, const char *key,
+                                   const nop_onvif_osd_t *osd);
+int nop_onvif_device_osd_cache_del(nop_onvif_device_t *device, const char *key,
+                                   const char *osd_token);
+int nop_onvif_device_osd_cache_replace(nop_onvif_device_t *device, const char *key,
+                                       const nop_onvif_osd_t *osds, int n);
+int nop_onvif_device_venc_cache_put(nop_onvif_device_t *device, const nop_onvif_venc_t *venc);
+int nop_onvif_device_venc_cache_ingest(nop_onvif_device_t *device,
+                                       const nop_onvif_venc_t *vencs, int n);
+int nop_onvif_device_mask_cache_replace(nop_onvif_device_t *device, const char *key,
+                                        const nop_onvif_mask_t *masks, int n);
 
 /** List distinct VideoSourceTokens the device exposes (one channel per source).
  *  @return count (>=0) or negative. */
@@ -346,6 +383,7 @@ typedef struct nop_onvif_dev_caps {
     int ptz_patrol;       /**< SupportedPresetTour present               */
     int ptz_max_tours;    /**< MaximumNumberOfPresetTours                */
     int ptz_hdtrack;      /**< PTZ Capabilities MoveAndTrack advertised  */
+    int ptz_focus;        /**< Imaging Move supported (focus lens)       */
 } nop_onvif_dev_caps_t;
 
 /** Capabilities of ONE video source: OR of that source's Media2 profile
@@ -354,6 +392,17 @@ typedef struct nop_onvif_dev_caps {
 int nop_onvif_get_device_caps(nop_onvif_device_t *device,
                               const char *source_token,
                               nop_onvif_dev_caps_t *out);
+
+/** 连接时缓存的 PTZ/成像/音视频能力。空 source_token=首源。0=ok。 */
+int nop_onvif_device_cached_caps(nop_onvif_device_t *device, const char *source_token,
+                                 nop_onvif_dev_caps_t *out);
+int nop_onvif_device_caps_cache_put(nop_onvif_device_t *device, const char *source_token,
+                                    const nop_onvif_dev_caps_t *caps);
+/** 连接时缓存的 AI 能力（按源 token 或 analytics_cfg）。0=ok。 */
+int nop_onvif_device_cached_ai(nop_onvif_device_t *device, const char *source_or_cfg,
+                               nop_onvif_ai_caps_t *out);
+int nop_onvif_device_ai_cache_put(nop_onvif_device_t *device, const char *source_or_cfg,
+                                  const nop_onvif_ai_caps_t *ai);
 
 /* ---- §8 Motion — CellMotion detector (ActiveCells bitmap) --------------- */
 
@@ -453,6 +502,11 @@ typedef struct nop_onvif_analytics_caps {
  *  GetSupportedRules + GetSupportedAnalyticsModules (+ GetRuleOptions for ClassFilter
  *  classes / line-field limits) into @p out. @return 0 or <0. */
 int nop_onvif_analytics_get_supported(nop_onvif_device_t *device, nop_onvif_analytics_caps_t *out);
+
+/** GetNetworkInterfaces → 一只网口 HwAddress。want_ip 非空时优先匹配该 IPv4；
+ *  否则取首个已启用口。成功写 @p out 返 0。 */
+int nop_onvif_get_network_mac(nop_onvif_device_t *device, const char *want_ip,
+                              char *out, int cap);
 
 #ifdef __cplusplus
 }

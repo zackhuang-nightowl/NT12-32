@@ -30,7 +30,24 @@ static struct {
     uint32_t         rtp_ts;
     int              feed_chn;
     int              feed_codec;   /* 0=H264 1=H265 */
+    int              want_chn;     /* 只转发此通道(0-based);-1=任意 */
 } g;
+
+void nvr_rtsp_live_select(int chn) { g.want_chn = chn; }
+
+/* 从 RTSP 请求行的 URL 里解析通道:匹配 "/live/ch<N>" 或 "ch<N>"(N 为 1-based 协议号),
+ * 置 want_chn = N-1(0-based,与 streaming feed 的 chn 对齐)。找不到则不改。 */
+static void parse_want_chn(const char *req)
+{
+    const char *p = req;
+    while ((p = strstr(p, "ch")) != NULL) {
+        if (p[2] >= '0' && p[2] <= '9') {
+            int n = atoi(p + 2);
+            if (n >= 1) { g.want_chn = n - 1; return; }
+        }
+        p += 2;
+    }
+}
 
 static int send_all(int fd, const void *buf, size_t len)
 {
@@ -74,6 +91,7 @@ static void handle_client(int fd)
         if (strncmp(req, "OPTIONS", 7) == 0) {
             rtsp_reply(fd, 200, "OK", "Public: OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN\r\n", NULL);
         } else if (strncmp(req, "DESCRIBE", 8) == 0) {
+            parse_want_chn(req);   /* URL /live/chN → 选通道 */
             const char *sdp =
                 "v=0\r\n"
                 "o=- 0 0 IN IP4 127.0.0.1\r\n"
@@ -100,7 +118,7 @@ static void handle_client(int fd)
             rtsp_reply(fd, 200, "OK", "Session: 1\r\n", NULL);
             break;
         } else {
-            rtsp_reply(fd, 501, "Not Implemented", NULL, NULL);
+            rtsp_reply(fd, 501, "NOT_SUPPORT", NULL, NULL);
         }
     }
     close_client();
@@ -134,6 +152,7 @@ int nvr_rtsp_live_start(int port)
     if (port <= 0) port = 554;
     memset(&g, 0, sizeof(g));
     g.client_fd = -1;
+    g.want_chn = -1;
     g.port = port;
     pthread_mutex_init(&g.lock, NULL);
 
@@ -215,6 +234,10 @@ void nvr_rtsp_live_feed(int chn, const uint8_t *data, int len, int codec, int is
     if (!data || len <= 0) return;
     pthread_mutex_lock(&g.lock);
     if (!g.playing || g.client_fd < 0) {
+        pthread_mutex_unlock(&g.lock);
+        return;
+    }
+    if (g.want_chn >= 0 && chn != g.want_chn) {   /* 只转发选定通道 */
         pthread_mutex_unlock(&g.lock);
         return;
     }

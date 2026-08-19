@@ -4,6 +4,18 @@
 > 参考实现：`SDK_NEW/nop_client/nop_bind_ipc.{c,h}`（GUI 侧 LAN Add 命令的 build/parse）。
 >
 > **本文档随实现推进持续补充。** 相关：路由非透传名单见 [NOP_NONPASSTHROUGH_APIS.md](NOP_NONPASSTHROUGH_APIS.md)。
+>
+> **当前实现（2026-08-18，以代码为准）**
+> - 发现：全部 ONVIF WS-Discovery；**发现口 = 命令口**。
+> - 取流：NOP / nopOnvif / onvif **都走 ONVIF GetStreamUri**。`host:port` **一只** `nop_onvif_device_t`（连接时 GetCapabilities+GetServices+profiles+各源 token/caps/OSD/venc）；mapping `retain`，用缓存 token 直接 SOAP，不新建、不每次 GetProfiles。
+> - 首次添加（PoE 发现 / `GUI_LanAddDevice`）：**立刻入库并回复**。LAN Add **不凭 SN 猜 nopOnvif**（先当 ONVIF、密码空，除非用户带了真密码）；tick 用 Discovery/GetScopes 的 `nopOnvif` 标识再分类并激活。失败 status **4**，库里密码保持空（已激活成功的 P_act 保留）。
+> - **NOP digest**：`GUI_setLanDevice` `protocol==nop` 且 `enhancedSecurity=true` → NVR `setEnhancedSecurity` 写入 random，用算出的 `P_enh` 做 ONVIF 拉流 / 8012 登录（时间戳+digest）。`false` → SET `random=""` 关闭 digest，之后空凭据交互（官方文档 `random_empty_error` 不采用）。连接路径**不**自动 SET；设备已开 digest 才把 `P_enh` 列入候选。**random 与 `P_enh` 一起入库，NVR reset 才清。** 鉴权失败：HTTP **401 + `Random:`** 重算 `P_enh` 重试并更新入库；**402** 清 random 回普通模式；GET **501** 不支持则清本地。相机接口名 `getEnhancedSecurity` / `setEnhancedSecurity`（无 `X_NightOwl_` 前缀）；`args.channel` 默认 1，转发用该路 `dev_chn`。8012 `ACK_FAIL` 的 random 在头 `reserved`（offset 28，12 字节）。
+> - 凭据顺序（`nvr_chan_auth_candidates`）：用户密码（非空且非 `123456`）→ 已开 digest 的 `P_enh` → `P_act` → 无鉴权。`admin/123456` = 无鉴权。
+> - 激活密文：**AES-256-ECB**（无 IV）；key = ASCII `eT79Uo51sK` 补 0 到 32 字节。增强密钥 `eT79Uo51sK` / `SzxGJDZxjJ`。
+> - 通道状态：0 无物理机；3 已绑未出图/连不上；**4 鉴权失败（等密码）**；1 出图。优先级 7>4>6>2>5>3>1>0。
+> - LAN 扫描：`GUI_LanSearch.status` 默认 1（active）；仅 discovery 含 `nopState/inactive` 才为 0。
+> - MAC：discovery 没有则连上后 ARP 补；并对照 GetNetworkInterfaces；**ARP 为准**（IP 变更按 mac 找回）。
+> - 8089 未命中本地表：`backend==0` 透传该路 `/APPJsonCmd`；**nopOnvif 仅白灯/警笛/Panic/激活** POST 发现口，**其余仍 SOAP**；通用 ONVIF 全 SOAP。上线时对 nopOnvif GET 开关探测 `light`/`audioAlert`。
 
 ## 0. 角色与通道分工
 
@@ -34,12 +46,13 @@
 给定一个已发现设备，NVR 按 kind 选择方案，**逐个尝试直到 `getStream` 出图成功**。
 
 ### 方案 A — NOP 设备（增强安全模式 EnhancedSecurity）
-1. `getEnhancedSecurity {channel}`：
-   - `random` **非空** → 已启用增强模式：用返回的 `random` 经**算法**算出 password 连接设备。
-   - `random` **为空** → 支持但未开启：发 `setEnhancedSecurity {channel, random:"<算法>"}` 让设备开启增强模式并回 `random`，再据此算出 password 连接。
-   - `statusCode == 501` → 不支持增强模式，回退基础连接。
-2. 连接成功后 `getStream` 出图。
-> 关闭增强模式：`setEnhancedSecurity {channel, random:""}`（空串关闭）。
+1. **开启/关闭 digest 不在连接路径里做**，由 GUI 配置：
+   - `GUI_setLanDevice` 且 `protocol=="nop"` 且 `enhancedSecurity=true`：NVR 向设备 `setEnhancedSecurity {channel:<dev_chn>, random:<NVR生成>}`，用 `P_enh` 作 ONVIF digest / 8012 增强登录，并入库 **random + P_enh**。
+   - `enhancedSecurity=false`：`setEnhancedSecurity {random:""}` 关闭 digest，库里 random/密码清空，之后空凭据交互。
+2. 连接时若设备 **已经** 开启 digest：`getEnhancedSecurity` 拿到非空 `random` → 算出 `P_enh` 做 digest 取流。random 为空则不加此候选（不偷偷 SET）。
+3. `statusCode == 501` → 不支持增强模式，清本地 random 回普通模式。
+> 关闭增强模式：`setEnhancedSecurity {channel, random:""}`（空串关闭；不以 `random_empty_error` 为准）。
+> 相机命令名为 `getEnhancedSecurity` / `setEnhancedSecurity`。GUI `args.channel` 缺省 **1**；NVR 转发用该路 `dev_chn`。
 
 ### 方案 B — nopOnvif 设备（ONVIF digest + 激活）
 1. 开启 **digest** 的 ONVIF 连接；默认账号 `admin`，密码由**算法**算出（非 `123456`）。
@@ -64,31 +77,31 @@
 - 成功判据：`getDeviceActive == active` 且 `getStream` 出图成功 → 加入 AddedList；**同步该密码到配置库**。
 - 失败：`GUI_GetAddedLanDevices` 回复该 channel `status = 7`。
 - 上线联通后：① longpolling 推送设备状态；② `GUI_GetAddedLanDevices` 回复 `status = 1`。
-- 状态映射：`getDeviceActive.status(1/0)` ↔ `GUI_LanSearch.status(1/0)`（默认设备都是 1）。
+- 状态映射：`getDeviceActive.status(1/0)` ↔ `GUI_LanSearch.status(1/0)`（**默认 1=active**；仅 discovery scopes 含 `nopState/inactive` 才为 0）。
 
 ## 4. LAN Add 命令集（NVR 侧 handler；结构见 `nop_bind_ipc.h`）
 
 | 命令 | 说明 |
 |---|---|
 | `GUI_LanSearch` | 检索，5s 后回复；进入该页每 5s 自动检索一次；非 UI 线程/非阻塞 socket 避免卡 UI |
-| `GUI_LanAddDevice` | 添加，最长 **60s** 超时后回复；可多选并行、按序号顺序绑定通道 |
+| `GUI_LanAddDevice` | 立即把 discovery 已有信息写入 camera 表并回复；连接/能力在后台补全 |
 | `GUI_GetAddedLanDevices` | 列出已绑定的 17~32 通道 Camera + 状态 |
-| `GUI_LanDelDevice` | 仅本地删除通道，不控制相机状态；可多选逐个删除 |
-| `GUI_getLanDevice` | config 弹窗读取当前配置 |
-| `GUI_setLanDevice` | config 弹窗应用配置 |
+| `GUI_LanDelDevice` | 删物理台：同 IP 的多源 channel 一并本地删除，不控制相机 |
+| `GUI_getLanDevice` | config 弹窗读取当前配置；多源时带回 `videoSources[{source,enabled}]` |
+| `GUI_setLanDevice` | config 弹窗应用；`videoSources` 为启用权威（可只开源2）。每启用源 ↔ 一 channel |
 
 ### config 弹窗（LVGL 小螺丝图标）交互
 - 点击 config → `GUI_getLanDevice` 填充页面；**Protocol=nop 时禁用 userName/password 字段**。
-- 点击 apply → `GUI_setLanDevice`（可设 `enhancedSecurity=true/false`）。
+- 点击 apply → `GUI_setLanDevice`（`protocol==nop` 时 `enhancedSecurity` 开/关该机 digest；true 由 NVR 设 random 并改用 `P_enh`，false 关 digest 后空凭据）。
 - 点击 close → 关闭弹窗。
 - 设 `enhancedSecurity` 后：弹窗阻塞，每 2s 查 `GUI_getLanDevice`，共 3 次；`status` 出现 1 即退出阻塞并关闭弹窗，并请求一次 `GUI_GetAddedLanDevices` 刷新列表状态。3 次都非 1 → 状态置 disConnected，改为非阻塞每 2s 轮询直到 status=1 再关弹窗。（增强模式重连可能耗时较长）
 - 修改配置后新连接状态需同步到 `GUI_getLanDevice`。
 
-## 5. 密码 / 加密算法（已实现于 [components/crypto]，密钥/盐待填）
+## 5. 密码 / 加密算法（`components/crypto`）
 
-> 私钥/盐在 `components/crypto/src/nvr_crypto.c` 顶部：`NVR_ENH_KEY_X` / `NVR_ENH_KEY_Y`（增强）、
-> `NVR_ACT_AES_KEY[32]` / `NVR_ACT_AES_IV[16]`（激活 AES 盐）——**填真实值后 `nvr_pw_algo_ready()` 返回 1**。
-> 自测已用文档向量校验算法本身（`test_nvr_crypto`）。
+> 私钥在 `components/crypto/src/nvr_crypto.c` 顶部：`NVR_ENH_KEY_X` / `NVR_ENH_KEY_Y`（增强）、
+> `NVR_ACT_AES_KEY[32]`（激活 AES-256-ECB，ASCII 补 0）。**只要 key，ECB 不要 IV。**
+> 设置库 `factory.keyx/keyy` 可覆盖增强密钥。`nvr_pw_algo_ready()` 在密钥非空时为 1。
 
 ### ① 增强安全模式鉴权密码 P_enh（NOP 设备）
 ```
@@ -99,7 +112,7 @@ P_enh    = firstSixteenAlphanumeric( SHA-256(text) )          // 取 hex 前 16 
     P_enh  = 7f9c00a7f43d4716
 ```
 `P_enh` 用于 ONVIF/8089/RTSP554/7000对讲 的 **HTTP Digest** 密码（账户固定 `admin`）。
-鉴权失败 401 会带 `Random:` 头 → 用它重算 P_enh 重试；402 → 退回普通模式(清 random)；501 → 设备不支持。
+鉴权失败 **401** 会带 `Random:` 头 → 用它重算 `P_enh` 重试并更新入库；**402** → 清 random 退回普通模式；GET **501** → 设备不支持，同样清本地。random 持久化到 camera 表，直到 NVR reset。
 API：`nvr_pw_from_random(random)` / 可测核心 `nvr_pw_enhanced_calc(key_x,random,key_y)`。
 
 ### ② 8012 消息中心登录（账户/密码 结构）
@@ -125,22 +138,23 @@ P_act = UPPER( first16( MD5(NVR_sn + 设备_sn) ) )            // 统一大写 H
 
 ### ④ setDeviceActive 密码字段（AES256 密文）
 ```
-password字段 = hex( AES-256-CBC( P_act, NVR_ACT_AES_KEY, NVR_ACT_AES_IV ) )
+password字段 = hex( AES-256-ECB( P_act, NVR_ACT_AES_KEY ) )
 ```
 NVR 发送此密文，**IPC 解密得 P_act 并设为自身设备密码**。API：`nvr_pw_act_encrypt(nvr_sn, dev_sn)`。
-（编码默认 hex；如 DG 定为 base64 可改 `nvr_pw_act_encrypt`。）
 
-### 连接凭据选择（NVR→相机）
-| kind | 连接密码 |
-|---|---|
-| **NOP**(增强) | `admin` + `P_enh`（Digest）；未启用增强时空/`admin/123456` |
-| **nopOnvif** | 仅两种：**空密码**(未激活) 或 `admin/P_act`(已激活)；未激活则先 `setDeviceActive`(发 ④ 密文) |
-| **onvif**(通用) | 空 或 `admin/123456`（或 setLanDevice 传入账密） |
+### 连接凭据选择（NVR→相机，首次添加一轮）
+| 顺序 | 条件 | 账密 |
+|---|---|---|
+| 1 | 用户已输入且不是 `123456` | `user` + 用户密码 |
+| 2 | 设备已开 digest（GET random 非空） | `admin` + `P_enh`（连接路径不 SET；开/关只走 GUI_setLanDevice） |
+| 3 | 已判定 `kind==nopOnvif`（Discovery/GetScopes 含 nopOnvif） | `admin` + `P_act`（GET→未激活则 SET 密文→再 GET 确认后入库） |
+| 4 | 以上都失败 | 无鉴权（空 user/pass；原 `admin/123456`） |
 
 ## 6. 设备找回
 
-- **34569 LocalLAN 发现**：局域网备用发现协议（UDP 端口 34569），用于 WS-Discovery 不可达/隔离场景，返回 IP/MAC/机型 → 走同一分类与绑定流程。
-- **MAC 地址找回**：按已知 MAC 在 WS-Discovery/34569 结果中匹配定位（换网段/DHCP 变更后找回）→ 得当前 IP → 重绑/续用通道。
+- **34569 LocalLAN 发现**（UDP `:34569`，DVRIP/NetSurveillance）：WS-Discovery 不可达时的备用扫网。探测 `ff…fa05` 20 字节广播，应答 JSON `NetWork.NetCommon`（`HostIP` 小端 hex、`MAC`、`HttpPort`、`SN`）。填成 `nvr_onvif_cam_t` 后走同一 `on_discovered`（分类 / 绑定 / MAC 召回）。
+- **MAC 地址找回**：已添加 LAN 设备掉线后，tick 先 34569、再 WS-Discovery；按已落库 MAC 匹配当前 IP → 更新通道、清 URL 重解析。PoE（198.18）按口绑定，**不做** MAC 钉死。连上后 ARP > GetNetworkInterfaces 补全 MAC。
+- **本机应答**：NVR 听 `:34569`，每次用 eth0 现 IP 回 `NetWork.NetCommon`（MAC/SN 来自身份分区）。App 忘管理地址时可搜到本机。
 - NVR 期望：**所有已添加设备只要网络可达且密码正确，上线后立即联通并出图。**
 
 ## 7. 已知待检讨问题（备注，暂不处理）

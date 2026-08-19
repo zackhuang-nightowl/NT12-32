@@ -103,20 +103,35 @@ HT_API BOOL SetSystemDateAndTime(ONVIF_DEVICE * p_dev)
     memset(&req, 0, sizeof(req));
 
     time_t nowtime = time(NULL);
-    struct tm * tmtime;
+    struct tm gm, lt;
+    gmtime_r(&nowtime, &gm);
+    localtime_r(&nowtime, &lt);   /* 本进程已按 NVR 时区(/etc/localtime)→ 取相机应随的时区 */
 
-    tmtime = gmtime(&nowtime);
-        
     req.SystemDateTime.DateTimeType = SetDateTimeType_Manual;
-    req.SystemDateTime.DaylightSavings = FALSE;
+    req.SystemDateTime.DaylightSavings = FALSE;   /* 用当前有效偏移(已含 DST),不让相机再叠加 */
+    /* ★ 补 TimeZone(POSIX):否则相机保留自身时区,即便 UTC 已设,本地显示时间仍与 NVR 不一致
+     * (=用户报的"改系统时间没同步 IPC 时间")。tm_gmtoff=UTC 以东秒;POSIX 符号相反(UTC+8→"GMT-8")。 */
+    {
+        long off = lt.tm_gmtoff;                  /* 秒,东为正 */
+        int  sign = (off < 0) ? 1 : -1;           /* POSIX 反号 */
+        long a = (off < 0) ? -off : off;
+        int  hh = (int)(a / 3600), mm = (int)((a % 3600) / 60);
+        if (mm)
+            snprintf(req.SystemDateTime.TimeZone.TZ, sizeof(req.SystemDateTime.TimeZone.TZ),
+                     "GMT%+d:%02d", sign * hh, mm);
+        else
+            snprintf(req.SystemDateTime.TimeZone.TZ, sizeof(req.SystemDateTime.TimeZone.TZ),
+                     "GMT%+d", sign * hh);
+        req.SystemDateTime.TimeZoneFlag = 1;      /* 序列化器仅在此 flag 置位时才发 <TimeZone> */
+    }
     req.UTCDateTimeFlag = 1;
-    req.UTCDateTime.Date.Year = tmtime->tm_year+1900;
-    req.UTCDateTime.Date.Month = tmtime->tm_mon+1;
-    req.UTCDateTime.Date.Day = tmtime->tm_mday;
-    req.UTCDateTime.Time.Hour = tmtime->tm_hour;
-    req.UTCDateTime.Time.Minute = tmtime->tm_min;
-    req.UTCDateTime.Time.Second = tmtime->tm_sec;
-    
+    req.UTCDateTime.Date.Year = gm.tm_year+1900;
+    req.UTCDateTime.Date.Month = gm.tm_mon+1;
+    req.UTCDateTime.Date.Day = gm.tm_mday;
+    req.UTCDateTime.Time.Hour = gm.tm_hour;
+    req.UTCDateTime.Time.Minute = gm.tm_min;
+    req.UTCDateTime.Time.Second = gm.tm_sec;
+
     return onvif_tds_SetSystemDateAndTime(p_dev, &req, NULL);
 }
 

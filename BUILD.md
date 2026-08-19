@@ -15,18 +15,18 @@ Debian/Ubuntu：
 sudo apt-get install -y build-essential cmake libsqlite3-dev libssl-dev python3
 ```
 
-## 主机构建（编译并自测全部自研库）
+## 主机构建（编译自研库 + app 静态库）
 ```
 cmake -S . -B build
 cmake --build build -j
-ctest --test-dir build            # 运行 config/crypto/onvif/recorder 自测
 ```
-产出（`build/**/*.a`）：`cjson, nopcore, rsdk, nvr_settings, nvr_crypto,
-nvr_dev_classify, nvr_onvif, nvr_storage, nvr_streaming, nvr_cloud_tutk`。
+产出（`build/**/*.a`）：`cjson, sqlite3, nopcore, rsdk, nvr_settings, nvr_crypto,
+nvr_dev_classify, nvr_onvif, nvr_storage, nvr_streaming, nvr_cloud_tutk,
+nvr_cloud_uploader, nvr_app_core`。
 
-> 主机构建**不**编译 `platform/media_hal` 与 `app`（需 na51090 hdal/BSP）。
-> `components/nop` 的 demo/test 在聚合构建里默认关闭（它们假设自身为顶层）；
-> 需要时进 `components/nop` 独立 `cmake` 构建。
+> 主机单测已移除（2026-08-06，改为实机验证）。`nvr_app_core` 主机可编，作语法校验。
+> `platform/media_hal` 与整机 `nvr_app` 仅目标机（需 na51090 hdal/BSP）。
+> `components/nop` 的 demo 在聚合构建里默认关闭。
 
 ## 目标机交叉构建（aarch64，出整机固件 nvr_app）✅ 已跑通
 工具链：`aarch64-ca53-linux-gnueabihf-8.4.01`（gcc 8.4，Novatek/Buildroot）。

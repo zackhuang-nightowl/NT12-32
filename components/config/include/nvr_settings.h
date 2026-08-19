@@ -4,7 +4,7 @@
  *  设计（计划 §B7 / server-nop-onvif plan P1）：
  *    - 冻结的 config/*.json 只作「首次启动种子」,永不回写。
  *    - 本库 /config/nvr_settings.db (WAL, 0600) 为运行期权威可写存储:
- *      typed KV + 结构化表(auth / nop_owner / camera / camera_capability /
+ *      typed KV + 结构化表(auth / local_user / nop_owner / camera / camera_capability /
  *      record_config / push_config / cloud_channel / schedule /
  *      local_link / email_alert / ftp / ddns)。
  *    - typed get/set + set_many(单事务) + subscribe(前缀变更通知)。
@@ -49,7 +49,7 @@ typedef void (*nvr_settings_cb)(void *ud, const char *key);
 int  nvr_settings_subscribe  (nvr_settings_t *s, const char *key_prefix, nvr_settings_cb cb, void *ud);
 void nvr_settings_unsubscribe(nvr_settings_t *s, int sub_id);
 
-/* ---------- 结构化:camera 设备表(逻辑通道 1-based;仅有真实 ip+mac 才落库) ---------- */
+/* ---------- 结构化:camera 设备表(逻辑通道 1-based;有真实 ip 即落库,mac 等可后补) ---------- */
 typedef struct {
     int  chn;                     /* 逻辑通道,1-based */
     char name[64];
@@ -72,6 +72,7 @@ typedef struct {
     char uuid[100], serial[64], manufacturer[64], model[64], firmware[64];
     int  bound, active;
     char video_source_token[100]; /* 多源:该通道绑定的 ONVIF VideoSourceToken(空=单源/首源) */
+    char enh_random[32];          /* NOP EnhancedSecurity random；空=普通模式 */
 } nvr_camera_row_t;
 
 int  nvr_settings_camera_upsert(nvr_settings_t *s, const nvr_camera_row_t *row);
@@ -90,6 +91,12 @@ int  nvr_settings_caps_get(nvr_settings_t *s, int chn, char *caps_json_out, int 
 typedef struct { int chn, record_on; char triggers[128], stream_type[8]; } nvr_record_cfg_t;
 int  nvr_settings_record_set(nvr_settings_t *s, const nvr_record_cfg_t *row);
 int  nvr_settings_record_get(nvr_settings_t *s, int chn, nvr_record_cfg_t *out);   /* 无返回 <0 */
+/* 事件后录秒数(get/setChannelRecordingTime)；缺省 10；合法范围 1..600 */
+int  nvr_settings_record_post_s_get(nvr_settings_t *s, int chn);
+int  nvr_settings_record_post_s_set(nvr_settings_t *s, int chn, int sec);
+/* 事件预录秒数(仅事件/待命模式)；缺省 5；合法范围 0..30（0=关预录） */
+int  nvr_settings_record_pre_s_get(nvr_settings_t *s, int chn);
+int  nvr_settings_record_pre_s_set(nvr_settings_t *s, int chn, int sec);
 
 /* ---------- 结构化:持续录像排程(定时录像总开关 + 周排程 rules JSON;NVR 本地) ----------
  * rules 为 X_NightOwl_*ContinuousRecordingSchedule 的 rules 数组原文(JSON 字符串,秒级区间)。 */
@@ -127,6 +134,12 @@ int  nvr_settings_schedule_replace(nvr_settings_t *s, int chn, const char *domai
                                    const nvr_schedule_row_t *rows, int n);
 int  nvr_settings_schedule_list(nvr_settings_t *s, int chn, const char *domain, const char *sensor,
                                 nvr_schedule_row_t *out, int cap);
+/* 该通道 domain 下已保存的规则条数(任意 sensor)。0=从未保存。 */
+int  nvr_settings_schedule_count(nvr_settings_t *s, int chn, const char *domain);
+/* 当前 (wday 1-7, sod 当日秒) 是否落在排程内。跨零点区间支持。
+ * record_event 无规则=未保存,不允许(GET 仍可合成 7×24 给 GUI)。其它 domain 无规则=7×24。 */
+int  nvr_settings_schedule_allows(nvr_settings_t *s, int chn, const char *domain, const char *sensor,
+                                  int wday, int sod);
 
 /* ---------- 结构化:管理员鉴权(口令 hash + 锁定) ---------- */
 typedef struct {
@@ -138,6 +151,25 @@ typedef struct {
 } nvr_auth_row_t;
 int  nvr_settings_auth_get(nvr_settings_t *s, nvr_auth_row_t *out);   /* 无记录返回 <0 */
 int  nvr_settings_auth_set(nvr_settings_t *s, const nvr_auth_row_t *row);
+
+/* ---------- 结构化:本地多用户(Admin1 / Technician≤10 / Viewer≤10) ---------- */
+#define NVR_USER_MAX           21
+#define NVR_USER_MAX_TECH      10
+#define NVR_USER_MAX_VIEWER    10
+typedef struct {
+    char     username[33];        /* 1..32 */
+    char     user_level[16];      /* Admin | Technician | Viewer */
+    char     pw_algo[16];         /* "sha256" */
+    uint8_t  pw_hash[64]; int hash_len;
+    int64_t  create_time;         /* epoch sec */
+    int64_t  last_login;          /* epoch sec; 0=从未 */
+} nvr_user_row_t;
+int  nvr_settings_user_get  (nvr_settings_t *s, const char *username, nvr_user_row_t *out); /* 无 <0 */
+int  nvr_settings_user_upsert(nvr_settings_t *s, const nvr_user_row_t *row);  /* 按 username 覆盖 */
+int  nvr_settings_user_delete(nvr_settings_t *s, const char *username);
+int  nvr_settings_user_list (nvr_settings_t *s, nvr_user_row_t *out, int cap); /* 返回条数 */
+int  nvr_settings_user_count(nvr_settings_t *s, const char *user_level); /* NULL=总数; 指定等级计数 */
+int  nvr_settings_user_touch_login(nvr_settings_t *s, const char *username); /* 更新 last_login */
 
 /* ---------- 结构化:NOP owner / 云存凭据(stoken 非易失) ---------- */
 typedef struct { char owner_id[64], username[64], stoken[256]; } nvr_owner_row_t;

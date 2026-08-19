@@ -63,6 +63,7 @@ typedef struct nop_nvr_channel_entry {
      * first/only source (single-source cameras and NOP backends). All per-source
      * ONVIF tokens (VSC / analytics / profile) are resolved from this. */
     char                video_source_token[100];
+    char                service_url[128];    /**< device_service path from discovery */
 } nop_nvr_channel_entry_t;
 
 /** Opaque registry. */

@@ -38,6 +38,8 @@ struct onvif_session {
     int  resolved;              /* Media1 profiles fetched */
     int  media2_resolved;       /* Media2 profile fetched */
     nop_onvif_device_t *dev;
+    char acq_host[64];
+    int  acq_port;
     char profile[100];          /* default Media1 profile token */
     char media2_profile[100];   /* default Media2 profile token */
     char video_source[100];     /* first video-source token */
@@ -60,8 +62,14 @@ struct nop_onvif_map_backend {
     pthread_t             poller;
     /* Dedicated per-channel pull-point handles for the events poller, kept
      * SEPARATE from sessions[] so a blocking pull never holds the backend lock
-     * or contends with request handlers. */
+     * or contends with request handlers. LIFECYCLE IS POLLER-OWNED: only the
+     * poller thread creates/destroys poll_dev[]/poll_vsct[]. Other threads (a
+     * request-path invalidate_channel) never touch them directly — they set
+     * poll_drop[ch] under the backend lock and the poller drops+resubscribes at
+     * the top of its next sweep. This closes a use-after-free: previously
+     * invalidate destroyed a poll_dev while the poller was mid-PullMessages. */
     nop_onvif_device_t   *poll_dev[ONVIF_MAX_SESSIONS];
+    int                   poll_drop[ONVIF_MAX_SESSIONS];  /* 1 → poller must drop ch's poll_dev */
     /* §10: each poll channel's bound-source VSC token, resolved once. An event
      * is delivered to this channel only if its Source VSCT matches (so on a
      * multi-source device each channel reports only its own source). */
@@ -111,10 +119,19 @@ void nop_onvif_map_backend_destroy(nop_onvif_map_backend_t *be)
     if (!be)
         return;
     nop_onvif_map_events_stop(be);
-    /* sessions[].dev are borrowed from devpool — free the pool once per device. */
+    /* sessions/poll_dev borrow the process pool — drop refs, do not destroy. */
     for (i = 0; i < ONVIF_MAX_SESSIONS; i++) {
-        if (be->devpool[i].dev)
-            nop_onvif_device_destroy(be->devpool[i].dev);
+        nop_nvr_channel_entry_t e;
+        if (be->sessions[i].dev && be->channels &&
+            nop_nvr_channels_get(be->channels, i, &e) && e.host[0])
+            nop_onvif_device_drop(e.host, e.port > 0 ? e.port : ONVIF_DEFAULT_PORT);
+        be->sessions[i].dev = NULL;
+        if (be->poll_dev[i]) {
+            /* Dedicated poller handle (normally already freed + nulled by the
+             * events_stop above); destroy defensively, never pool-drop. */
+            nop_onvif_device_destroy(be->poll_dev[i]);
+            be->poll_dev[i] = NULL;
+        }
     }
     osal_mutex_destroy(be->lock);
     nop_onvif_global_cleanup();
@@ -125,35 +142,23 @@ void nop_onvif_map_backend_destroy(nop_onvif_map_backend_t *be)
 /* Session acquisition                                                      */
 /* ------------------------------------------------------------------------ */
 
-/* Return the shared request-path device handle for @p entry's host:port,
- * creating + authenticating it on first use. Borrowed (owned by devpool);
- * channels of the same device share it. Called with the backend lock held. */
+/* Borrow the process-wide OnvifDev (one per host:port). Must already be
+ * connected by the channel tick; mapping does not create a second handle. */
 static nop_onvif_device_t *device_acquire(nop_onvif_map_backend_t *be,
                                           const nop_nvr_channel_entry_t *entry)
 {
-    int i, port = entry->port > 0 ? entry->port : ONVIF_DEFAULT_PORT;
-
-    for (i = 0; i < ONVIF_MAX_SESSIONS; i++)          /* reuse existing device */
-        if (be->devpool[i].dev && be->devpool[i].port == port &&
-            strcmp(be->devpool[i].host, entry->host) == 0)
-            return be->devpool[i].dev;
-
-    for (i = 0; i < ONVIF_MAX_SESSIONS; i++) {        /* else create in a free slot */
-        nop_onvif_device_t *d;
-        if (be->devpool[i].dev)
-            continue;
-        d = nop_onvif_device_create(entry->host, port, ONVIF_DEFAULT_SERVICE_URL, 0);
-        if (!d)
-            return NULL;
-        if (entry->username[0] != '\0')
-            nop_onvif_device_set_auth(d, entry->username, entry->password);
-        nop_onvif_device_set_timeout(d, 5000);
-        snprintf(be->devpool[i].host, sizeof(be->devpool[i].host), "%s", entry->host);
-        be->devpool[i].port = port;
-        be->devpool[i].dev  = d;
-        return d;
+    int port = entry->port > 0 ? entry->port : ONVIF_DEFAULT_PORT;
+    const char *path = entry->service_url[0] ? entry->service_url : ONVIF_DEFAULT_SERVICE_URL;
+    nop_onvif_device_t *d;
+    (void)be;
+    d = nop_onvif_device_retain(entry->host, port, path, 0);
+    if (!d)
+        return NULL;
+    if (!nop_onvif_device_connected(d)) {
+        nop_onvif_device_drop(entry->host, port);
+        return NULL;
     }
-    return NULL;                                      /* pool exhausted */
+    return d;
 }
 
 /* Bring up a channel's device handle + resolve default profile tokens.
@@ -165,32 +170,45 @@ static int session_ensure(nop_onvif_map_backend_t *be, onvif_session_t *s)
     if (!s->active) {
         if (!nop_nvr_channels_get(be->channels, s->channel, &entry))
             return -1;
-        if (entry.backend != NOP_BACKEND_ONVIF || entry.host[0] == '\0')
+        /* 已连接的 handle 即可发 SOAP。backend 不限：NOP 透传失败后的活动区域回落
+         * 也走 mapping（一机一 handle，retain 已连接的；事件轮询仍只扫 ONVIF）。 */
+        if (entry.host[0] == '\0')
             return -1;
         snprintf(s->bound_source, sizeof(s->bound_source), "%s", entry.video_source_token);
-        s->dev = device_acquire(be, &entry);   /* borrowed, shared per device */
+        s->dev = device_acquire(be, &entry);   /* borrowed from process pool */
         if (!s->dev)
             return -1;
+        snprintf(s->acq_host, sizeof(s->acq_host), "%s", entry.host);
+        s->acq_port = entry.port > 0 ? entry.port : ONVIF_DEFAULT_PORT;
         s->active = 1;
     }
 
     if (!s->resolved) {
-        nop_onvif_profile_t       p;
         nop_onvif_source_tokens_t st;
-        int n = nop_onvif_get_profiles(s->dev);
-        if (n > 0 && nop_onvif_get_profile(s->dev, 0, &p) == 0)
+        nop_onvif_profile_t       p;
+        int                       cs;
+        if (nop_onvif_get_profile(s->dev, 0, &p) == 0)
             snprintf(s->profile, sizeof(s->profile), "%s", p.token);
-        /* Resolve this channel's bound video source once (VSC + analytics cfg).
-         * bound_source == "" resolves the first source (single-source cameras),
-         * preserving the previous behavior exactly. */
-        if (nop_onvif_resolve_source(s->dev, s->bound_source, &st) == 0) {
+        if (nop_onvif_get_profile2(s->dev, 0, &p) == 0)
+            snprintf(s->media2_profile, sizeof(s->media2_profile), "%s", p.token);
+        cs = nop_onvif_device_cached_source(s->dev, s->bound_source, &st);
+        if (cs == 0) {
             snprintf(s->vsc, sizeof(s->vsc), "%s", st.vsc_token);
             snprintf(s->analytics_cfg, sizeof(s->analytics_cfg), "%s", st.analytics_cfg);
             snprintf(s->src_profile, sizeof(s->src_profile), "%s", st.profile);
             snprintf(s->main_venc, sizeof(s->main_venc), "%s", st.main_venc);
             snprintf(s->sub_venc, sizeof(s->sub_venc), "%s", st.sub_venc);
+            if (st.source_token[0])
+                snprintf(s->video_source, sizeof(s->video_source), "%s", st.source_token);
         }
-        s->resolved = 1;   /* cache even a zero result: don't refetch per call */
+        /* Latch only once we actually resolved a usable token. If the device is
+         * connected but its connect-time map cache isn't built yet, everything
+         * above returns empty; latching then would cache "" tokens permanently.
+         * Leave unresolved so the next begin() retries. */
+        if (cs == 0 || s->profile[0] || s->media2_profile[0]) {
+            s->resolved = 1;
+            s->media2_resolved = 1;
+        }
     }
     return 0;
 }
@@ -225,6 +243,8 @@ static void session_reset(onvif_session_t *s)
     int ch;
     if (!s)
         return;
+    if (s->dev && s->acq_host[0])
+        nop_onvif_device_drop(s->acq_host, s->acq_port > 0 ? s->acq_port : ONVIF_DEFAULT_PORT);
     ch = s->channel;
     memset(s, 0, sizeof(*s));
     s->channel = ch;
@@ -255,18 +275,9 @@ static int devpool_users(nop_onvif_map_backend_t *be, const char *host, int port
 
 static void devpool_drop(nop_onvif_map_backend_t *be, const char *host, int port)
 {
-    int i, p = port > 0 ? port : ONVIF_DEFAULT_PORT;
-
-    if (!be || !host || !host[0])
-        return;
-    for (i = 0; i < ONVIF_MAX_SESSIONS; i++) {
-        if (!be->devpool[i].dev)
-            continue;
-        if (be->devpool[i].port == p && strcmp(be->devpool[i].host, host) == 0) {
-            nop_onvif_device_destroy(be->devpool[i].dev);
-            memset(&be->devpool[i], 0, sizeof(be->devpool[i]));
-        }
-    }
+    (void)be;
+    if (host && host[0])
+        nop_onvif_device_drop(host, port > 0 ? port : ONVIF_DEFAULT_PORT);
 }
 
 static void sessions_reset_for_device(nop_onvif_map_backend_t *be,
@@ -288,11 +299,15 @@ static void sessions_reset_for_device(nop_onvif_map_backend_t *be,
     }
 }
 
+/* Actually tear down a channel's pull-point. POLLER-THREAD-ONLY (or after the
+ * poller is joined in events_stop): never call from a request thread. */
 static void poll_drop_channel(nop_onvif_map_backend_t *be, int ch)
 {
     if (!be || ch < 0 || ch >= ONVIF_MAX_SESSIONS)
         return;
     if (be->poll_dev[ch]) {
+        /* Dedicated poller handle (not the shared request-path pool): unsubscribe
+         * then destroy it outright — never pool-drop. */
         nop_onvif_events_unsubscribe(be->poll_dev[ch]);
         nop_onvif_device_destroy(be->poll_dev[ch]);
         be->poll_dev[ch] = NULL;
@@ -300,7 +315,17 @@ static void poll_drop_channel(nop_onvif_map_backend_t *be, int ch)
     be->poll_vsct[ch][0] = '\0';
 }
 
-static void poll_drop_device(nop_onvif_map_backend_t *be, const char *host, int port)
+/* Request-thread side of a drop: only FLAG the channel (backend lock held by the
+ * caller). The poller performs the real poll_drop_channel() on its own thread at
+ * the top of its next sweep, so poll_dev[] is destroyed only where it is used —
+ * closing the invalidate-vs-poller use-after-free. */
+static void poll_mark_drop_channel(nop_onvif_map_backend_t *be, int ch)
+{
+    if (be && ch >= 0 && ch < ONVIF_MAX_SESSIONS)
+        be->poll_drop[ch] = 1;
+}
+
+static void poll_mark_drop_device(nop_onvif_map_backend_t *be, const char *host, int port)
 {
     int ch, p = port > 0 ? port : ONVIF_DEFAULT_PORT;
     nop_nvr_channel_entry_t e;
@@ -309,12 +334,12 @@ static void poll_drop_device(nop_onvif_map_backend_t *be, const char *host, int 
         return;
     for (ch = 0; ch < ONVIF_MAX_SESSIONS; ch++) {
         if (!nop_nvr_channels_get(be->channels, ch, &e)) {
-            poll_drop_channel(be, ch);
+            poll_mark_drop_channel(be, ch);       /* orphaned slot → drop its poller handle */
             continue;
         }
         if (e.backend == NOP_BACKEND_ONVIF &&
             strcmp(e.host, host) == 0 && entry_port(&e) == p)
-            poll_drop_channel(be, ch);
+            poll_mark_drop_channel(be, ch);
     }
 }
 
@@ -326,12 +351,12 @@ static int entry_device_connect_changed(const nop_nvr_channel_entry_t *prev,
         return 1;
     if (!have_cur)
         return 1;
-    return strcmp(prev->host, cur.host) != 0 ||
+    return strcmp(prev->host, cur->host) != 0 ||
            entry_port(prev) != entry_port(cur) ||
-           strcmp(prev->username, cur.username) != 0 ||
-           strcmp(prev->password, cur.password) != 0 ||
-           prev->backend != cur.backend ||
-           strcmp(prev->video_source_token, cur.video_source_token) != 0;
+           strcmp(prev->username, cur->username) != 0 ||
+           strcmp(prev->password, cur->password) != 0 ||
+           prev->backend != cur->backend ||
+           strcmp(prev->video_source_token, cur->video_source_token) != 0;
 }
 
 void nop_onvif_map_invalidate_channel(nop_onvif_map_backend_t *be, int channel,
@@ -351,12 +376,12 @@ void nop_onvif_map_invalidate_channel(nop_onvif_map_backend_t *be, int channel,
     dev_changed = entry_device_connect_changed(prev, have_cur ? &cur : NULL, have_cur);
 
     session_reset(&be->sessions[channel]);
-    poll_drop_channel(be, channel);
+    poll_mark_drop_channel(be, channel);   /* defer poll_dev teardown to the poller thread */
 
     if (prev && prev->host[0] && dev_changed) {
         int pp = entry_port(prev);
         sessions_reset_for_device(be, prev->host, pp);
-        poll_drop_device(be, prev->host, pp);
+        poll_mark_drop_device(be, prev->host, pp);
         if (devpool_users(be, prev->host, pp) == 0)
             devpool_drop(be, prev->host, pp);
     }
@@ -364,7 +389,7 @@ void nop_onvif_map_invalidate_channel(nop_onvif_map_backend_t *be, int channel,
     if (have_cur && cur.backend == NOP_BACKEND_ONVIF && cur.host[0] && dev_changed) {
         int cp = entry_port(&cur);
         sessions_reset_for_device(be, cur.host, cp);
-        poll_drop_device(be, cur.host, cp);
+        poll_mark_drop_device(be, cur.host, cp);
         devpool_drop(be, cur.host, cp);
     }
 
@@ -401,7 +426,7 @@ int onvif_backend_channel_for_source(nop_onvif_map_backend_t *be, int ref_channe
             continue;
         if (e.backend != NOP_BACKEND_ONVIF)
             continue;
-        if (strcmp(e.host, ref.host) != 0 || e.port != ref.port)
+        if (strcmp(e.host, ref.host) != 0 || entry_port(&e) != entry_port(&ref))
             continue;
         if (source_token && source_token[0]) {
             if (strcmp(e.video_source_token, source_token) == 0)
@@ -434,6 +459,21 @@ int onvif_session_analytics_cfg(onvif_session_t *s, char *out, unsigned size)
     if (s->analytics_cfg[0] == '\0') { out[0] = '\0'; return -1; }
     snprintf(out, size, "%s", s->analytics_cfg);
     return 0;
+}
+
+const char *onvif_session_bound_source(onvif_session_t *s) { return s ? s->bound_source : ""; }
+
+/* Bind state for graceful NOP errors: 1 = channel has an ONVIF camera bound
+ * (backend ONVIF + host set), 0 otherwise. Reads the registry, not the session,
+ * so it works even when onvif_session_begin() failed to connect. */
+int onvif_map_channel_bound(nop_onvif_map_backend_t *be, int channel)
+{
+    nop_nvr_channel_entry_t e;
+    if (!be || !be->channels || channel < 0 || channel >= ONVIF_MAX_SESSIONS)
+        return 0;
+    if (!nop_nvr_channels_get(be->channels, channel, &e))
+        return 0;
+    return (e.backend == NOP_BACKEND_ONVIF && e.host[0] != '\0') ? 1 : 0;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -497,35 +537,46 @@ static nop_onvif_device_t *poll_dev_ensure(nop_onvif_map_backend_t *be, int ch,
     if (be->poll_dev[ch])
         return be->poll_dev[ch];
     {
-        int port = e->port > 0 ? e->port : ONVIF_DEFAULT_PORT;
-        nop_onvif_device_t *d = nop_onvif_device_create(e->host, port,
-                                                        ONVIF_DEFAULT_SERVICE_URL, 0);
-        if (!d) return NULL;
+        int port = entry_port(e);
+        const char *path = e->service_url[0] ? e->service_url : ONVIF_DEFAULT_SERVICE_URL;
+        /* DEDICATED poller handle — created + owned solely by the poller thread,
+         * NOT the shared request-path pool. A blocking PullMessages must never run
+         * concurrently with request SOAP on the same non-reentrant handle, so the
+         * poller keeps its own connection (one subscription per device: only the
+         * owner channel reaches here). */
+        nop_onvif_device_t *d = nop_onvif_device_create(e->host, port, path, 0);
+        int j;
+        if (!d)
+            return NULL;
         if (e->username[0])
             nop_onvif_device_set_auth(d, e->username, e->password);
         nop_onvif_device_set_timeout(d, 5000);
-        if (nop_onvif_events_create_pullpoint(d) != 0) {
+        if (nop_onvif_device_connect(d, e->username, e->password) != 0 ||
+            nop_onvif_events_create_pullpoint(d) != 0) {
+            fprintf(stderr, "[onvif_evt] ch%d %s:%d CreatePullPointSubscription 失败"
+                            "(相机不支持事件/鉴权失败?) → 本通道不上报事件\n",
+                    ch, e->host, port);
             nop_onvif_device_destroy(d);
             return NULL;
         }
-        /* One subscription per device: resolve the bound-source VSC of EVERY
-         * channel on this device (same host:port) once, so pulled events can be
-         * fanned out to the right channel by their Source VSCT. */
-        {
-            int j;
-            for (j = 0; j < ONVIF_MAX_SESSIONS; j++) {
-                nop_nvr_channel_entry_t   ej;
-                nop_onvif_source_tokens_t st;
-                if (!nop_nvr_channels_get(be->channels, j, &ej))
-                    continue;
-                if (ej.backend != NOP_BACKEND_ONVIF)
-                    continue;
-                if (strcmp(ej.host, e->host) != 0 || ej.port != e->port)
-                    continue;
-                be->poll_vsct[j][0] = '\0';
-                if (nop_onvif_resolve_source(d, ej.video_source_token, &st) == 0)
-                    snprintf(be->poll_vsct[j], sizeof(be->poll_vsct[j]), "%s", st.vsc_token);
-            }
+        fprintf(stderr, "[onvif_evt] ch%d %s:%d 事件订阅成功,开始 PullMessages\n",
+                ch, e->host, port);
+        /* Resolve the bound-source VSC of EVERY channel on this device (same
+         * host:port) once, so pulled events fan out to the right channel by their
+         * Source VSCT. A dedicated handle isn't in the request-path cache, so
+         * resolve live (GetProfiles) rather than nop_onvif_device_cached_source. */
+        for (j = 0; j < ONVIF_MAX_SESSIONS; j++) {
+            nop_nvr_channel_entry_t   ej;
+            nop_onvif_source_tokens_t st;
+            if (!nop_nvr_channels_get(be->channels, j, &ej))
+                continue;
+            if (ej.backend != NOP_BACKEND_ONVIF)
+                continue;
+            if (strcmp(ej.host, e->host) != 0 || entry_port(&ej) != port)
+                continue;
+            be->poll_vsct[j][0] = '\0';
+            if (nop_onvif_resolve_source(d, ej.video_source_token, &st) == 0)
+                snprintf(be->poll_vsct[j], sizeof(be->poll_vsct[j]), "%s", st.vsc_token);
         }
         be->poll_dev[ch] = d;
     }
@@ -544,7 +595,7 @@ static int poll_device_owner(nop_onvif_map_backend_t *be, int ch,
             continue;
         if (ej.backend != NOP_BACKEND_ONVIF || !ej.enabled)
             continue;
-        if (strcmp(ej.host, e->host) == 0 && ej.port == e->port)
+        if (strcmp(ej.host, e->host) == 0 && entry_port(&ej) == entry_port(e))
             return 0;                     /* a lower-index channel owns the device */
     }
     return 1;
@@ -564,7 +615,7 @@ static int poll_route_channel(nop_onvif_map_backend_t *be, int owner_ch,
             continue;
         if (!nop_nvr_channels_get(be->channels, j, &ej))
             continue;
-        if (strcmp(ej.host, e->host) == 0 && ej.port == e->port)
+        if (strcmp(ej.host, e->host) == 0 && entry_port(&ej) == entry_port(e))
             return j;
     }
     return owner_ch;
@@ -582,6 +633,20 @@ static void *poller_main(void *arg)
             nop_onvif_device_t     *d;
             int                     n, i;
 
+            /* Consume a deferred drop request (set by invalidate_channel under
+             * the backend lock). Doing the teardown HERE, on the poller thread,
+             * is what makes poll_dev[] single-owner and free of the cross-thread
+             * use-after-free. Brief lock only for the flag — never across pull. */
+            {
+                int drop;
+                osal_mutex_lock(be->lock);
+                drop = be->poll_drop[ch];
+                be->poll_drop[ch] = 0;
+                osal_mutex_unlock(be->lock);
+                if (drop)
+                    poll_drop_channel(be, ch);
+            }
+
             if (!nop_nvr_channels_get(be->channels, ch, &e))
                 continue;
             if (e.backend != NOP_BACKEND_ONVIF || !e.enabled)
@@ -595,6 +660,8 @@ static void *poller_main(void *arg)
                 continue;
 
             n = nop_onvif_events_pull_msgs(d, 1, 8, msgs);   /* 1s block */
+            if (n > 0)
+                fprintf(stderr, "[onvif_evt] ch%d 收到 %d 条 ONVIF 事件消息\n", ch, n);
             for (i = 0; i < n; i++) {
                 nop_detect_type_t t = topic_to_detect(msgs[i].topic);
                 nop_event_t ev;
@@ -614,17 +681,17 @@ static void *poller_main(void *arg)
                     char        extra[128];
                     const char *cls = nop_evt_class(msgs[i].class_types);
                     const char *dir = nop_evt_dir(msgs[i].direction);
-                    if (cls || dir) {
-                        int off = snprintf(extra, sizeof(extra), "{");
-                        if (cls)
-                            off += snprintf(extra + off, sizeof(extra) - off,
-                                            "\"classType\":\"%s\"", cls);
-                        if (dir)
-                            off += snprintf(extra + off, sizeof(extra) - off,
-                                            "%s\"direction\":\"%s\"", cls ? "," : "", dir);
-                        snprintf(extra + off, sizeof(extra) - off, "}");
+                    /* cls/dir are short fixed literals; one bounded snprintf per
+                     * case avoids any offset accumulation (and its overflow). */
+                    if (cls && dir)
+                        snprintf(extra, sizeof(extra),
+                                 "{\"classType\":\"%s\",\"direction\":\"%s\"}", cls, dir);
+                    else if (cls)
+                        snprintf(extra, sizeof(extra), "{\"classType\":\"%s\"}", cls);
+                    else if (dir)
+                        snprintf(extra, sizeof(extra), "{\"direction\":\"%s\"}", dir);
+                    if (cls || dir)
                         ev.extra_json = extra;
-                    }
                     if (be->event_hub)
                         nop_event_publish((nop_event_hub_t *)be->event_hub, &ev);
                 }

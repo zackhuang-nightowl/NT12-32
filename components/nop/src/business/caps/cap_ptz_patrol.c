@@ -190,15 +190,20 @@ static nop_status_t handle_set_ptz_preset(const nop_request_t *request,
 
     if (!nop_json_has(request->args, "channel"))
         return NOP_ERR_PARAM;
+    channel = (int)nop_json_num(request->args, "channel", 0);
+
+    /* ★ ONVIF 相机:先委派给映射层(SetPreset),再谈参数。缺 token=**新建**(设备分配)、有 token=更新
+     * (见 setPreset 语义);token/name 由 ONVIF 层按需处理。若像原来那样先校验 token/name 再委派,
+     * 新建预置位(无 token)会被误拒 400 → "preset 无法创建"。与 handle_get_ptz_presets(先委派)一致。 */
+    if (nop_onvif_map_is_onvif(handler_context, channel))
+        return nop_onvif_map_dispatch(handler_context, request, response);
+
+    /* --- 以下为 HAL 本地路径:需要 token(""=自动分配) 与 name。 --- */
     if (!nop_json_has(request->args, "token"))    /* Must; "" = auto-assign */
         return NOP_ERR_PARAM;
     name = nop_json_str(request->args, "name", NULL);
     if (!name)
         return NOP_ERR_PARAM;
-    channel = (int)nop_json_num(request->args, "channel", 0);
-
-    if (nop_onvif_map_is_onvif(handler_context, channel))
-        return nop_onvif_map_dispatch(handler_context, request, response);
 
     token  = nop_json_str(request->args, "token", "");
     preset = preset_find(token);
@@ -353,6 +358,21 @@ static void emit_patrol(nop_json_t *array, const ptz_patrol_t *patrol, int runni
     }
     nop_json_add(entry, "spots", spots);
     nop_json_arr_push(array, entry);
+}
+
+/* getPtzCapabilities: per-channel PTZ numeric limits. ONVIF channels answer from
+ * the PTZ Node via the mapping layer; native/in-memory has no limits store, so
+ * it returns an empty ptz[] (feature flags live in getDeviceCapabilities). */
+static nop_status_t handle_get_ptz_capabilities(const nop_request_t *request,
+                                                nop_response_t *response,
+                                                void *handler_context)
+{
+    if (nop_onvif_map_is_onvif(handler_context, (int)nop_json_num(request->args, "channel", 0)))
+        return nop_onvif_map_dispatch(handler_context, request, response);
+
+    response->content = nop_json_obj();
+    nop_json_add(response->content, "ptz", nop_json_arr());
+    return NOP_OK;
 }
 
 static nop_status_t handle_get_ptz_patrols(const nop_request_t *request,
@@ -532,6 +552,7 @@ void cap_ptz_patrol_register(nop_router_t *router)
     nop_router_register(router, "modifyPtzPatrol",  CAP_PTZ, handle_modify_ptz_patrol);
     nop_router_register(router, "operatePtzPatrol", CAP_PTZ, handle_operate_ptz_patrol);
     nop_router_register(router, "removePtzPatrol",  CAP_PTZ, handle_remove_ptz_patrol);
+    nop_router_register(router, "getPtzCapabilities", CAP_PTZ, handle_get_ptz_capabilities);
     nop_router_register(router, "getPtzPatrols",    CAP_PTZ, handle_get_ptz_patrols);
     nop_router_register(router, "getPtzPresets",    CAP_PTZ, handle_get_ptz_presets);
     nop_router_register(router, "setPtzPreset",     CAP_PTZ, handle_set_ptz_preset);

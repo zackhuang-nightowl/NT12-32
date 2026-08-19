@@ -8,10 +8,66 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <pthread.h>
+#include <time.h>
 
 #define NVR_ONVIF_LOG(...) NOP_LOGI(__VA_ARGS__)
 
 static int g_inited = 0;
+
+/* ================= 发现缓存(开机/周期"扫一次",按 IP 存 scopes) =================
+ * 目的:每通道首解析原本各做一次 2s WS-Discovery probe,而 probe 被 g_onvif_mutex 全局串行
+ * → 16 路开机要几十秒。改为**一次广播扫全部相机**缓存 scopes;各通道(含线程并发)解析时查缓存,
+ * 命中即免 probe → 真正并发。缓存未命中才回落单路 probe(少见)。 */
+#define NVR_DISC_MAX 64
+typedef struct { char ip[64]; char scopes[1024]; char service_url[128]; int port; time_t ts; } disc_ent_t;
+static disc_ent_t     g_disc[NVR_DISC_MAX];
+static int            g_disc_n = 0;
+static pthread_mutex_t g_disc_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void disc_cache_put(const nop_onvif_device_info_t *d, void *user)
+{
+    (void)user;
+    if (!d || !d->host[0]) return;
+    pthread_mutex_lock(&g_disc_lock);
+    int i, slot = -1;
+    for (i = 0; i < g_disc_n; i++) if (strcmp(g_disc[i].ip, d->host) == 0) { slot = i; break; }
+    if (slot < 0) { slot = (g_disc_n < NVR_DISC_MAX) ? g_disc_n++ : 0; memset(&g_disc[slot], 0, sizeof(g_disc[slot])); }
+    snprintf(g_disc[slot].ip, sizeof(g_disc[slot].ip), "%s", d->host);
+    if (d->scopes[0])      snprintf(g_disc[slot].scopes, sizeof(g_disc[slot].scopes), "%s", d->scopes);
+    if (d->service_url[0]) snprintf(g_disc[slot].service_url, sizeof(g_disc[slot].service_url), "%s", d->service_url);
+    if (d->port > 0)       g_disc[slot].port = d->port;
+    g_disc[slot].ts = time(NULL);
+    pthread_mutex_unlock(&g_disc_lock);
+}
+
+/* 一次广播(指定本机接口 local_ip;NULL=默认/LAN),把找到的所有相机 scopes 存入缓存。返回发现数。 */
+int nvr_onvif_scan(const char *local_ip, int seconds)
+{
+    if (nvr_onvif_init() != 0) return -1;
+    return nop_onvif_discover(local_ip, seconds > 0 ? seconds : 3, disc_cache_put, NULL);
+}
+
+/* 查缓存:命中且有 scopes → 回填并返回 0;未命中/无 scopes → -1(调用方回落 probe)。 */
+int nvr_onvif_cached_scopes(const char *ip, char *scopes, int scopes_cap,
+                            char *service_url, int svc_cap, int *port_io)
+{
+    if (!ip || !ip[0]) return -1;
+    int rc = -1;
+    pthread_mutex_lock(&g_disc_lock);
+    for (int i = 0; i < g_disc_n; i++) {
+        if (strcmp(g_disc[i].ip, ip) != 0) continue;
+        if (g_disc[i].scopes[0]) {
+            if (scopes && scopes_cap > 0)      snprintf(scopes, scopes_cap, "%s", g_disc[i].scopes);
+            if (service_url && svc_cap > 0)    snprintf(service_url, svc_cap, "%s", g_disc[i].service_url);
+            if (port_io && g_disc[i].port > 0) *port_io = g_disc[i].port;
+            rc = 0;
+        }
+        break;
+    }
+    pthread_mutex_unlock(&g_disc_lock);
+    return rc;
+}
 
 int nvr_onvif_init(void)
 {
@@ -31,7 +87,7 @@ void nvr_onvif_cleanup(void)
 /* 广播匹配：找到 host==want_ip 的设备，记下它真实的 device_service XAddr(host/port/path) */
 typedef struct {
     const char *want_ip; int found;
-    char host[128]; int port; char service_url[128]; char scopes[512];
+    char host[128]; int port; char service_url[128]; char scopes[1024];
 } find_dev_t;
 
 static void on_probe_match(const nop_onvif_device_info_t *d, void *user)
@@ -85,12 +141,104 @@ static int pick_stream_uri(nop_onvif_device_t *dev, int media2, int n, int want_
     return -1;
 }
 
-/* app 的取流钩子（强符号，覆盖 nvr_app.c 的弱兜底）。严格遵守 ONVIF 加设备流程：
- *   ① WS-Discovery 广播找到该 IP 的设备 → 拿真实 device_service XAddr(host/端口/路径)
- *   ② 据此构建 ONVIF_DEVICE（不猜 ip/port/path）
- *   ③ GetServices 取全部 service 链接（media1=ver10/media、media2=ver20/media…）
- *   ④ GetProfiles/GetStreamUri 严格发到各自 service 链接
- * 只一次尝试（有账号带鉴权，否则匿名）；上层限次+退避护 IPC 5 次错误上限。 */
+int nvr_onvif_connect(const char *ip, int port, const char *service_url,
+                      const char *user, const char *pass)
+{
+    char path[128];
+    if (!ip || !ip[0]) return -1;
+    if (nvr_onvif_init() != 0) return -1;
+    path[0] = 0;
+    if (service_url && service_url[0])
+        snprintf(path, sizeof(path), "%s", service_url);
+    if (!path[0]) {
+        /* 池里还没有 path 时才广播一次，拿真实 device_service */
+        char local_ip[64]; local_ip_for(ip, local_ip, sizeof(local_ip));
+        find_dev_t f; memset(&f, 0, sizeof(f)); f.want_ip = ip;
+        nop_onvif_discover(local_ip[0] ? local_ip : NULL, 2, on_probe_match, &f);
+        if (f.found) {
+            if (f.port > 0) port = f.port;
+            snprintf(path, sizeof(path), "%s", f.service_url[0] ? f.service_url : "/onvif/device_service");
+        }
+    }
+    int p = port > 0 ? port : 80;
+    nop_onvif_device_t *dev = nop_onvif_device_retain(ip, p,
+                                                      path[0] ? path : "/onvif/device_service", 0);
+    if (!dev) return -1;
+    if (nop_onvif_device_connected(dev)) {
+        nop_onvif_device_set_auth(dev, user, pass);   /* 空密 = 关 digest */
+        nop_onvif_device_drop(ip, p);   /* 已有连接持有者，撤掉这次多余 retain */
+        return 0;
+    }
+    int rc = nop_onvif_device_connect(dev, user, pass);
+    if (rc != 0)
+        nop_onvif_device_drop(ip, p);
+    NVR_ONVIF_LOG("[onvif] connect %s:%d path=%s -> %s", ip, p,
+                  path[0] ? path : "/onvif/device_service", rc == 0 ? "ok" : "FAIL");
+    return rc;
+}
+
+int nvr_onvif_probe_scopes(const char *ip, char *scopes, int scopes_cap,
+                           char *service_url, int svc_cap, int *port_io)
+{
+    find_dev_t f;
+    char local_ip[64];
+    if (!ip || !ip[0]) return -1;
+    if (nvr_onvif_init() != 0) return -1;
+    if (scopes && scopes_cap > 0) scopes[0] = 0;
+    if (service_url && svc_cap > 0) service_url[0] = 0;
+    memset(&f, 0, sizeof(f));
+    f.want_ip = ip;
+    local_ip_for(ip, local_ip, sizeof(local_ip));
+    nop_onvif_discover(local_ip[0] ? local_ip : NULL, 2, on_probe_match, &f);
+    if (!f.found) return -1;
+    if (scopes && scopes_cap > 0)
+        snprintf(scopes, scopes_cap, "%s", f.scopes);
+    if (service_url && svc_cap > 0)
+        snprintf(service_url, svc_cap, "%s", f.service_url);
+    if (port_io && f.port > 0) *port_io = f.port;
+    return 0;
+}
+
+int nvr_onvif_get_scopes(const char *ip, int port, const char *user, const char *pass,
+                         char *out, int cap)
+{
+    nop_onvif_device_t *dev;
+    int p, soap_ok = 0;
+    if (!ip || !out || cap <= 0) return -1;
+    out[0] = 0;
+    if (nvr_onvif_init() != 0) return -1;
+    nvr_onvif_probe_scopes(ip, out, cap, NULL, 0, NULL);
+    p = port > 0 ? port : 80;
+    dev = nop_onvif_device_retain(ip, p, NULL, 0);
+    if (dev) {
+        if (!nop_onvif_device_connected(dev) && user && user[0]) {
+            nvr_onvif_connect(ip, p, NULL, user, pass);
+            nop_onvif_device_drop(ip, p);
+            dev = nop_onvif_device_retain(ip, p, NULL, 0);
+        }
+        if (dev && nop_onvif_device_connected(dev)) {
+            char soap[1024];
+            soap[0] = 0;
+            nop_onvif_device_lock(dev);
+            if (nop_onvif_get_scopes(dev, soap, sizeof(soap)) == 0 && soap[0]) {
+                snprintf(out, cap, "%s", soap);
+                soap_ok = 1;
+            }
+            nop_onvif_device_unlock(dev);
+        }
+        if (dev) nop_onvif_device_drop(ip, p);
+    }
+    (void)soap_ok;
+    return out[0] ? 0 : -1;
+}
+
+void nvr_onvif_disconnect(const char *ip, int port)
+{
+    if (ip && ip[0])
+        nop_onvif_device_drop(ip, port > 0 ? port : 80);
+}
+
+/* 取流：借连接时建好的 handle，用已缓存 URI。未连接则先 connect。不再每次 GetServices。 */
 int nvr_onvif_get_url(const char *ip, int port, const char *user, const char *pass,
                       const char *stream, char *out, int out_size,
                       char *scopes_out, int scopes_cap, const char *vsrc_token)
@@ -99,45 +247,67 @@ int nvr_onvif_get_url(const char *ip, int port, const char *user, const char *pa
     if (nvr_onvif_init() != 0) return -1;
     out[0] = 0;
     if (scopes_out && scopes_cap > 0) scopes_out[0] = 0;
-    (void)port;   /* 端口以广播结果为准，不用传入的猜测值 */
 
-    /* ① 广播找设备，取真实 XAddr */
-    char local_ip[64]; local_ip_for(ip, local_ip, sizeof(local_ip));
-    find_dev_t f; memset(&f, 0, sizeof(f)); f.want_ip = ip;
-    nop_onvif_discover(local_ip[0] ? local_ip : NULL, 2, on_probe_match, &f);
-    /* 顺带回传 scopes(供通道分类 kind/mac);即使后续取流失败,分类信息也有用 */
-    if (scopes_out && scopes_cap > 0 && f.found) snprintf(scopes_out, (size_t)scopes_cap, "%s", f.scopes);
-    if (!f.found) {
-        NVR_ONVIF_LOG("[onvif] get_url %s: 广播未发现设备(local=%s)",
-                      ip, local_ip[0] ? local_ip : "default");
-        return -1;
+    nop_onvif_device_t *dev = nop_onvif_device_retain(ip, port > 0 ? port : 80, NULL, 0);
+    if (!dev) return -1;
+    if (!nop_onvif_device_connected(dev)) {
+        if (nvr_onvif_connect(ip, port, NULL, user, pass) != 0) {
+            nop_onvif_device_drop(ip, port > 0 ? port : 80);
+            return -1;
+        }
+    } else {
+        nop_onvif_device_set_auth(dev, user, pass);   /* 空密关 digest */
     }
 
-    /* ② 用广播得到的 device_service XAddr 构建设备 */
-    nop_onvif_device_t *dev = nop_onvif_device_create(
-        f.host, f.port > 0 ? f.port : 80,
-        f.service_url[0] ? f.service_url : "/onvif/device_service", 0);
-    if (!dev) return -1;
-    /* ONVIF 请求按 DB 账户密码鉴权:总带 WS-Security UsernameToken(用户名默认 admin,密码即使为空
-     * 遇 401/NotAuthorized 时才需带 token。 */
-    if (pass && pass[0]) nop_onvif_device_set_auth(dev, (user && user[0]) ? user : "admin", pass);
-
-    /* ③ GetServices 取全部 service 链接 */
-    int svc = nop_onvif_get_services(dev);
-    int err = nop_onvif_last_error(dev);   /* -1连接 -4收超时 -6空 -7解析 */
-
-    /* ④ media1(trt) 优先；无果再 media2(tr2, Profile T)。均按各自 service 链接。 */
     int want_sub = (stream && strcmp(stream, "sub") == 0);
-    int n1 = nop_onvif_get_profiles(dev);
-    int rc = pick_stream_uri(dev, 0, n1, want_sub, vsrc_token, out, out_size);
-    int n2 = -1;
-    if (rc != 0) { out[0] = 0; n2 = nop_onvif_get_profiles2(dev);
-                   rc = pick_stream_uri(dev, 1, n2, want_sub, vsrc_token, out, out_size); }
+    nop_onvif_device_lock(dev);
+    int rc = nop_onvif_device_cached_uri(dev, want_sub, vsrc_token, out, (size_t)out_size);
+    if (rc != 0)
+        rc = pick_stream_uri(dev, 0, 8, want_sub, vsrc_token, out, out_size);
+    if (rc != 0)
+        rc = pick_stream_uri(dev, 1, 8, want_sub, vsrc_token, out, out_size);
+    nop_onvif_device_unlock(dev);
+    if (scopes_out && scopes_cap > 0) {
+        char soap[1024];
+        soap[0] = 0;
+        nop_onvif_device_lock(dev);
+        if (nop_onvif_get_scopes(dev, soap, sizeof(soap)) == 0 && soap[0])
+            snprintf(scopes_out, scopes_cap, "%s", soap);
+        nop_onvif_device_unlock(dev);
+    }
+    nop_onvif_device_drop(ip, port > 0 ? port : 80);   /* 配对本次 retain；连接仍由通道持有 */
 
-    NVR_ONVIF_LOG("[onvif] get_url %s%s%s: disc(host=%s port=%d url=%s) services=%d(err=%d) media1=%d media2=%d -> %s",
-                  ip, (vsrc_token && vsrc_token[0]) ? " src=" : "", (vsrc_token && vsrc_token[0]) ? vsrc_token : "",
-                  f.host, f.port, f.service_url, svc, err, n1, n2, rc == 0 ? out : "(FAIL)");
-    nop_onvif_device_destroy(dev);
+    NVR_ONVIF_LOG("[onvif] get_url %s:%d %s%s%s -> %s",
+                  ip, port > 0 ? port : 80, want_sub ? "sub" : "main",
+                  (vsrc_token && vsrc_token[0]) ? " src=" : "",
+                  (vsrc_token && vsrc_token[0]) ? vsrc_token : "",
+                  rc == 0 ? out : "(FAIL)");
+    return rc;
+}
+
+int nvr_onvif_get_mac(const char *ip, int port, const char *user, const char *pass,
+                      char *out, int cap)
+{
+    int p, rc;
+    nop_onvif_device_t *dev;
+    if (!ip || !out || cap <= 0) return -1;
+    out[0] = 0;
+    if (nvr_onvif_init() != 0) return -1;
+    p = port > 0 ? port : 80;
+    dev = nop_onvif_device_retain(ip, p, NULL, 0);
+    if (!dev) return -1;
+    if (!nop_onvif_device_connected(dev)) {
+        if (nvr_onvif_connect(ip, p, NULL, user, pass) != 0) {
+            nop_onvif_device_drop(ip, p);
+            return -1;
+        }
+    }
+    nop_onvif_device_lock(dev);
+    rc = nop_onvif_get_network_mac(dev, ip, out, cap);
+    nop_onvif_device_unlock(dev);
+    nop_onvif_device_drop(ip, p);
+    NVR_ONVIF_LOG("[onvif] GetNetworkInterfaces mac %s:%d -> %s",
+                  ip, p, rc == 0 ? out : "(FAIL)");
     return rc;
 }
 
@@ -155,13 +325,12 @@ int nvr_onvif_probe(const char *ip, int port, const char *user, const char *pass
     if (!f.found) { NVR_ONVIF_LOG("[onvif] probe %s: 广播未发现", ip); return -1; }
     snprintf(out->scopes, sizeof(out->scopes), "%s", f.scopes);
 
-    nop_onvif_device_t *dev = nop_onvif_device_create(
-        f.host, f.port > 0 ? f.port : 80,
-        f.service_url[0] ? f.service_url : "/onvif/device_service", 0);
+    if (nvr_onvif_connect(ip, f.port > 0 ? f.port : 80,
+                          f.service_url[0] ? f.service_url : NULL, user, pass) != 0)
+        return -1;
+    nop_onvif_device_t *dev = nop_onvif_device_retain(ip, f.port > 0 ? f.port : 80, NULL, 0);
     if (!dev) return -1;
-    /* ONVIF 请求按 DB 账户密码鉴权:总带 WS-Security UsernameToken(用户名默认 admin,密码即使为空
-     * 遇 401/NotAuthorized 时才需带 token。 */
-    if (pass && pass[0]) nop_onvif_device_set_auth(dev, (user && user[0]) ? user : "admin", pass);
+    nop_onvif_device_lock(dev);
 
     nop_onvif_device_information_t di;
     if (nop_onvif_get_device_information(dev, &di) == 0) {
@@ -170,8 +339,6 @@ int nvr_onvif_probe(const char *ip, int port, const char *user, const char *pass
         snprintf(out->firmware,     sizeof(out->firmware),     "%s", di.firmware_version);
         snprintf(out->serial,       sizeof(out->serial),       "%s", di.serial_number);
     }
-    nop_onvif_get_services(dev);
-    nop_onvif_get_capabilities(dev);
     out->ptz = (nop_onvif_ptz_get_node_count(dev) > 0) ? 1 : 0;
 
     /* --- getDeviceCapabilities 能力集(NOPMappingONVIF.md):
@@ -213,20 +380,16 @@ int nvr_onvif_probe(const char *ip, int port, const char *user, const char *pass
         out->ptz_focus = 1;   /* 有 PTZ 一般含 Imaging 对焦(精确判定可加 GetImagingSettings) */
     }
 
-    /* 主/子流 URI:media1 优先,空则 media2 */
-    int n1 = nop_onvif_get_profiles(dev);
-    int have_main = (pick_stream_uri(dev, 0, n1, 0, NULL, out->main_uri, sizeof(out->main_uri)) == 0);
-    pick_stream_uri(dev, 0, n1, 1, NULL, out->sub_uri, sizeof(out->sub_uri));
-    if (!have_main) { int n2 = nop_onvif_get_profiles2(dev);
-        pick_stream_uri(dev, 1, n2, 0, NULL, out->main_uri, sizeof(out->main_uri));
-        pick_stream_uri(dev, 1, n2, 1, NULL, out->sub_uri, sizeof(out->sub_uri)); }
+    nop_onvif_device_cached_uri(dev, 0, NULL, out->main_uri, sizeof(out->main_uri));
+    nop_onvif_device_cached_uri(dev, 1, NULL, out->sub_uri, sizeof(out->sub_uri));
 
     /* setTime 走 ONVIF:把 NVR 当前时间下发相机(所有设备统一) */
     out->time_set = (nop_onvif_set_system_datetime_now(dev) == 0) ? 1 : 0;
 
     NVR_ONVIF_LOG("[onvif] probe %s: model='%s' sn='%s' ptz=%d main=%s time_set=%d",
                   ip, out->model, out->serial, out->ptz, out->main_uri[0] ? "y" : "n", out->time_set);
-    nop_onvif_device_destroy(dev);
+    nop_onvif_device_unlock(dev);
+    nop_onvif_device_drop(ip, f.port > 0 ? f.port : 80);
     return 0;
 }
 
@@ -234,21 +397,79 @@ int nvr_onvif_set_time_now(const char *ip, int port, const char *user, const cha
 {
     if (!ip) return -1;
     if (nvr_onvif_init() != 0) return -1;
-    (void)port;
-    char local_ip[64]; local_ip_for(ip, local_ip, sizeof(local_ip));
-    find_dev_t f; memset(&f, 0, sizeof(f)); f.want_ip = ip;
-    nop_onvif_discover(local_ip[0] ? local_ip : NULL, 2, on_probe_match, &f);
-    if (!f.found) return -1;
-    nop_onvif_device_t *dev = nop_onvif_device_create(
-        f.host, f.port > 0 ? f.port : 80,
-        f.service_url[0] ? f.service_url : "/onvif/device_service", 0);
+    if (nvr_onvif_connect(ip, port, NULL, user, pass) != 0) return -1;
+    nop_onvif_device_t *dev = nop_onvif_device_retain(ip, port > 0 ? port : 80, NULL, 0);
     if (!dev) return -1;
-    /* ONVIF 请求按 DB 账户密码鉴权:总带 WS-Security UsernameToken(用户名默认 admin,密码即使为空
-     * 遇 401/NotAuthorized 时才需带 token。 */
-    if (pass && pass[0]) nop_onvif_device_set_auth(dev, (user && user[0]) ? user : "admin", pass);
+    nop_onvif_device_lock(dev);
     int rc = nop_onvif_set_system_datetime_now(dev);
-    nop_onvif_device_destroy(dev);
+    nop_onvif_device_unlock(dev);
+    nop_onvif_device_drop(ip, port > 0 ? port : 80);
     return rc == 0 ? 0 : -1;
+}
+
+/* 多源按 VideoSourceToken 挑主 profile；单源用 index 0。 */
+static int pick_profile_token(nop_onvif_device_t *dev, const char *vsrc_token,
+                              char *tok, size_t tok_cap)
+{
+    nop_onvif_profile_t p;
+    int n = nop_onvif_get_profiles(dev);
+    if (n < 0) n = 0;
+    if (n == 0) {
+        n = nop_onvif_get_profiles2(dev);
+        for (int i = 0; i < n; i++) {
+            if (nop_onvif_get_profile2(dev, i, &p) != 0) continue;
+            if (vsrc_token && vsrc_token[0] && strcmp(p.source_token, vsrc_token) != 0)
+                continue;
+            snprintf(tok, tok_cap, "%s", p.token);
+            return tok[0] ? 0 : -1;
+        }
+        return -1;
+    }
+    for (int i = 0; i < n; i++) {
+        if (nop_onvif_get_profile(dev, i, &p) != 0) continue;
+        if (vsrc_token && vsrc_token[0] && strcmp(p.source_token, vsrc_token) != 0)
+            continue;
+        snprintf(tok, tok_cap, "%s", p.token);
+        return tok[0] ? 0 : -1;
+    }
+    if (nop_onvif_get_profile(dev, 0, &p) == 0 && p.token[0]) {
+        snprintf(tok, tok_cap, "%s", p.token);
+        return 0;
+    }
+    return -1;
+}
+
+int nvr_onvif_get_snapshot(const char *ip, int port, const char *user, const char *pass,
+                           const char *vsrc_token, unsigned char **out, int *out_len)
+{
+    if (!ip || !out || !out_len) return -1;
+    *out = NULL; *out_len = 0;
+    if (nvr_onvif_init() != 0) return -1;
+    int p = port > 0 ? port : 80;
+    nop_onvif_device_t *dev = nop_onvif_device_retain(ip, p, NULL, 0);
+    if (!dev) return -1;
+    if (!nop_onvif_device_connected(dev)) {
+        if (nvr_onvif_connect(ip, p, NULL, user, pass) != 0) {
+            nop_onvif_device_drop(ip, p);
+            return -1;
+        }
+    } else {
+        nop_onvif_device_set_auth(dev, user, pass);
+    }
+    nop_onvif_device_set_timeout(dev, 4000);
+    nop_onvif_device_lock(dev);
+    char token[100]; token[0] = 0;
+    int rc = pick_profile_token(dev, vsrc_token, token, sizeof(token));
+    if (rc == 0)
+        rc = nop_onvif_get_snapshot(dev, token, out, out_len);
+    nop_onvif_device_unlock(dev);
+    nop_onvif_device_drop(ip, p);
+    if (rc != 0 || !out[0] || *out_len <= 0) {
+        if (*out) { nop_onvif_free_buffer(*out); *out = NULL; }
+        *out_len = 0;
+        return -1;
+    }
+    return 0;
 }
 
 /* 发现：把 nop 的 device_info 翻成 nvr_onvif_cam_t 回调 */
@@ -262,6 +483,7 @@ static void on_found(const nop_onvif_device_info_t *d, void *user)
     memset(&cam, 0, sizeof(cam));
     snprintf(cam.host,   sizeof(cam.host),   "%s", d->host);
     cam.port = d->port;
+    snprintf(cam.service_url, sizeof(cam.service_url), "%s", d->service_url);
     snprintf(cam.uuid,   sizeof(cam.uuid),   "%s", d->endpoint_reference);
     snprintf(cam.scopes, sizeof(cam.scopes), "%s", d->scopes);
     c->cb(&cam, c->user);

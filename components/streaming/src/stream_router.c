@@ -31,6 +31,189 @@ static rsdk_writer_t *writer_of(stream_chan_t *c, int stream)
     return (stream == NVR_STREAM_SUB) ? c->writer_sub : c->writer_main;
 }
 
+/* ---- 事件预录环(主/子各一,挂在 stream_pull_t) -------------------------- */
+
+static void stream_pre_clear(stream_pull_t *p)
+{
+    int i;
+    if (!p || !p->pre_frames) { if (p) { p->pre_count = 0; p->pre_head = 0; } return; }
+    for (i = 0; i < p->pre_cap; i++) {
+        free(p->pre_frames[i].data);
+        p->pre_frames[i].data = NULL;
+        p->pre_frames[i].len  = 0;
+    }
+    p->pre_count = 0;
+    p->pre_head  = 0;
+}
+
+static void stream_pre_free(stream_pull_t *p)
+{
+    if (!p) return;
+    stream_pre_clear(p);
+    free(p->pre_frames);
+    p->pre_frames = NULL;
+    p->pre_cap = 0;
+    p->pre_flushed = 0;
+}
+
+static void stream_pre_free_chan(stream_chan_t *c)
+{
+    if (!c) return;
+    stream_pre_free(&c->pmain);
+    stream_pre_free(&c->psub);
+}
+
+static int stream_pre_ensure(stream_pull_t *p, int pre_s)
+{
+    int need;
+    if (!p || pre_s <= 0) { stream_pre_free(p); return 0; }
+    need = pre_s * NVR_PRE_FPS_ASSUME;
+    if (need > NVR_PRE_FRAMES_MAX) need = NVR_PRE_FRAMES_MAX;
+    if (need < 1) need = 1;
+    if (p->pre_frames && p->pre_cap == need) return 0;
+    stream_pre_free(p);
+    p->pre_frames = (stream_pre_frame_t *)calloc((size_t)need, sizeof(stream_pre_frame_t));
+    if (!p->pre_frames) return -1;
+    p->pre_cap = need;
+    return 0;
+}
+
+static void stream_pre_push(stream_pull_t *p, const uint8_t *data, int len,
+                            uint32_t ts, int is_key, int codec, int frame_type)
+{
+    stream_pre_frame_t *slot;
+    uint8_t *copy;
+    if (!p || !p->pre_frames || p->pre_cap <= 0 || !data || len <= 0) return;
+    copy = (uint8_t *)malloc((size_t)len);
+    if (!copy) return;
+    memcpy(copy, data, (size_t)len);
+    slot = &p->pre_frames[p->pre_head];
+    if (p->pre_count == p->pre_cap) free(slot->data);
+    else p->pre_count++;
+    slot->data = copy;
+    slot->len = (uint32_t)len;
+    slot->ts = ts;
+    slot->is_key = is_key ? 1 : 0;
+    slot->codec = (uint8_t)codec;
+    slot->frame_type = (uint8_t)frame_type;
+    p->pre_head = (p->pre_head + 1) % p->pre_cap;
+}
+
+/* 把本路预录环 flush 到对应 writer(从最早关键帧起)。 */
+static void stream_pre_flush(stream_chan_t *c, stream_pull_t *p)
+{
+    rsdk_writer_t *w;
+    int i, idx, oldest, started = 0;
+    int *gated;
+    if (!c || !p) return;
+    w = writer_of(c, p->stream);
+    gated = (p->stream == NVR_STREAM_SUB) ? &c->rec_gated_sub : &c->rec_gated_main;
+    if (!w || !p->pre_frames || p->pre_count <= 0) {
+        stream_pre_clear(p);
+        return;
+    }
+    oldest = (p->pre_head - p->pre_count + p->pre_cap) % p->pre_cap;
+    for (i = 0; i < p->pre_count; i++) {
+        stream_pre_frame_t *b;
+        rsdk_frame_t f;
+        idx = (oldest + i) % p->pre_cap;
+        b = &p->pre_frames[idx];
+        if (!b->data || b->len == 0) continue;
+        if (!started) {
+            if (!b->is_key) continue;
+            started = 1;
+            *gated = 1;
+        }
+        memset(&f, 0, sizeof(f));
+        f.chn = (uint16_t)c->cfg.chn;
+        f.stream = (uint8_t)p->stream;
+        f.codec = b->codec;
+        f.frame_type = b->frame_type;
+        f.pts = (uint64_t)b->ts;
+        f.wall_time = (uint64_t)time(NULL);
+        f.data = b->data;
+        f.len = b->len;
+        rsdk_rec_write_frame(w, &f);
+    }
+    stream_pre_clear(p);
+}
+
+/* puller 线程:事件片段开始时补开 writer(owns writer,可 open)。 */
+static void stream_event_writers_open(stream_chan_t *c)
+{
+    rsdk_group_t *grp;
+    int rectype;
+    if (!c) return;
+    grp = c->grp;
+    if (!grp) return;
+    rectype = c->pend_event_rectype ? (int)c->pend_event_rectype : RSDK_REC_MOTION;
+    if (!c->writer_main) {
+        if (rsdk_rec_open_group_stream(grp, c->cfg.chn, rectype,
+                                       NVR_STREAM_MAIN, &c->writer_main) != RSDK_OK)
+            c->writer_main = NULL;
+        else c->rec_gated_main = 0;
+    }
+    if (!c->writer_sub) {
+        if (rsdk_rec_open_group_stream(grp, c->cfg.chn, rectype,
+                                       NVR_STREAM_SUB, &c->writer_sub) != RSDK_OK)
+            c->writer_sub = NULL;
+        else c->rec_gated_sub = 0;
+    }
+}
+
+static void stream_apply_event_tags(stream_chan_t *c)
+{
+    uint64_t pend = c->pend_event_id;
+    if (pend != c->applied_event_id) {
+        if (c->writer_main) {
+            rsdk_rec_set_event(c->writer_main, pend);
+            if (pend)
+                rsdk_rec_mark_event(c->writer_main, pend, c->pend_event_rectype,
+                                    c->pend_event_start, c->pend_event_end,
+                                    (uint32_t)(1u << (c->pend_event_rectype & 31)), 0);
+        }
+        if (c->writer_sub) rsdk_rec_set_event(c->writer_sub, pend);
+        c->applied_event_id = pend;
+    } else if (c->applied_event_id && c->pend_event_end &&
+               (uint32_t)time(NULL) > c->pend_event_end) {
+        if (c->writer_main) rsdk_rec_set_event(c->writer_main, 0);
+        if (c->writer_sub)  rsdk_rec_set_event(c->writer_sub, 0);
+        c->applied_event_id = 0; c->pend_event_id = 0;
+        if (c->event_clip) {
+            /* 事件窗结束:停写并关 writer,回到预录待命 */
+            stream_close_writer(c);
+            c->event_clip = 0;
+            c->pmain.pre_flushed = 0;
+            c->psub.pre_flushed = 0;
+        }
+    }
+}
+
+static void stream_write_rec_frame(stream_chan_t *c, stream_pull_t *p,
+                                   const uint8_t *data, int len, uint32_t ts,
+                                   const nal_class_t *nc)
+{
+    rsdk_writer_t *wrec = writer_of(c, p->stream);
+    int *gated;
+    rsdk_frame_t f;
+    if (!wrec || !data || len <= 0) return;
+    gated = (p->stream == NVR_STREAM_SUB) ? &c->rec_gated_sub : &c->rec_gated_main;
+    if (!*gated) {
+        if (!nc->is_key) return;
+        *gated = 1;
+    }
+    memset(&f, 0, sizeof(f));
+    f.chn = (uint16_t)c->cfg.chn;
+    f.stream = (uint8_t)p->stream;
+    f.codec = (uint8_t)p->codec;
+    f.frame_type = (uint8_t)nc->frame_type;
+    f.pts = (uint64_t)ts;
+    f.wall_time = (uint64_t)time(NULL);
+    f.data = data;
+    f.len = (uint32_t)len;
+    rsdk_rec_write_frame(wrec, &f);
+}
+
 /* 解码缓冲维度估算(供 max_mem 分配 + 预算准入)。按 stream 区分:子 720p / 主 8K 上限。
  * enc_w/h 已知(ONVIF profile 回填)则精确。理想应回填 enc_w/h(待补)。 */
 static void resolve_dim(const nvr_stream_chan_cfg_t *cfg, int stream, int *w, int *h, int *fps)
@@ -93,8 +276,11 @@ void stream_feed_keyframe(stream_chan_t *c)
 void stream_decode_close(stream_chan_t *c)
 {
     if (!c || !c->vdec) return;
-    mhal_vdec_close(c->vdec);
+    /* ★ 先置 NULL 再关闭:puller(stream_route_video)读 c->vdec 送流,若先 close(free)后置空,
+     * 窗口内 puller 会拿到"已释放但非空"的指针 → use-after-free(日志 chn 为野值如 -1677690464)。 */
+    mhal_vdec_t *v = c->vdec;
     c->vdec = NULL;
+    mhal_vdec_close(v);
     c->decode_denied = 0;
     c->pmain.par_len = c->pmain.par_building = 0;
     c->psub.par_len  = c->psub.par_building  = 0;
@@ -126,6 +312,7 @@ void stream_open_writer(stream_chan_t *c, rsdk_group_t *grp)
 void stream_close_writer(stream_chan_t *c)
 {
     if (!c) return;
+    if (!c->writer_main && !c->writer_sub) { c->rec_gated_main = 0; c->rec_gated_sub = 0; return; }
     if (c->writer_main) { rsdk_rec_close(c->writer_main); c->writer_main = NULL; }
     if (c->writer_sub)  { rsdk_rec_close(c->writer_sub);  c->writer_sub  = NULL; }
     c->rec_gated_main = 0; c->rec_gated_sub = 0;
@@ -137,7 +324,7 @@ rsdk_err_t stream_router_open(stream_chan_t *c, rsdk_group_t *grp)
 {
     if (c->cfg.record && grp) stream_open_writer(c, grp);
     c->rec_gated_main = 0; c->rec_gated_sub = 0;
-    if (c->show_win >= 0) stream_decode_open(c, c->show_win);
+    if (c->show_win >= 0) c->decode_dirty = 1;   /* 交由 puller 首帧在自己线程内开解码(统一,免竞态) */
     return RSDK_OK;
 }
 
@@ -147,6 +334,14 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
     (void)seq;
     if (!p || !p->owner || !data || len <= 0) return;
     stream_chan_t *c = p->owner;
+
+    /* ★ 兑现待处理的解码状态变更(show_win/decode_stream 变了)。只在**喂解码器那一路**的 puller
+     * 线程里 open/close 解码器 → 与本函数下方 mhal_vdec_send 同线程,彻底消除跨线程 use-after-free。 */
+    if (c->decode_dirty && p->stream == c->decode_stream) {
+        c->decode_dirty = 0;
+        if (c->vdec) stream_decode_close(c);
+        if (c->show_win >= 0) stream_decode_open(c, c->show_win);
+    }
 
     nal_class_t nc;
     nal_classify(data, len, p->codec, &nc);
@@ -211,47 +406,42 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
 
     if (tmp) free(tmp);
 
-    /* --- 录像:本路写对应 writer(主/子分轨)。cfg.record=0 → 跳过写入。 --- */
-    rsdk_writer_t *wrec = writer_of(c, p->stream);
-    if (!wrec || !c->cfg.record) return;
-
-    /* --- 事件标记(puller owns writer):打在主流 writer(索引/扫描);子流仅 set_event 帧标签。 --- */
-    {
-        uint64_t pend = c->pend_event_id;
-        if (pend != c->applied_event_id) {
-            if (c->writer_main) {
-                rsdk_rec_set_event(c->writer_main, pend);
-                if (pend)
-                    rsdk_rec_mark_event(c->writer_main, pend, c->pend_event_rectype,
-                                        c->pend_event_start, c->pend_event_end,
-                                        (uint32_t)(1u << (c->pend_event_rectype & 31)), 0);
+    /* --- 录像 ---
+     * 连续 / 仅事件:主+子双轨都录(各 writer)。
+     * 仅事件待命:平时双路进预录环;触发后各自 flush + 写至 post 窗结束。 */
+    if (c->cfg.record) {
+        stream_apply_event_tags(c);
+        if (!nc.is_param)
+            stream_write_rec_frame(c, p, data, len, ts, &nc);
+    } else if (c->event_arm) {
+        /* 从连续切到仅事件:闲置时关掉残留 writer(仅主流 puller,owns 安全) */
+        if (!c->event_clip && p->stream == NVR_STREAM_MAIN &&
+            (c->writer_main || c->writer_sub))
+            stream_close_writer(c);
+        if (c->event_clip) {
+            /* 开 writer / 事件打标只在主流,避免主/子竞态;子路等 writer 就绪后再 flush */
+            if (p->stream == NVR_STREAM_MAIN) {
+                if (!c->writer_main && !c->writer_sub) stream_event_writers_open(c);
+                stream_apply_event_tags(c);
             }
-            if (c->writer_sub) rsdk_rec_set_event(c->writer_sub, pend);
-            c->applied_event_id = pend;
-        } else if (c->applied_event_id && c->pend_event_end &&
-                   (uint32_t)time(NULL) > c->pend_event_end) {
-            if (c->writer_main) rsdk_rec_set_event(c->writer_main, 0);
-            if (c->writer_sub)  rsdk_rec_set_event(c->writer_sub, 0);
-            c->applied_event_id = 0; c->pend_event_id = 0;
+            if (!writer_of(c, p->stream))
+                ; /* 子路可能比主流早到:本帧跳过,保留预录环等 writer */
+            else {
+                if (!p->pre_flushed) {
+                    stream_pre_flush(c, p);
+                    p->pre_flushed = 1;
+                }
+                if (!nc.is_param)
+                    stream_write_rec_frame(c, p, data, len, ts, &nc);
+            }
+        } else if (!nc.is_param && c->pre_record_s > 0) {
+            /* 主+子都进预录环 */
+            if (stream_pre_ensure(p, c->pre_record_s) == 0)
+                stream_pre_push(p, data, len, ts, nc.is_key, p->codec, nc.frame_type);
         }
+    } else if (!c->event_clip && (c->pmain.pre_frames || c->psub.pre_frames)) {
+        stream_pre_free_chan(c);   /* 退出待命:释放双路预录环 */
     }
-
-    int *gated = (p->stream == NVR_STREAM_SUB) ? &c->rec_gated_sub : &c->rec_gated_main;
-    if (!*gated) {
-        if (!nc.is_key) return;            /* 未到关键帧,丢前导 P 帧 */
-        *gated = 1;
-    }
-    rsdk_frame_t f;
-    memset(&f, 0, sizeof(f));
-    f.chn        = (uint16_t)c->cfg.chn;
-    f.stream     = (uint8_t)p->stream;             /* 0主/1子 */
-    f.codec      = (uint8_t)p->codec;              /* 0=H264 1=H265 */
-    f.frame_type = (uint8_t)nc.frame_type;
-    f.pts        = (uint64_t)ts;
-    f.wall_time  = (uint64_t)time(NULL);
-    f.data       = data;
-    f.len        = (uint32_t)len;
-    rsdk_rec_write_frame(wrec, &f);
 
     /* P2PTunnel 映射 RTSP:旁路子码流推给远程 App */
     if (p->stream == NVR_STREAM_SUB)
@@ -263,7 +453,8 @@ void stream_route_audio(stream_pull_t *p, const uint8_t *data, int len, uint32_t
     /* 音频录像:挂主流 writer,stream=2/codec=AAC。仅主路带音频。 */
     if (!p || !p->owner || p->stream != NVR_STREAM_MAIN) return;
     stream_chan_t *c = p->owner;
-    if (!c->writer_main || !c->rec_gated_main || !data || len <= 0) return;
+    int writing = c->cfg.record || c->event_clip;
+    if (!writing || !c->writer_main || !c->rec_gated_main || !data || len <= 0) return;
     rsdk_frame_t f;
     memset(&f, 0, sizeof(f));
     f.chn        = (uint16_t)c->cfg.chn;
@@ -284,6 +475,10 @@ void stream_router_close(stream_chan_t *c)
     if (c->writer_sub)  { rsdk_rec_close(c->writer_sub);  c->writer_sub  = NULL; }
     if (c->vdec)   { mhal_vdec_close(c->vdec);   c->vdec = NULL; }
     c->rec_gated_main = 0; c->rec_gated_sub = 0;
+    c->event_clip = 0;
+    c->pmain.pre_flushed = 0;
+    c->psub.pre_flushed = 0;
+    stream_pre_free_chan(c);
     if (c->pmain.kf) { free(c->pmain.kf); c->pmain.kf = NULL; c->pmain.kf_len = c->pmain.kf_cap = 0; }
     if (c->psub.kf)  { free(c->psub.kf);  c->psub.kf  = NULL; c->psub.kf_len  = c->psub.kf_cap  = 0; }
 }

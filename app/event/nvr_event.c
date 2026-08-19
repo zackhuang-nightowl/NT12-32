@@ -8,6 +8,7 @@
  ***************************************************************************************/
 #include "nvr_event.h"
 #include "nvr_streaming.h"   /* nvr_stream_set_event:事件录像落盘 */
+#include "nvr_settings.h"
 #include "nvr_log.h"
 
 #include <stdlib.h>
@@ -17,12 +18,42 @@
 
 #define EVT_MAX_CH 32
 #define ICON_DECAY_S 5        /* 无事件多少秒后清状态位/图标 */
+#define SNAP_Q_CAP   8
+#define SNAP_JPEG_MAX (256u * 1024u)
+#define META_Q_CAP   16
+
+typedef struct {
+    int      chn;
+    uint64_t eid;
+    uint32_t ts;
+    uint8_t *jpeg;
+    size_t   jpeg_len;
+} snap_job_t;
+
+typedef struct {
+    int      kind;      /* 0=enable 1=pull */
+    int      chn;
+    uint64_t eid;
+    uint32_t start;
+} meta_job_t;
 
 struct nvr_evt_hub {
     nvr_evt_cfg_t cfg;
     pthread_mutex_t lock;                 /* sink 在发布线程更新;longPolling 在命令线程读 */
     nop_event_subscription_t *sub;        /* nop_hub 订阅句柄 */
     struct { unsigned bits; time_t last; } icon[EVT_MAX_CH];
+    snap_job_t      snap_q[SNAP_Q_CAP];
+    int             snap_head, snap_tail, snap_n;
+    pthread_cond_t  snap_cv;
+    pthread_t       snap_tid;
+    int             snap_started;
+    volatile int    snap_run;
+    meta_job_t      meta_q[META_Q_CAP];
+    int             meta_head, meta_tail, meta_n;
+    pthread_cond_t  meta_cv;
+    pthread_t       meta_tid;
+    int             meta_started;
+    volatile int    meta_run;
 };
 
 /* 8012 事件中心数字 msgType → detect 类型(NightOwl 私有编号)。未知/0 → NOP_DETECT_TYPE_MAX。 */
@@ -59,6 +90,25 @@ int nvr_evt_rectype_of(nop_detect_type_t type)
     }
 }
 
+/* detect → GUI_get/setChannelEventRecordingSchedule 的 sensor 名 */
+static const char *sensor_of(nop_detect_type_t type)
+{
+    switch (type) {
+        case NOP_DETECT_MOTION:
+        case NOP_DETECT_PIXEL_CHANGE:    return "pixelChange";
+        case NOP_DETECT_HUMAN:           return "human";
+        case NOP_DETECT_FACE:
+        case NOP_DETECT_FACIAL_RECOGNITION: return "face";
+        case NOP_DETECT_VEHICLE:         return "vehicle";
+        case NOP_DETECT_ANIMAL:          return "animal";
+        case NOP_DETECT_PACKAGE:         return "package";
+        case NOP_DETECT_DOORBELL_RING:   return "doorbellRing";
+        case NOP_DETECT_LINE_CROSS:      return "lineCross";
+        case NOP_DETECT_FIELD_INTRUSION: return "fieldIntrusion";
+        default:                         return NULL;
+    }
+}
+
 /* 事件类型 → GUI_longPolling 的四类状态位。motion/human/face/car 对应 GUI 四个位图。 */
 static unsigned icon_of(nop_detect_type_t type)
 {
@@ -85,6 +135,7 @@ static void evt_sink(void *sink_ctx, const nop_event_t *ev)
     int rectype = nvr_evt_rectype_of(ev->type);
 
     unsigned newbits = 0;
+    uint64_t eid = 0;
     if (bit) {
         pthread_mutex_lock(&h->lock);
         h->icon[chn].bits |= bit;
@@ -94,14 +145,128 @@ static void evt_sink(void *sink_ctx, const nop_event_t *ev)
         if (h->cfg.on_icon) h->cfg.on_icon(h->cfg.user, chn, newbits);
     }
     if (rectype >= 0 && h->cfg.rs) {
+        /* 事件录像周排程门控；无保存规则=不录(GET 仍可回 7×24 给 GUI) */
+        const char *sensor = sensor_of(ev->type);
+        int allow_rec = 1;
+        if (h->cfg.settings && sensor) {
+            time_t now = time(NULL);
+            struct tm tmv;
+            localtime_r(&now, &tmv);
+            int wday = (tmv.tm_wday == 0) ? 7 : tmv.tm_wday;
+            int sod  = tmv.tm_hour * 3600 + tmv.tm_min * 60 + tmv.tm_sec;
+            if (!nvr_settings_schedule_allows(h->cfg.settings, chn, "record_event",
+                                             sensor, wday, sod)) {
+                NVR_LOGI("event", "ch%d sensor=%s 不在事件录像排程内，跳过落盘", chn, sensor);
+                allow_rec = 0;
+            }
+        }
+        if (allow_rec) {
         uint32_t ts = (uint32_t)(ev->timestamp_ms / 1000);
-        uint64_t eid = nvr_rec_trigger_event(h->cfg.rs, chn, rectype, ts);
-        /* ★ 事件录像落盘:把事件打到该通道当前录像段(set_event 帧标签 + mark_event 内联记录),
-         * 供 queryEventList/scan 检索。窗口 [ts, ts+post],puller 过窗口自动清标签。 */
+        int post_s = NVR_EVT_POST_RECORD_S;
+        int pre_s  = 5;
+        if (h->cfg.settings) {
+            post_s = nvr_settings_record_post_s_get(h->cfg.settings, chn);
+            pre_s  = nvr_settings_record_pre_s_get(h->cfg.settings, chn);
+        }
+        uint32_t start = (pre_s > 0 && ts > (uint32_t)pre_s) ? (ts - (uint32_t)pre_s) : ts;
+        eid = nvr_rec_trigger_event(h->cfg.rs, chn, rectype, start, post_s);
+        /* ★ 事件录像落盘:连续轨打标,或仅事件待命时开片段(预录 flush + 后录)。
+         * 索引窗 [ts-pre, ts+post];puller 过 pend_event_end 自动清标签/关片段。 */
         if (eid && h->cfg.sm)
-            nvr_stream_set_event(h->cfg.sm, chn, eid, rectype, ts, ts + NVR_EVT_POST_RECORD_S);
+            nvr_stream_set_event(h->cfg.sm, chn, eid, rectype, start,
+                                 ts + (uint32_t)post_s);
+        }
+    }
+    /* 抓拍入队：不阻塞事件发布线程。失败/满队列丢弃，不影响录像/图标。 */
+    if (h->cfg.on_snap) {
+        uint32_t ts_sec = (uint32_t)(ev->timestamp_ms / 1000);
+        uint64_t seid = eid;
+        if (!seid) seid = ((uint64_t)chn << 32) | (uint64_t)ts_sec;
+        snap_job_t job;
+        memset(&job, 0, sizeof(job));
+        job.chn = chn; job.eid = seid; job.ts = ts_sec;
+        if (ev->jpeg && ev->jpeg_len > 0 && ev->jpeg_len <= SNAP_JPEG_MAX) {
+            job.jpeg = (uint8_t *)malloc(ev->jpeg_len);
+            if (job.jpeg) {
+                memcpy(job.jpeg, ev->jpeg, ev->jpeg_len);
+                job.jpeg_len = ev->jpeg_len;
+            }
+        }
+        pthread_mutex_lock(&h->lock);
+        if (h->snap_n < SNAP_Q_CAP) {
+            h->snap_q[h->snap_tail] = job;
+            h->snap_tail = (h->snap_tail + 1) % SNAP_Q_CAP;
+            h->snap_n++;
+            pthread_cond_signal(&h->snap_cv);
+            job.jpeg = NULL;
+        }
+        pthread_mutex_unlock(&h->lock);
+        free(job.jpeg);   /* 入队成功则已置 NULL */
     }
     NVR_LOGI("event", "ch%d AI事件 type=%d → rectype=%d bits=0x%x", chn, (int)ev->type, rectype, newbits);
+}
+
+static void *snap_worker(void *arg)
+{
+    nvr_evt_hub_t *h = arg;
+    while (h->snap_run) {
+        snap_job_t job;
+        pthread_mutex_lock(&h->lock);
+        while (h->snap_n == 0 && h->snap_run)
+            pthread_cond_wait(&h->snap_cv, &h->lock);
+        if (!h->snap_run && h->snap_n == 0) {
+            pthread_mutex_unlock(&h->lock);
+            break;
+        }
+        job = h->snap_q[h->snap_head];
+        h->snap_head = (h->snap_head + 1) % SNAP_Q_CAP;
+        h->snap_n--;
+        pthread_mutex_unlock(&h->lock);
+        if (h->cfg.on_snap)
+            h->cfg.on_snap(h->cfg.snap_user, job.chn, job.eid, job.ts,
+                           job.jpeg, job.jpeg_len);
+        free(job.jpeg);
+    }
+    return NULL;
+}
+
+static void meta_enqueue(nvr_evt_hub_t *h, const meta_job_t *job)
+{
+    if (!h || !job) return;
+    pthread_mutex_lock(&h->lock);
+    if (h->meta_n < META_Q_CAP) {
+        h->meta_q[h->meta_tail] = *job;
+        h->meta_tail = (h->meta_tail + 1) % META_Q_CAP;
+        h->meta_n++;
+        pthread_cond_signal(&h->meta_cv);
+    }
+    pthread_mutex_unlock(&h->lock);
+}
+
+static void *meta_worker(void *arg)
+{
+    nvr_evt_hub_t *h = arg;
+    while (h->meta_run) {
+        meta_job_t job;
+        pthread_mutex_lock(&h->lock);
+        while (h->meta_n == 0 && h->meta_run)
+            pthread_cond_wait(&h->meta_cv, &h->lock);
+        if (!h->meta_run && h->meta_n == 0) {
+            pthread_mutex_unlock(&h->lock);
+            break;
+        }
+        job = h->meta_q[h->meta_head];
+        h->meta_head = (h->meta_head + 1) % META_Q_CAP;
+        h->meta_n--;
+        pthread_mutex_unlock(&h->lock);
+        if (job.kind == 0) {
+            if (h->cfg.on_meta_enable)
+                h->cfg.on_meta_enable(h->cfg.meta_user, job.chn);
+        } else if (h->cfg.on_meta_pull) {
+            h->cfg.on_meta_pull(h->cfg.meta_user, job.chn, job.eid, job.start);
+        }
+    }
+    return NULL;
 }
 
 int nvr_evt_init(const nvr_evt_cfg_t *cfg, nvr_evt_hub_t **out)
@@ -111,16 +276,74 @@ int nvr_evt_init(const nvr_evt_cfg_t *cfg, nvr_evt_hub_t **out)
     if (!h) return -1;
     h->cfg = *cfg;
     pthread_mutex_init(&h->lock, NULL);
+    pthread_cond_init(&h->snap_cv, NULL);
+    pthread_cond_init(&h->meta_cv, NULL);
+    h->snap_run = 1;
+    h->snap_started = (pthread_create(&h->snap_tid, NULL, snap_worker, h) == 0);
+    if (!h->snap_started) h->snap_run = 0;
+    h->meta_run = 1;
+    h->meta_started = (pthread_create(&h->meta_tid, NULL, meta_worker, h) == 0);
+    if (!h->meta_started) h->meta_run = 0;
     /* 订阅事件脊柱:相机 ONVIF + 本地 AI 事件都经此回调统一处理。 */
     if (cfg->nop_hub) h->sub = nop_event_subscribe(cfg->nop_hub, evt_sink, h);
     *out = h;
     return 0;
 }
 
+void nvr_evt_set_snap(nvr_evt_hub_t *h,
+                      void (*on_snap)(void *user, int chn, uint64_t event_id, uint32_t ts,
+                                      const uint8_t *inline_jpeg, size_t inline_len),
+                      void *snap_user)
+{
+    if (!h) return;
+    h->cfg.on_snap = on_snap;
+    h->cfg.snap_user = snap_user;
+}
+
+void nvr_evt_set_meta(nvr_evt_hub_t *h,
+                      void (*on_enable)(void *user, int chn),
+                      void (*on_pull)(void *user, int chn, uint64_t event_id, uint32_t start_ts),
+                      void *meta_user)
+{
+    if (!h) return;
+    h->cfg.on_meta_enable = on_enable;
+    h->cfg.on_meta_pull = on_pull;
+    h->cfg.meta_user = meta_user;
+}
+
+void nvr_evt_queue_meta_enable(nvr_evt_hub_t *h, int chn)
+{
+    meta_job_t j;
+    memset(&j, 0, sizeof(j));
+    j.kind = 0; j.chn = chn;
+    meta_enqueue(h, &j);
+}
+
+void nvr_evt_queue_meta_pull(nvr_evt_hub_t *h, int chn, uint64_t event_id, uint32_t start_ts)
+{
+    meta_job_t j;
+    memset(&j, 0, sizeof(j));
+    j.kind = 1; j.chn = chn; j.eid = event_id; j.start = start_ts;
+    meta_enqueue(h, &j);
+}
+
 void nvr_evt_deinit(nvr_evt_hub_t *h)
 {
     if (!h) return;
     if (h->cfg.nop_hub && h->sub) nop_event_unsubscribe(h->cfg.nop_hub, h->sub);
+    h->snap_run = 0;
+    pthread_cond_signal(&h->snap_cv);
+    if (h->snap_started) pthread_join(h->snap_tid, NULL);
+    h->meta_run = 0;
+    pthread_cond_signal(&h->meta_cv);
+    if (h->meta_started) pthread_join(h->meta_tid, NULL);
+    while (h->snap_n > 0) {
+        free(h->snap_q[h->snap_head].jpeg);
+        h->snap_head = (h->snap_head + 1) % SNAP_Q_CAP;
+        h->snap_n--;
+    }
+    pthread_cond_destroy(&h->snap_cv);
+    pthread_cond_destroy(&h->meta_cv);
     pthread_mutex_destroy(&h->lock);
     free(h);
 }

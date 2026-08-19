@@ -10,8 +10,8 @@
 | `nop/` | `NT12-SDK/nop_sdk/` | 复制 src/include/ports/tests/cmake；**剥离** `third_party/`(onvif/onvif_server/tutk 去重到顶层) 与所有 `build-*/` | 见 `components/nop/NOTE_dedup.md` |
 | `recorder/` | `NT12-SDK/recorder_sdk/` | 整包，去 `build/` | librsdk，独立可编译 |
 | `onvif/` | —（glue） | ✅ 已实现 | `nvr_onvif.c` + `nvr_dev_classify.c`；协议在 happytime |
-| `streaming/` | —（glue） | ✅ 已实现 | `nvr_stream_mgr_*`；拉流 CRtspClient + mhal 硬解 |
-| `cloud_tutk/` | —（glue） | ✅ 已实现 | `nvr_tutk.c`；库在 `third_party/tutk_sdk/` |
+| `streaming/` | —（glue） | ✅ 已实现 | 主+子常拉；目标机 `NopRtspClient`（NT12-SDK/OnvifClientLibrary），happytime 仍作依赖 |
+| `cloud_tutk/` | —（glue） | ✅ 已实现 | `nvr_tutk.c` P2PTunnel + `nvr_rtsp_live.c`；库在 `third_party/tutk_sdk/` |
 | `storage/` | —（glue） | ✅ 已实现 | 裸盘方案 + 盘发现/装配/热插拔 |
 | `config/` | — | ✅ 已实现 | SQLite 设置库 `nvr_settings` |
 | `crypto/` | — | ✅ 已实现 | MD5/SHA/AES256 |

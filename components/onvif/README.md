@@ -37,7 +37,9 @@ app/channel  ──► onvif(discovery/probe) ──► third_party/happytime on
 |------|------|------|
 | `include/nvr_onvif.h` | 取流钩子 + 发现 API | ✅ |
 | `src/nvr_onvif.c` | 基于 `nop_onvif_*` 实现 | ✅ **对真实 nop_onvif.h 编译通过** |
+| `include/nvr_lan34569.h` / `src/nvr_lan34569.c` | UDP 34569 扫网 + 本机应答 | ✅ |
 
 - `nvr_onvif_get_url()` = app 里 `nvr_onvif_get_url` 弱符号的**强实现**——链接本模块后，
   **PoE 16 路 + 自动发现通道立即能取流出图**（main→profile[0], sub→profile[1] → GetStreamUri）。
 - `nvr_onvif_discover()` 包 `nop_onvif_discover`（WS-Discovery），回调候选相机给 app/channel。
+- `nvr_lan34569_discover()` 广播 DVRIP 探测，应答带 MAC；`nvr_lan34569_server_start()` 供 App 找回本机。

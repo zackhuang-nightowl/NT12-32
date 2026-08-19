@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #define NVR_STG_MAX_SUB 32
 
@@ -60,6 +61,13 @@ static const char *DDL =
     "  id INTEGER PRIMARY KEY CHECK(id=1),"
     "  pw_algo TEXT, pw_hash BLOB, pw_salt BLOB,"
     "  fail_count INTEGER DEFAULT 0, lockout_until INTEGER DEFAULT 0);"
+    /* 本地多用户(GUI_createUser/deleteUser/getUsers/login) */
+    "CREATE TABLE IF NOT EXISTS local_user("
+    "  username TEXT PRIMARY KEY COLLATE NOCASE,"
+    "  user_level TEXT NOT NULL,"
+    "  pw_algo TEXT, pw_hash BLOB,"
+    "  create_time INTEGER DEFAULT (strftime('%s','now')),"
+    "  last_login INTEGER DEFAULT 0);"
     "CREATE TABLE IF NOT EXISTS nop_owner("
     "  id INTEGER PRIMARY KEY CHECK(id=1),"
     "  owner_id TEXT, username TEXT, stoken TEXT, updated INTEGER);"
@@ -73,7 +81,7 @@ static const char *DDL =
     "  url TEXT, onvif_auto INTEGER, poe_port INTEGER,"
     "  codec INTEGER, stream INTEGER, record INTEGER,"
     "  uuid TEXT, serial TEXT, manufacturer TEXT, model TEXT, firmware TEXT,"
-    "  bound INTEGER, active INTEGER, video_source_token TEXT,"
+    "  bound INTEGER, active INTEGER, video_source_token TEXT, enh_random TEXT,"
     "  updated INTEGER DEFAULT (strftime('%s','now')));"
     /* 每通道能力集(首次上线探测后写)。按 chn 独立键,不设外键——允许配置先于设备落库;
      * 删除设备时由 nvr_settings_camera_delete 手动级联清理。 */
@@ -159,7 +167,7 @@ static void seed_from_json(nvr_settings_t *s, const char *dir)
         if (dev) {
             nvr_settings_set_str(s, "system.model", jstr(dev, "model", "NT12-32"));
             nvr_settings_set_str(s, "system.device_name", jstr(dev, "name", "NVR"));
-            nvr_settings_set_str(s, "system.sn", jstr(dev, "sn", ""));
+            /* system.sn 不再种子:SN 由数据分区 /User/OWLSerialNumber 读取(见 nvr_identity)。 */
         }
         cJSON *tm = cJSON_GetObjectItem(sys, "time");
         if (tm) {
@@ -178,7 +186,7 @@ static void seed_from_json(nvr_settings_t *s, const char *dir)
                 nvr_settings_set_str(s, "network.eth0.gw",   jstr(e0, "gw",   ""));
             }
             cJSON *e1 = cJSON_GetObjectItem(net, "eth1");
-            if (e1) nvr_settings_set_int(s, "network.eth1.vlan_base", jint(e1, "vlan_base", 2000));
+            if (e1) nvr_settings_set_int(s, "network.eth1.vlan_base", jint(e1, "vlan_base", 2001));
             /* 种子 local_link(与 eth0 KV 对齐,供 GUI_getLocalLink) */
             {
                 nvr_local_link_t lk;
@@ -214,6 +222,19 @@ static void seed_from_json(nvr_settings_t *s, const char *dir)
     /* 云存全局开关默认关(每通道开关在 cloud_channel.enable) */
     nvr_settings_set_int(s, "cloud.switch", 0);
 
+    /* cloud_tutk.json → TUTK P2P KV
+     * 注:身份类 tutk.uid / tutk.authkey / tutk.av_password 不再种子——
+     *   UID ← /User/tutk_agent_udid;IOTCKey/AVKey ← /User/OWL/tutkdata.json(见 nvr_identity)。
+     * 此处仅保留非身份的运行期参数 license_key / max_sessions。 */
+    cJSON *tutk = load_json_dir(dir, "cloud_tutk.json");
+    if (tutk) {
+        nvr_settings_set_str(s, "tutk.license_key", jstr(tutk, "license_key", "000000"));
+        nvr_settings_set_int(s, "tutk.max_sessions", jint(tutk, "max_sessions", 8));
+        cJSON_Delete(tutk);
+    } else {
+        nvr_settings_set_str(s, "tutk.license_key", "000000");
+    }
+
     /* 注:camera 行不再由 JSON 预置——仅设备真实发现(ip+mac)时落库。 */
 
     /* schema_version 由 nvr_settings_open 的迁移逻辑统一维护(见 NVR_SETTINGS_SCHEMA_VERSION),此处不再写。 */
@@ -229,7 +250,43 @@ static void seed_from_json(nvr_settings_t *s, const char *dir)
  * (DDL 已按当前结构建好)重复跑迁移也安全。 */
 /* 当前结构版本 = 2(camera 取代 channel、网络服务表取代 netif、录像/推送/云存排程规范化;见文件头)。
  * 这是已发布基线,无 v1→v2 迁移(v1 未出厂)。以后改结构 → 版本 +1 + 在 migrate_settings 加 ALTER。 */
-#define NVR_SETTINGS_SCHEMA_VERSION 3
+#define NVR_SETTINGS_SCHEMA_VERSION 5
+
+/* v5 出厂录像默认:全 32 通道"持续 + 事件"录像都开、7×24。DB 为权威(rec_schedule_apply 只认真行,
+ * 空库→GUI 显示全满但实际不录 → 用播种把默认落库)。INSERT OR IGNORE:只补缺行,绝不覆盖用户已改。
+ * 事件排程按 sensor 存(schedule.domain=record_event),sensor 取值以**接口文档**为准
+ * (SmartDetect/GUI_getChannelEventRecordingSchedule.txt 的 sensor 字段 Enum),非老 SDK:
+ * pixelChange/human/face/vehicle/animal/package/doorbellRing/lineCross/fieldIntrusion。 */
+static void seed_record_defaults(sqlite3 *db)
+{
+    static const char *RULES_7X24 =
+        "[{\"id\":\"rule-id-1\",\"weekdays\":[1,2,3,4,5,6,7],"
+        "\"startTime\":\"000000\",\"endTime\":\"235959\"}]";
+    static const char *SENSORS[] = {
+        "pixelChange", "human", "face", "vehicle", "animal",
+        "package", "doorbellRing", "lineCross", "fieldIntrusion"
+    };
+    for (int chn = 0; chn < 32; chn++) {
+        char sql[512];
+        /* triggers 出厂全开(接口文档 X_NightOwl_setChannelRecordingTriggers 的 Enum 全集,10 类)。 */
+        snprintf(sql, sizeof(sql),
+            "INSERT OR IGNORE INTO record_config(chn,record_on,triggers,stream_type)"
+            " VALUES(%d,1,'pir,pixelChange,human,face,vehicle,animal,package,doorbellRing,lineCross,fieldIntrusion','main');",
+            chn);
+        exec_sql(db, sql);
+        snprintf(sql, sizeof(sql),
+            "INSERT OR IGNORE INTO record_schedule(chn,sched_on,rules) VALUES(%d,1,'%s');",
+            chn, RULES_7X24);
+        exec_sql(db, sql);
+        for (size_t i = 0; i < sizeof(SENSORS) / sizeof(SENSORS[0]); i++) {
+            snprintf(sql, sizeof(sql),
+                "INSERT OR IGNORE INTO schedule(chn,domain,sensor,rule_id,weekdays,start_hms,end_hms)"
+                " VALUES(%d,'record_event','%s','rule-id-1','1,2,3,4,5,6,7','000000','235959');",
+                chn, SENSORS[i]);
+            exec_sql(db, sql);
+        }
+    }
+}
 
 static int settings_schema_version(sqlite3 *db)
 {
@@ -252,6 +309,12 @@ static void migrate_settings(sqlite3 *db, int from)
      * ADD COLUMN 幂等:全新库已由 DDL 建好该列,重复列错误忽略。 */
     if (from < 3)
         sqlite3_exec(db, "ALTER TABLE camera ADD COLUMN video_source_token TEXT;", 0, 0, 0);
+    if (from < 4)
+        sqlite3_exec(db, "ALTER TABLE camera ADD COLUMN enh_random TEXT;", 0, 0, 0);
+    /* v5:出厂录像默认落库(持续+事件都开,7×24)。migration 覆盖全新库(from=0)与已发布库(from=4);
+     * 一次性(跑完 schema_version=5 不再重入),INSERT OR IGNORE 不覆盖用户已改。 */
+    if (from < 5)
+        seed_record_defaults(db);
 }
 
 int nvr_settings_open(const char *db_path, const char *json_defaults_dir, nvr_settings_t **out)
@@ -289,6 +352,16 @@ int nvr_settings_open(const char *db_path, const char *json_defaults_dir, nvr_se
         }
     }
 
+    /* ★ 预建全部 chn 占位行(enabled=0):删除设备只清字段、永不删 camera 行 → 从结构上杜绝
+     * "按行删除错位误伤邻居通道"。占位行 mac/ip 空 → 加载器(跳 !enabled)与设备清单(跳 mac 空)
+     * 都不会当成真机。幂等(INSERT OR IGNORE),已有真机行不受影响。 */
+    for (int chn = 0; chn < 32; chn++) {
+        char sql[96];
+        snprintf(sql, sizeof(sql),
+                 "INSERT OR IGNORE INTO camera(chn,enabled,type,dev_chn) VALUES(%d,0,'single',1);", chn);
+        exec_sql(s->db, sql);
+    }
+
     /* 未 seeded → 播种 */
     sqlite3_stmt *st = NULL;
     int seeded = 0;
@@ -315,7 +388,7 @@ int nvr_settings_factory_reset(nvr_settings_t *s)
 {
     if (!s || !s->db) return -1;
     static const char *TABLES[] = {
-        "setting", "auth", "nop_owner", "camera", "camera_capability",
+        "setting", "auth", "local_user", "nop_owner", "camera", "camera_capability",
         "record_config", "record_schedule", "push_config", "cloud_channel", "schedule",
         "local_link", "email_alert", "ftp", "ddns",
     };
@@ -461,8 +534,8 @@ int nvr_settings_camera_upsert(nvr_settings_t *s, const nvr_camera_row_t *r)
     if (sqlite3_prepare_v2(s->db,
         "INSERT INTO camera(chn,name,enabled,source,protocol,kind,backend,type,dev_chn,"
         " ip,mac,username,password,onvif_port,nop_port,service_url,url,onvif_auto,poe_port,"
-        " codec,stream,record,uuid,serial,manufacturer,model,firmware,bound,active,video_source_token,updated)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s','now'))"
+        " codec,stream,record,uuid,serial,manufacturer,model,firmware,bound,active,video_source_token,enh_random,updated)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s','now'))"
         " ON CONFLICT(chn) DO UPDATE SET name=excluded.name,enabled=excluded.enabled,source=excluded.source,"
         "  protocol=excluded.protocol,kind=excluded.kind,backend=excluded.backend,type=excluded.type,"
         "  dev_chn=excluded.dev_chn,ip=excluded.ip,mac=excluded.mac,username=excluded.username,"
@@ -471,7 +544,7 @@ int nvr_settings_camera_upsert(nvr_settings_t *s, const nvr_camera_row_t *r)
         "  poe_port=excluded.poe_port,codec=excluded.codec,stream=excluded.stream,record=excluded.record,"
         "  uuid=excluded.uuid,serial=excluded.serial,manufacturer=excluded.manufacturer,"
         "  model=excluded.model,firmware=excluded.firmware,bound=excluded.bound,active=excluded.active,"
-        "  video_source_token=excluded.video_source_token,updated=excluded.updated;",
+        "  video_source_token=excluded.video_source_token,enh_random=excluded.enh_random,updated=excluded.updated;",
         -1, &st, NULL) != SQLITE_OK) return -1;
     int c = 1;
     sqlite3_bind_int (st, c++, r->chn);
@@ -504,6 +577,7 @@ int nvr_settings_camera_upsert(nvr_settings_t *s, const nvr_camera_row_t *r)
     sqlite3_bind_int (st, c++, r->bound);
     sqlite3_bind_int (st, c++, r->active);
     bind_txt(st, c++, r->video_source_token);
+    bind_txt(st, c++, r->enh_random);
     int rc = sqlite3_step(st); sqlite3_finalize(st);
     if (rc != SQLITE_DONE) return -1;
     notify(s, "camera."); return 0;
@@ -511,7 +585,7 @@ int nvr_settings_camera_upsert(nvr_settings_t *s, const nvr_camera_row_t *r)
 static const char *CAMERA_COLS =
     "chn,name,enabled,source,protocol,kind,backend,type,dev_chn,ip,mac,username,password,"
     "onvif_port,nop_port,service_url,url,onvif_auto,poe_port,codec,stream,record,"
-    "uuid,serial,manufacturer,model,firmware,bound,active,video_source_token";
+    "uuid,serial,manufacturer,model,firmware,bound,active,video_source_token,enh_random";
 static void camera_row_from_stmt(sqlite3_stmt *st, nvr_camera_row_t *r)
 {
     memset(r, 0, sizeof(*r)); int c = 0;
@@ -545,20 +619,34 @@ static void camera_row_from_stmt(sqlite3_stmt *st, nvr_camera_row_t *r)
     r->bound = sqlite3_column_int(st, c++);
     r->active = sqlite3_column_int(st, c++);
     col_txt(st, c++, r->video_source_token, sizeof(r->video_source_token));
+    col_txt(st, c++, r->enh_random, sizeof(r->enh_random));
 }
+/* 删除设备 = 只清空该 chn 的数据,**不删 camera 行**(chn 占位行初始化即建好,主键恒稳)。
+ * 这样彻底杜绝"按行删除错位误伤邻居通道"的问题;附属表按同一 0-based chn 删本行(不误伤)。 */
 int nvr_settings_camera_delete(nvr_settings_t *s, int chn)
 {
     if (!s) return -1;
-    /* 手动级联:删设备连带清其 每通道配置/能力/排程(无外键约束)。 */
-    static const char *tbls[] = { "camera", "camera_capability", "record_config",
-                                  "push_config", "cloud_channel", "schedule" };
     exec_sql(s->db, "BEGIN;");
+    /* camera:清空设备字段,保留 chn 行(enabled=0、mac/ip 空 → 加载器与设备清单都不当真机)。 */
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(s->db,
+            "UPDATE camera SET name='',enabled=0,source='',protocol='',kind=0,backend=0,type='single',"
+            "dev_chn=1,ip='',mac='',username='',password='',onvif_port=0,nop_port=0,service_url='',url='',"
+            "onvif_auto=0,poe_port=0,codec=0,stream=0,record=0,uuid='',serial='',manufacturer='',model='',"
+            "firmware='',bound=0,active=0,video_source_token='',enh_random='',updated=strftime('%s','now') WHERE chn=?;",
+            -1, &st, NULL) != SQLITE_OK) { exec_sql(s->db, "ROLLBACK;"); return -1; }
+    sqlite3_bind_int(st, 1, chn);
+    if (sqlite3_step(st) != SQLITE_DONE) { sqlite3_finalize(st); exec_sql(s->db, "ROLLBACK;"); return -1; }
+    sqlite3_finalize(st);
+    /* 附属每通道表:删本 chn 数据行(键已统一 0-based,只删自己,不误伤邻居)。 */
+    static const char *tbls[] = { "camera_capability", "record_config",
+                                  "push_config", "cloud_channel", "schedule" };
     for (size_t i = 0; i < sizeof(tbls)/sizeof(tbls[0]); i++) {
         char sql[64]; snprintf(sql, sizeof(sql), "DELETE FROM %s WHERE chn=?;", tbls[i]);
-        sqlite3_stmt *st = NULL;
-        if (sqlite3_prepare_v2(s->db, sql, -1, &st, NULL) != SQLITE_OK) { exec_sql(s->db, "ROLLBACK;"); return -1; }
-        sqlite3_bind_int(st, 1, chn);
-        int rc = sqlite3_step(st); sqlite3_finalize(st);
+        sqlite3_stmt *d = NULL;
+        if (sqlite3_prepare_v2(s->db, sql, -1, &d, NULL) != SQLITE_OK) { exec_sql(s->db, "ROLLBACK;"); return -1; }
+        sqlite3_bind_int(d, 1, chn);
+        int rc = sqlite3_step(d); sqlite3_finalize(d);
         if (rc != SQLITE_DONE) { exec_sql(s->db, "ROLLBACK;"); return -1; }
     }
     if (exec_sql(s->db, "COMMIT;") != 0) return -1;
@@ -668,6 +756,42 @@ int nvr_settings_record_get(nvr_settings_t *s, int chn, nvr_record_cfg_t *out)
         sqlite3_finalize(st);
     }
     return found;
+}
+
+int nvr_settings_record_post_s_get(nvr_settings_t *s, int chn)
+{
+    char key[48];
+    snprintf(key, sizeof(key), "record.ch.%d.post_s", chn);
+    int v = nvr_settings_get_int(s, key, 10);
+    if (v < 1) v = 10;
+    if (v > 600) v = 600;
+    return v;
+}
+
+int nvr_settings_record_post_s_set(nvr_settings_t *s, int chn, int sec)
+{
+    if (!s || sec < 1 || sec > 600) return -1;
+    char key[48];
+    snprintf(key, sizeof(key), "record.ch.%d.post_s", chn);
+    return nvr_settings_set_int(s, key, sec);
+}
+
+int nvr_settings_record_pre_s_get(nvr_settings_t *s, int chn)
+{
+    char key[48];
+    snprintf(key, sizeof(key), "record.ch.%d.pre_s", chn);
+    int v = nvr_settings_get_int(s, key, 5);
+    if (v < 0) v = 0;
+    if (v > 30) v = 30;
+    return v;
+}
+
+int nvr_settings_record_pre_s_set(nvr_settings_t *s, int chn, int sec)
+{
+    if (!s || sec < 0 || sec > 30) return -1;
+    char key[48];
+    snprintf(key, sizeof(key), "record.ch.%d.pre_s", chn);
+    return nvr_settings_set_int(s, key, sec);
 }
 
 /* ---------------- record_schedule(持续录像排程) ---------------- */
@@ -856,7 +980,58 @@ int nvr_settings_schedule_list(nvr_settings_t *s, int chn, const char *domain, c
     return n;
 }
 
-/* ---------------- auth ---------------- */
+int nvr_settings_schedule_count(nvr_settings_t *s, int chn, const char *domain)
+{
+    if (!s || !domain) return 0;
+    sqlite3_stmt *st = NULL;
+    int n = 0;
+    if (sqlite3_prepare_v2(s->db, "SELECT COUNT(*) FROM schedule WHERE chn=? AND domain=?;",
+                           -1, &st, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_int(st, 1, chn);
+    bind_txt(st, 2, domain);
+    if (sqlite3_step(st) == SQLITE_ROW) n = sqlite3_column_int(st, 0);
+    sqlite3_finalize(st);
+    return n;
+}
+
+static int hms_to_sod_local(const char *hms)
+{
+    if (!hms || (int)strlen(hms) < 6) return -1;
+    for (int i = 0; i < 6; i++) if (hms[i] < '0' || hms[i] > '9') return -1;
+    int h = (hms[0]-'0')*10+(hms[1]-'0');
+    int m = (hms[2]-'0')*10+(hms[3]-'0');
+    int s = (hms[4]-'0')*10+(hms[5]-'0');
+    if (h > 23 || m > 59 || s > 59) return -1;
+    return h * 3600 + m * 60 + s;
+}
+
+int nvr_settings_schedule_allows(nvr_settings_t *s, int chn, const char *domain, const char *sensor,
+                                 int wday, int sod)
+{
+    nvr_schedule_row_t rows[16];
+    int n = nvr_settings_schedule_list(s, chn, domain, sensor, rows, 16);
+    if (n <= 0) {
+        /* 事件录像：无保存=不录。其它域保持 7×24。 */
+        if (domain && strcmp(domain, "record_event") == 0) return 0;
+        return 1;
+    }
+    for (int i = 0; i < n; i++) {
+        int day_ok = 0;
+        char tmp[24];
+        snprintf(tmp, sizeof(tmp), "%s", rows[i].weekdays);
+        for (char *p = strtok(tmp, ","); p; p = strtok(NULL, ",")) {
+            if (atoi(p) == wday) { day_ok = 1; break; }
+        }
+        if (!day_ok) continue;
+        int st = hms_to_sod_local(rows[i].start_hms);
+        int en = hms_to_sod_local(rows[i].end_hms);
+        if (st < 0 || en < 0) continue;
+        int in = (st <= en) ? (sod >= st && sod <= en) : (sod >= st || sod <= en);
+        if (in) return 1;
+    }
+    return 0;
+}
 int nvr_settings_auth_get(nvr_settings_t *s, nvr_auth_row_t *out)
 {
     if (!s || !out) return -1;
@@ -896,6 +1071,134 @@ int nvr_settings_auth_set(nvr_settings_t *s, const nvr_auth_row_t *r)
     int rc = sqlite3_step(st); sqlite3_finalize(st);
     if (rc != SQLITE_DONE) return -1;
     notify(s, "auth."); return 0;
+}
+
+/* ---------------- local_user（多用户） ---------------- */
+int nvr_settings_user_get(nvr_settings_t *s, const char *username, nvr_user_row_t *out)
+{
+    if (!s || !username || !username[0] || !out) return -1;
+    memset(out, 0, sizeof(*out));
+    sqlite3_stmt *st = NULL; int found = -1;
+    if (sqlite3_prepare_v2(s->db,
+        "SELECT username,user_level,pw_algo,pw_hash,create_time,last_login FROM local_user WHERE username=? COLLATE NOCASE;",
+        -1, &st, NULL) != SQLITE_OK) return -1;
+    bind_txt(st, 1, username);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        col_txt(st, 0, out->username, sizeof(out->username));
+        col_txt(st, 1, out->user_level, sizeof(out->user_level));
+        col_txt(st, 2, out->pw_algo, sizeof(out->pw_algo));
+        int hl = sqlite3_column_bytes(st, 3);
+        if (hl > (int)sizeof(out->pw_hash)) hl = (int)sizeof(out->pw_hash);
+        if (hl > 0) memcpy(out->pw_hash, sqlite3_column_blob(st, 3), (size_t)hl);
+        out->hash_len = hl;
+        out->create_time = sqlite3_column_int64(st, 4);
+        out->last_login  = sqlite3_column_int64(st, 5);
+        found = 0;
+    }
+    sqlite3_finalize(st);
+    return found;
+}
+
+int nvr_settings_user_upsert(nvr_settings_t *s, const nvr_user_row_t *r)
+{
+    if (!s || !r || !r->username[0]) return -1;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(s->db,
+        "INSERT INTO local_user(username,user_level,pw_algo,pw_hash,create_time,last_login)"
+        " VALUES(?,?,?,?,?,?)"
+        " ON CONFLICT(username) DO UPDATE SET"
+        " user_level=excluded.user_level,pw_algo=excluded.pw_algo,pw_hash=excluded.pw_hash,"
+        " create_time=local_user.create_time,"
+        " last_login=CASE WHEN excluded.last_login>0 THEN excluded.last_login ELSE local_user.last_login END;",
+        -1, &st, NULL) != SQLITE_OK) return -1;
+    bind_txt(st, 1, r->username);
+    bind_txt(st, 2, r->user_level);
+    bind_txt(st, 3, r->pw_algo[0] ? r->pw_algo : "sha256");
+    sqlite3_bind_blob(st, 4, r->pw_hash, r->hash_len, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(st, 5, r->create_time > 0 ? r->create_time : (int64_t)time(NULL));
+    sqlite3_bind_int64(st, 6, r->last_login);
+    int rc = sqlite3_step(st); sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) return -1;
+
+    /* Admin 口令同步到单例 auth，供远程访问门控等旧路径 */
+    if (strcmp(r->user_level, "Admin") == 0) {
+        nvr_auth_row_t au;
+        memset(&au, 0, sizeof(au));
+        snprintf(au.pw_algo, sizeof(au.pw_algo), "%s", r->pw_algo[0] ? r->pw_algo : "sha256");
+        memcpy(au.pw_hash, r->pw_hash, (size_t)r->hash_len);
+        au.hash_len = r->hash_len;
+        (void)nvr_settings_auth_set(s, &au);
+    }
+    notify(s, "local_user.");
+    return 0;
+}
+
+int nvr_settings_user_delete(nvr_settings_t *s, const char *username)
+{
+    if (!s || !username || !username[0]) return -1;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(s->db, "DELETE FROM local_user WHERE username=? COLLATE NOCASE;",
+        -1, &st, NULL) != SQLITE_OK) return -1;
+    bind_txt(st, 1, username);
+    int rc = sqlite3_step(st); sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) return -1;
+    notify(s, "local_user.");
+    return 0;
+}
+
+int nvr_settings_user_list(nvr_settings_t *s, nvr_user_row_t *out, int cap)
+{
+    if (!s || !out || cap <= 0) return 0;
+    sqlite3_stmt *st = NULL; int n = 0;
+    if (sqlite3_prepare_v2(s->db,
+        "SELECT username,user_level,pw_algo,pw_hash,create_time,last_login FROM local_user"
+        " ORDER BY CASE user_level WHEN 'Admin' THEN 0 WHEN 'Technician' THEN 1 ELSE 2 END, username;",
+        -1, &st, NULL) != SQLITE_OK) return 0;
+    while (n < cap && sqlite3_step(st) == SQLITE_ROW) {
+        nvr_user_row_t *r = &out[n];
+        memset(r, 0, sizeof(*r));
+        col_txt(st, 0, r->username, sizeof(r->username));
+        col_txt(st, 1, r->user_level, sizeof(r->user_level));
+        col_txt(st, 2, r->pw_algo, sizeof(r->pw_algo));
+        int hl = sqlite3_column_bytes(st, 3);
+        if (hl > (int)sizeof(r->pw_hash)) hl = (int)sizeof(r->pw_hash);
+        if (hl > 0) memcpy(r->pw_hash, sqlite3_column_blob(st, 3), (size_t)hl);
+        r->hash_len = hl;
+        r->create_time = sqlite3_column_int64(st, 4);
+        r->last_login  = sqlite3_column_int64(st, 5);
+        n++;
+    }
+    sqlite3_finalize(st);
+    return n;
+}
+
+int nvr_settings_user_count(nvr_settings_t *s, const char *user_level)
+{
+    if (!s) return 0;
+    sqlite3_stmt *st = NULL; int n = 0;
+    if (user_level && user_level[0]) {
+        if (sqlite3_prepare_v2(s->db, "SELECT COUNT(*) FROM local_user WHERE user_level=?;",
+            -1, &st, NULL) != SQLITE_OK) return 0;
+        bind_txt(st, 1, user_level);
+    } else {
+        if (sqlite3_prepare_v2(s->db, "SELECT COUNT(*) FROM local_user;",
+            -1, &st, NULL) != SQLITE_OK) return 0;
+    }
+    if (sqlite3_step(st) == SQLITE_ROW) n = sqlite3_column_int(st, 0);
+    sqlite3_finalize(st);
+    return n;
+}
+
+int nvr_settings_user_touch_login(nvr_settings_t *s, const char *username)
+{
+    if (!s || !username || !username[0]) return -1;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(s->db,
+        "UPDATE local_user SET last_login=strftime('%s','now') WHERE username=? COLLATE NOCASE;",
+        -1, &st, NULL) != SQLITE_OK) return -1;
+    bind_txt(st, 1, username);
+    int rc = sqlite3_step(st); sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : -1;
 }
 
 /* ---------------- owner ---------------- */

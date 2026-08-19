@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
 
 char *cmd_GUI_setDeviceDisplayMode(cJSON *a, const nvr_cmd_ctx_t *c)
 {
@@ -46,6 +47,7 @@ char *cmd_GUI_setChannelMapping(cJSON *a, const nvr_cmd_ctx_t *c)
     for (int i = 0; i < n; i++) map[i] = (int)cJSON_GetNumberValue(cJSON_GetArrayItem(arr, i));
     nvr_preview_set_mapping(c->pv, map, n);
     if (c->persist) nvr_chan_persist_set_mapping(c->persist, map, n);
+    nvr_preview_wait_ready(c->pv, NVR_DEF_WAIT_READY_MS);
     return nvr_resp_result("OK");
 }
 char *cmd_GUI_getChannelMapping(cJSON *a, const nvr_cmd_ctx_t *c)
@@ -58,19 +60,32 @@ char *cmd_GUI_getChannelMapping(cJSON *a, const nvr_cmd_ctx_t *c)
 char *cmd_GUI_setDeviceDisplayExt(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     cJSON *arr = cJSON_GetObjectItem(a, "channels");
-    int n = cJSON_IsArray(arr) ? cJSON_GetArraySize(arr) : 0;
-    nvr_pv_ext_t b[16]; if (n > 16) n = 16;
-    for (int i = 0; i < n; i++) { cJSON *e = cJSON_GetArrayItem(arr, i);
-        b[i].chn0 = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(e, "channel")) - 1;
-        b[i].x = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(e, "x"));
-        b[i].y = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(e, "y"));
-        b[i].w = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(e, "w"));
-        b[i].h = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(e, "h"));
+    if (!cJSON_IsArray(arr)) return nvr_resp_err("Parameter Error");
+    int n = cJSON_GetArraySize(arr);
+    if (n > 16) return nvr_resp_err("Exceeded Device Capability Error");
+    nvr_pv_ext_t b[16];
+    for (int i = 0; i < n; i++) {
+        cJSON *e = cJSON_GetArrayItem(arr, i);
+        if (!cJSON_IsObject(e)) return nvr_resp_err("Parameter Error");
+        int ch1 = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(e, "channel"));
+        int x = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(e, "x"));
+        int y = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(e, "y"));
+        int w = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(e, "w"));
+        int h = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(e, "h"));
         const char *st = cJSON_GetStringValue(cJSON_GetObjectItem(e, "streamType"));
-        b[i].stream = (st && !strcmp(st, "sub")) ? NVR_STREAM_SUB : NVR_STREAM_MAIN;
+        if (ch1 < 1 || ch1 > 32) return nvr_resp_err("Parameter Error");
+        if (x < 0 || x > 1000 || y < 0 || y > 1000) return nvr_resp_err("Parameter Error");
+        if (w <= 0 || w > 1000 || h <= 0 || h > 1000) return nvr_resp_err("Parameter Error");
+        if (!st || (strcmp(st, "sub") != 0 && strcmp(st, "main") != 0))
+            return nvr_resp_err("Parameter Error");
+        b[i].chn0 = ch1 - 1;
+        b[i].x = x; b[i].y = y; b[i].w = w; b[i].h = h;
+        b[i].stream = (strcmp(st, "sub") == 0) ? NVR_STREAM_SUB : NVR_STREAM_MAIN;
     }
-    nvr_preview_set_ext(c->pv, n ? b : NULL, n);
-    return nvr_resp_content(NULL);
+    int rc = nvr_preview_set_ext(c->pv, n ? b : NULL, n);
+    if (rc == -2) return nvr_resp_err("Exceeded Device Capability Error");
+    if (rc != 0)  return nvr_resp_err("Unknow Error");
+    return nvr_resp_ok();
 }
 char *cmd_GUI_getDeviceDisplayExt(cJSON *a, const nvr_cmd_ctx_t *c)
 {
@@ -136,27 +151,57 @@ char *cmd_X_NightOwl_getChannelStatus(cJSON *a, const nvr_cmd_ctx_t *c)
     cJSON *o = cJSON_CreateObject(); cJSON_AddNumberToObject(o, "status", code);
     return nvr_resp_content(o);
 }
-/* longPolling:返回通道状态变化位图。gui 收到 ChannelStatusNotify!=0 → 重拉 getChannelStatus。 */
+/* longPolling:有 ChannelStatusNotify / 事件位 / RecordStatus 变化则立刻回;否则挂起最多 25s。
+ * gui 收到 ChannelStatusNotify!=0 → 重拉 getChannelStatus。refresh:true 立即全量。 */
 char *cmd_GUI_longPolling(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     int refresh = a ? nvr_jbool(a, "refresh", 0) : 0;
-    unsigned notify = c->cm ? nvr_chan_drain_notify(c->cm) : 0;
-    /* refresh:true → 全量重同步:置所有(容量内)通道位,GUI 据此重拉每通道 getChannelStatus。 */
+    unsigned notify = 0;
+    uint32_t mo0 = 0, hu0 = 0, fa0 = 0, car0 = 0, rec0 = 0;
+    uint32_t mo = 0, hu = 0, fa = 0, car = 0, rec = 0;
+
+    if (c->eh) nvr_evt_masks(c->eh, &mo0, &hu0, &fa0, &car0);
+    rec0 = c->sm ? nvr_stream_recording_mask(c->sm) : 0;
+
     if (refresh) {
         int cap = c->settings ? nvr_settings_get_int(c->settings, "system.capacity", 32) : 32;
         notify = (cap >= 32) ? 0xFFFFFFFFu : ((1u << cap) - 1u);
+        (void)nvr_chan_drain_notify(c->cm);
+    } else {
+        int wait_s = a ? nvr_jint(a, "timeout", 25) : 25;
+        if (wait_s < 1) wait_s = 1;
+        if (wait_s > 30) wait_s = 30;
+        notify = c->cm ? nvr_chan_drain_notify(c->cm) : 0;
+        if (!notify) {
+            struct timespec ts;
+            long t0, deadline;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            t0 = ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+            deadline = t0 + (long)wait_s * 1000L;
+            while (!notify) {
+                long now, left;
+                clock_gettime(CLOCK_MONOTONIC, &ts);
+                now = ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+                left = deadline - now;
+                if (left <= 0) break;
+                if (left > 200) left = 200;
+                notify = c->cm ? nvr_chan_wait_notify(c->cm, (int)left) : 0;
+                if (c->eh) nvr_evt_masks(c->eh, &mo, &hu, &fa, &car);
+                rec = c->sm ? nvr_stream_recording_mask(c->sm) : 0;
+                if (notify || mo != mo0 || hu != hu0 || fa != fa0 || car != car0 || rec != rec0)
+                    break;
+            }
+        }
     }
+    if (c->eh) nvr_evt_masks(c->eh, &mo, &hu, &fa, &car);
+    rec = c->sm ? nvr_stream_recording_mask(c->sm) : 0;
+
     cJSON *o = cJSON_CreateObject();
     cJSON_AddNumberToObject(o, "ChannelStatusNotify", (double)notify);
-    /* Motion/Human/Face/Car:32 位,bit chn=通道 chn+1 近期有该类事件(事件中枢按类型聚合)。 */
-    uint32_t mo = 0, hu = 0, fa = 0, car = 0;
-    if (c->eh) nvr_evt_masks(c->eh, &mo, &hu, &fa, &car);
     cJSON_AddNumberToObject(o, "MotionStatus", (double)mo);
     cJSON_AddNumberToObject(o, "FaceStatus", (double)fa);
     cJSON_AddNumberToObject(o, "HumanStatus", (double)hu);
     cJSON_AddNumberToObject(o, "CarStatus", (double)car);
-    /* RecordStatus:32位,bit chn=通道 chn+1 正在录像(writer 开)。GUI 据此显示录像图标。 */
-    unsigned rec = c->sm ? nvr_stream_recording_mask(c->sm) : 0;
     cJSON_AddNumberToObject(o, "RecordStatus", (double)rec);
     return nvr_resp_content(o);
 }
@@ -181,16 +226,17 @@ char *cmd_X_NightOwl_getDeviceCapabilities(cJSON *a, const nvr_cmd_ctx_t *c)
         int ch1 = list[i].chn + 1;
         /* channel没有设备的不进 getDeviceCapabilities(status_code 0 = 空口/未添加)。 */
         if (!c->cm || nvr_chan_status_code_of(c->cm, list[i].chn) == 0) continue;
-        /* 每通道能力:上线按设备取回(NOP=直接 getDeviceCapabilities;ONVIF=映射)写 DB。
-         * 存的是设备自视角对象 → 聚合时覆盖 channel 为本机通道号。 */
-        char caps_json[2048];
+        /* 每通道能力:NVR 只从 DB 聚合(收集在上线/添加时一次性完成,见 nvr_channel.c —
+         * NOP=设备自报透传;其余 ONVIF=经 nop 映射收集)。存的是设备自视角对象 → 覆盖 channel。 */
         cJSON *e = NULL;
+        char caps_json[2048];
         if (c->settings && nvr_settings_caps_get(c->settings, list[i].chn, caps_json, sizeof(caps_json), NULL, 0) > 0)  /* 0-based key */
             e = cJSON_Parse(caps_json);
         if (!e) e = cJSON_CreateObject();
         cJSON_DeleteItemFromObject(e, "channel");
         cJSON_AddNumberToObject(e, "channel", ch1);
-        cJSON_DeleteItemFromObject(e, "_ai");   /* 内部 AI 明细不进 getDeviceCapabilities(走 AI_getChannelAICapabilities) */
+        cJSON_DeleteItemFromObject(e, "_ai");             /* 内部 AI 明细走 AI_getChannelAICapabilities */
+        cJSON_DeleteItemFromObject(e, "videoSourceToken"); /* map 内部字段,不入规范应答 */
         if (!cJSON_GetObjectItem(e, "signal")) cJSON_AddStringToObject(e, "signal", "IPC");
         if (caps_has(e, "ptz")) any_ptz = 1;
         if (caps_has(e, "ai"))  any_ai  = 1;
@@ -216,12 +262,12 @@ char *cmd_AI_getChannelAICapabilities(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     int ch1 = nvr_jint(a, "channel", -1);
     if (ch1 < 1) return nvr_resp_err("invalid_param");
-    /* NOP 设备:透传到相机的 AI_getChannelAICapabilities(设备自报,最全);ONVIF:本地映射(下方)。 */
+    /* NOP:透传相机自报;其余(ONVIF):读 DB 里收集好的 _ai(经 nop 映射,见 nvr_channel.c)。 */
     if (c->cm) {
         nvr_channel_t ch;
         if (nvr_chan_get(c->cm, ch1 - 1, &ch) == 0 && ch.backend == 0) {
             char *fwd = nvr_chan_dev_post(c->cm, ch1 - 1, "AI_getChannelAICapabilities", NULL);
-            if (fwd) return fwd;   /* 透传应答直接返回 */
+            if (fwd) return fwd;   /* NOP:透传应答直接返回 */
         }
     }
     char caps_json[2048]; cJSON *e = NULL;
@@ -250,18 +296,31 @@ char *cmd_AI_getChannelAICapabilities(cJSON *a, const nvr_cmd_ctx_t *c)
     if (e) cJSON_Delete(e);
     return nvr_resp_content(o);
 }
+/* ZoomRatio: 接口 0~1000，100=1.00x。channel / 坐标允许数字或数字串。 */
+static int zoom_jnum(cJSON *a, const char *k, int d)
+{
+    const cJSON *v = a ? cJSON_GetObjectItem(a, k) : NULL;
+    if (!v) return d;
+    double x = 0;
+    if (cJSON_IsNumber(v)) x = v->valuedouble;
+    else if (cJSON_IsString(v) && v->valuestring) x = atof(v->valuestring);
+    else return d;
+    return (int)(x + (x >= 0 ? 0.5 : -0.5));
+}
+
 char *cmd_X_NightOwl_setChannelZoomPan(cJSON *a, const nvr_cmd_ctx_t *c)
 {
-    int chn0   = nvr_jint(a, "channel", 1) - 1;         /* 1-based → 0-based */
+    int chn0   = zoom_jnum(a, "channel", 1) - 1;         /* 1-based → 0-based */
     int enable = nvr_jbool(a, "enable", 1);
-    int cx     = nvr_jint(a, "CenterPointX", 500);
-    int cy     = nvr_jint(a, "CenterPointY", 500);
-    int fx     = nvr_jint(a, "FocusPointX", 500);
-    int fy     = nvr_jint(a, "FocusPointY", 500);
-    int ratio  = nvr_jint(a, "ZoomRatio", 100);
+    int cx     = zoom_jnum(a, "CenterPointX", 500);
+    int cy     = zoom_jnum(a, "CenterPointY", 500);
+    int fx     = zoom_jnum(a, "FocusPointX", 500);
+    int fy     = zoom_jnum(a, "FocusPointY", 500);
+    int ratio  = zoom_jnum(a, "ZoomRatio", 100);
     const char *result = "OK";
-    if (c->pv && chn0 >= 0)
-        nvr_preview_set_zoom(c->pv, chn0, enable, cx, cy, fx, fy, ratio, &cx, &cy, &ratio, &result);
+    if (!c->pv) return nvr_resp_err("preview_not_ready");
+    if (chn0 < 0) return nvr_resp_err("invalid_channel");
+    nvr_preview_set_zoom(c->pv, chn0, enable, cx, cy, fx, fy, ratio, &cx, &cy, &ratio, &result);
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "result", result);        /* OK / Exceeds the zoom range / Exceeds zoom capabilities */
     cJSON_AddNumberToObject(o, "CenterPointX", cx);       /* 实际生效值(被夹取后回填) */
@@ -271,7 +330,7 @@ char *cmd_X_NightOwl_setChannelZoomPan(cJSON *a, const nvr_cmd_ctx_t *c)
 }
 char *cmd_X_NightOwl_getChannelZoomPan(cJSON *a, const nvr_cmd_ctx_t *c)
 {
-    int chn0 = nvr_jint(a, "channel", 1) - 1;
+    int chn0 = zoom_jnum(a, "channel", 1) - 1;
     int enable = 1, cx = 500, cy = 500, ratio = 100;
     if (c->pv && chn0 >= 0)
         nvr_preview_get_zoom(c->pv, chn0, &enable, &cx, &cy, &ratio);

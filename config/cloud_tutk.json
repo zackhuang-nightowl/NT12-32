@@ -3,10 +3,16 @@
 
   "enable": true,
   "uid": "",
-  "auth_key": "",
+  "auth_key": "88888888",
+  "license_key": "000000",
   "server": { "region": "auto" },
   "av_port": 40633,
   "max_sessions": 8,
+  "tunnel_ports": {
+    "_note": "App P2PTunnel PortMapping 目标端口(设备侧)",
+    "nop": 8089,
+    "rtsp_live": 554
+  },
   "stream_source": {
     "_note": "远程 App 拉流复用 streaming 的码流：预览用子码流省带宽，回放取录像",
     "live_stream": "sub",

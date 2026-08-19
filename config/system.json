@@ -37,9 +37,9 @@
     },
     "eth1": {
       "role": "poe_uplink",
-      "_note": "PoE 汇聚口：每 PoE 口一个 VLAN(2001..2016)；NVR 侧接口 198.18.<口>.1，内建 udhcpd 给 IPC 分 198.18.<口>.100+（绑定按第3段=口号入通道口-1）",
+      "_note": "PoE 汇聚口：物理口 P → 交换芯片 tag VLAN(2000+P)=2001..2016；NVR 侧 eth1.(2000+P)=198.18.P.100，内建 udhcpd 给相机 198.18.P.1。口↔段 1:1(口3→段3，口1→VLAN2001)。与 ODC 固件一致，vlan_base=2000。",
       "mask": "255.255.255.0",
-      "vlan_base": 2000,
+      "vlan_base": 2001,
       "dhcp_server": { "enable": true, "server_ip": "198.18.%d.1", "pool": "198.18.%d.100-199", "mask": "255.255.255.0" }
     }
   }

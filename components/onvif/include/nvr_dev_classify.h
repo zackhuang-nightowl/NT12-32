@@ -35,7 +35,7 @@ typedef struct {
     char           name[64];        /* 设备名：从 scopes 的 /name/ 提取（ONVIF 标准；可空） */
     int            is_nightowl;     /* manufacturer=NightOwl 或 MAC 前缀 54:2b:57 */
     int            nop_version_x;   /* nopVersion 主版本（无则 0） */
-    int            active;          /* scopes 含 nopState/active */
+    int            active;          /* 默认 1；仅 scopes 含 nopState/inactive 才为 0 */
     int            bound;           /* scopes 含 /bound（已被某 NVR 绑定） */
 } nvr_dev_class_t;
 

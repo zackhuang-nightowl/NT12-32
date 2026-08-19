@@ -52,11 +52,19 @@ typedef struct {
     int                 defer;
     struct mhal_vdec   *pending_free[MHAL_MAX_CH];  /* defer 期间关闭、待 commit 后统一释放的解码器 */
     int                 pending_n;
+
+    /* ★ 清黑门控:整屏 clear_black 只在"可能出现空格"时做(布局/分辨率变化、窗口被移除)。
+     * 纯增量加窗(新设备上线落格)不清 → 避免把已有窗一起刷黑造成"整屏黑闪"。
+     * 由 set_layout/set_resolution/init 置 1;commit 用后清 0(或按集合缩小自判)。 */
+    int                 need_clear;
 } mhal_disp_t;
 
 /* 重建显示合成图：把当前所有在显通道 dec/proc/vout 路径一次 stop_list→start_list。
  * 通道开/关（增删窗口路径）后调用；纯改窗口矩形/可见性不需要（走 IN_WIN_ATTR，不重启）。 */
 int mhal_vout_commit(void);
+
+/* 解码器刚 open、尚未 start_list 时把上次 ZoomPan 的 IN_CROP 写上路（调用方已持 mhal_lock）。 */
+void mhal_crop_apply_pending(struct mhal_vdec *d);
 
 /* g_disp 全局锁（递归）：多线程访问 —— 预览(8089路由线程) / 各通道 RTSP rx 线程(开关解码器)
  * / 主循环，都会碰 g_disp/videoout。公有入口加锁串行化，避免并发 commit 撕裂 started 集合。

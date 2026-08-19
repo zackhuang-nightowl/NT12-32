@@ -33,6 +33,7 @@ static struct {
     nvr_tutk_cfg_t  cfg;
     char            uid[32];
     char            key[NVR_TUTK_AUTH_KEY_LEN + 1];
+    char            av_key[16];   /* AV password;APP 出图鉴权,供 NOP/AV 层消费 */
     int             inited;
     volatile int    running;
     pthread_t       listen_tid;
@@ -135,6 +136,10 @@ int nvr_tutk_init(const nvr_tutk_cfg_t *cfg)
     snprintf(g.uid, sizeof(g.uid), "%s", cfg->uid);
     if (cfg->auth_key && cfg->auth_key[0])
         snprintf(g.key, sizeof(g.key), "%s", cfg->auth_key);
+    else
+        snprintf(g.key, sizeof(g.key), "%s", NVR_DEF_TUTK_AUTHKEY);
+    if (cfg->av_key && cfg->av_key[0])
+        snprintf(g.av_key, sizeof(g.av_key), "%s", cfg->av_key);
 
     g.sess_n = g.cfg.max_sessions;
     g.sess = (tutk_sess_t *)calloc((size_t)g.sess_n, sizeof(tutk_sess_t));
@@ -143,6 +148,8 @@ int nvr_tutk_init(const nvr_tutk_cfg_t *cfg)
 
     if (cfg->license_key && cfg->license_key[0])
         TUTK_SDK_Set_License_Key(cfg->license_key);
+    else
+        TUTK_SDK_Set_License_Key(NVR_DEF_TUTK_LICENSE);
 
     if (IOTC_Initialize2(0) != IOTC_ER_NoERROR) goto fail;
     if (tutk_login() != IOTC_ER_NoERROR) goto fail_iotc;
@@ -236,6 +243,8 @@ int nvr_tutk_online(void)
     return n;
 }
 
+const char *nvr_tutk_av_key(void) { return g.av_key; }
+
 #else /* !NVR_HAVE_TUTK — 主机构建 stub */
 
 int nvr_tutk_init(const nvr_tutk_cfg_t *cfg)
@@ -256,5 +265,6 @@ int nvr_tutk_update_authkey(const char *auth_key)
 
 int nvr_tutk_running(void) { return 0; }
 int nvr_tutk_online(void) { return 0; }
+const char *nvr_tutk_av_key(void) { return ""; }
 
 #endif /* NVR_HAVE_TUTK */

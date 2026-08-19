@@ -42,7 +42,6 @@ playback audio: 盘上 AAC(stream=2)
 - [ ] **内存池/ddr_id**：`cfg_dec_path` 的 `max_mem.ddr_id`、`data_pool[].ddr_id` 应经
       `vendor_common_get_ddrid(HD_COMMON_MEM_DISP_DEC_*_POOL,...)` 取（见样例 `get_all_id`）。
 - [ ] **输出时序**：HDMI 3840x2160@30 / CVBS NTSC 的 `hd_videoout_set(ctrl, DEVCONFIG/OUTPUT,...)`（见 `display_with_change_mode.c`）。
-- [ ] **OSD**：`mhal_vout_osd` 通道名/时间叠加走 GFX/OSG（见 `display_with_osg.c`）。
 - [ ] **解码取图**：`mhal_vdec_recv` 的 YUV mmap 拷贝（抓拍用，见 `pull_decout_and_scale_jpg`）。
 - [ ] **解码最大分辨率**：`MHAL_DEC_MAX_W/H` 默认 1920x1088，按通道主码流上限调。
 

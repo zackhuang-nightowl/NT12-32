@@ -18,9 +18,13 @@ extern "C" {
 
 #define NVR_TUTK_AUTH_KEY_LEN 8
 
+#define NVR_DEF_TUTK_AUTHKEY    "88888888"
+#define NVR_DEF_TUTK_LICENSE    "000000"
+
 typedef struct {
     const char *uid;
     const char *auth_key;       /* 8 字符 IOTC key;空串=无 key 登录 */
+    const char *av_key;         /* AV password(APP 侧出图鉴权);可 NULL/空 */
     const char *license_key;    /* TUTK_SDK_Set_License_Key;可 NULL */
     int         nop_port;       /* 默认 8089 */
     int         rtsp_port;      /* 默认 554 */
@@ -37,6 +41,9 @@ int  nvr_tutk_update_authkey(const char *auth_key);
 
 int  nvr_tutk_running(void);
 int  nvr_tutk_online(void);    /* 当前 P2PTunnel/IOTC 会话数 */
+
+/* 当前生效的 AV password(供 NOP/AV 层做 APP 出图鉴权);未设返回空串,不返回 NULL。 */
+const char *nvr_tutk_av_key(void);
 
 #ifdef __cplusplus
 }

@@ -50,7 +50,10 @@ int rsdk_index_query_stream(rsdk_dev_t *d, uint32_t t0, uint32_t t1, int chn,
     int found = 0;
     for (uint32_t i = 0; i < st->index_slot_count && found < cap; i++) {
         rsdk_index_slot_t s; rd_slot(d, i, &s);
-        if (!(s.flags & RSDK_SLOT_VALID)) continue;
+        /* VALID(已封口)与 OPEN(正在写的段)都要:否则常录当前未封口的段查不到 →
+         * 日历/区间"空",而回放走数据区能读到 → "接口空但播放有录像"。OPEN 段 end_time=0xFFFFFFFF,
+         * 下方按 t1(查询上界=现在)当作"录到现在"。 */
+        if (!(s.flags & (RSDK_SLOT_VALID | RSDK_SLOT_OPEN))) continue;
         rsdk_index_slot_t t = s; t.crc32 = 0;
         if (rsdk_crc32(&t, SLOT_SZ) != s.crc32) continue;      /* 跳损坏槽 */
         uint32_t e = (s.end_time == 0xFFFFFFFFu) ? t1 : s.end_time;

@@ -281,7 +281,24 @@ char *cmd_X_NightOwl_queryEventList(cJSON *a, const nvr_cmd_ctx_t *c)
         cJSON_AddNumberToObject(e, "timestamp", buf[i].ts);
         char fn[32]; snprintf(fn, sizeof(fn), "%u", buf[i].ts);
         cJSON_AddStringToObject(e, "fileName", fn);
-        cJSON_AddStringToObject(e, "thumbnailUrl", "");
+        {
+            char thumb[128] = "";
+#if RSDK_CFG_METADATA
+            if (buf[i].event_id && c->meta) {
+                rsdk_pic_ref_t pr[1];
+                int np = rsdk_pic_list_event(c->meta, buf[i].event_id, RSDK_PIC_MAIN, pr, 1);
+                if (np <= 0) np = rsdk_pic_list_event(c->meta, buf[i].event_id, -1, pr, 1);
+                if (np > 0)
+                    /* 只填隧道 URL；App 经 TUTK 映射 8089 GET，不给 LAN 直连地址。 */
+                    snprintf(thumb, sizeof(thumb),
+                             "http://iotc-tunnel:8089/eventSnap?eid=%llu",
+                             (unsigned long long)buf[i].event_id);
+            }
+#else
+            (void)c;
+#endif
+            cJSON_AddStringToObject(e, "thumbnailUrl", thumb);
+        }
         cJSON_AddNumberToObject(e, "channel", buf[i].chn0 + 1);
         cJSON_AddNumberToObject(e, "duration", buf[i].duration);
         cJSON_AddItemToArray(list, e);
@@ -437,4 +454,238 @@ char *cmd_X_NightOwl_queryEventCalendar(cJSON *a, const nvr_cmd_ctx_t *c)
     }
     free(buf);
     return nvr_resp_content(o);
+}
+
+/* ---------- EventExtInfo（套包：NVR 本地库，不透传到相机） ---------- */
+
+static int extinfo_cfg_on(const nvr_cmd_ctx_t *c, int chn0)
+{
+#if !RSDK_CFG_METADATA
+    (void)c; (void)chn0; return 0;
+#else
+    if (!c || !c->meta) return 0;
+    if (!c->settings) return 1;
+    char k[72];
+    snprintf(k, sizeof(k), "ai.event_ext_info.ch.%d.enable", chn0);
+    int v = nvr_settings_get_int(c->settings, k, -1);
+    if (v >= 0) return v != 0;
+    return nvr_settings_get_int(c->settings, "ai.event_ext_info.enable", 1) != 0;
+#endif
+}
+
+static int extinfo_cfg_ms(const nvr_cmd_ctx_t *c, int chn0)
+{
+    int ms = 1000;
+    if (c && c->settings) {
+        char k[80];
+        snprintf(k, sizeof(k), "ai.event_ext_info.ch.%d.interval_ms", chn0);
+        ms = nvr_settings_get_int(c->settings, k, 0);
+        if (ms <= 0) ms = nvr_settings_get_int(c->settings, "ai.event_ext_info.interval_ms", 1000);
+    }
+    if (ms < 1000) ms = 1000;
+    if (ms > 10000) ms = 10000;
+    return ms;
+}
+
+char *cmd_AI_getEventExtInfoConfig(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    int ch1 = nvr_jint(a, "channel", 1);
+    if (ch1 < 1) return nvr_resp_err("invalid_param");
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddBoolToObject(o, "enable", extinfo_cfg_on(c, ch1 - 1));
+    cJSON_AddNumberToObject(o, "collectionIntervalMs", extinfo_cfg_ms(c, ch1 - 1));
+    return nvr_resp_content(o);
+}
+
+char *cmd_AI_setEventExtInfoConfig(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    int ch1 = nvr_jint(a, "channel", 1);
+    if (ch1 < 1) return nvr_resp_err("invalid_param");
+    int chn0 = ch1 - 1;
+    int has_en = nvr_jhas(a, "enable");
+    int has_ms = nvr_jhas(a, "collectionIntervalMs");
+    int en = nvr_jbool(a, "enable", 1);
+    int ms = nvr_jint(a, "collectionIntervalMs", 1000);
+    if (ms < 1000) ms = 1000;
+    if (ms > 10000) ms = 10000;
+    if (c && c->settings) {
+        char k[80];
+        if (has_en) {
+            snprintf(k, sizeof(k), "ai.event_ext_info.ch.%d.enable", chn0);
+            nvr_settings_set_int(c->settings, k, en);
+        }
+        if (has_ms) {
+            snprintf(k, sizeof(k), "ai.event_ext_info.ch.%d.interval_ms", chn0);
+            nvr_settings_set_int(c->settings, k, ms);
+        }
+    }
+    if (c && c->cm) {
+        nvr_channel_t ch;
+        if (nvr_chan_get(c->cm, chn0, &ch) == 0 && ch.backend == 0 && ch.onvif_ip[0]) {
+            int dev_ch = ch.dev_chn > 0 ? ch.dev_chn : 1;
+            cJSON *fwd = cJSON_CreateObject();
+            cJSON_AddNumberToObject(fwd, "channel", dev_ch);
+            if (has_en) cJSON_AddBoolToObject(fwd, "enable", en);
+            if (has_ms) cJSON_AddNumberToObject(fwd, "collectionIntervalMs", ms);
+            char *aj = cJSON_PrintUnformatted(fwd);
+            cJSON_Delete(fwd);
+            if (aj) {
+                char *resp = nvr_chan_dev_post(c->cm, chn0, "AI_setEventExtInfoConfig", aj);
+                free(aj); free(resp);
+            }
+        }
+    }
+    return nvr_resp_ok();
+}
+
+char *cmd_AI_getEventExtInfo(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    int ch1 = nvr_jint(a, "channel", 1);
+    uint32_t start = (uint32_t)nvr_jint(a, "startTime", 0);
+    if (ch1 < 1 || start == 0) return nvr_resp_err("invalid_param");
+#if !RSDK_CFG_METADATA
+    (void)c;
+    return nvr_resp_err("Not enabled");
+#else
+    if (!c || !c->meta) return nvr_resp_err("Not enabled");
+    rsdk_meta_query_t q; memset(&q, 0, sizeof(q));
+    q.t0 = start; q.t1 = start; q.chn = (int16_t)(ch1 - 1);
+    q.doc_type = RSDK_DOC_AI_EVENT; q.limit = 1;
+    rsdk_metadoc_list_t lst; memset(&lst, 0, sizeof(lst));
+    cJSON *doc = NULL;
+    if (rsdk_meta_query(c->meta, &q, &lst) == RSDK_OK && lst.count > 0 && lst.docs[0].json)
+        doc = cJSON_Parse(lst.docs[0].json);
+    rsdk_meta_free_list(&lst);
+    if (!doc) {
+        q.t0 = (start > 30u) ? (start - 30u) : 0;
+        q.t1 = start + 30u; q.limit = 8;
+        if (rsdk_meta_query(c->meta, &q, &lst) == RSDK_OK) {
+            int best = -1; uint32_t best_d = 0xFFFFFFFFu;
+            for (int i = 0; i < lst.count; i++) {
+                uint32_t ts = lst.docs[i].key.ts;
+                uint32_t d = (ts > start) ? (ts - start) : (start - ts);
+                if (d < best_d) { best_d = d; best = i; }
+            }
+            if (best >= 0 && lst.docs[best].json)
+                doc = cJSON_Parse(lst.docs[best].json);
+            rsdk_meta_free_list(&lst);
+        }
+    }
+    if (!doc) return nvr_resp_err("No entries found");
+    return nvr_resp_content(doc);
+#endif
+}
+
+#if defined(__has_include)
+#  if __has_include(<zlib.h>)
+#    include <zlib.h>
+#    define NVR_HAVE_ZLIB 1
+#  endif
+#endif
+
+#if RSDK_CFG_METADATA
+#ifdef NVR_HAVE_ZLIB
+static char *b64_encode(const unsigned char *src, size_t len)
+{
+    static const char T[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t out_len = 4 * ((len + 2) / 3);
+    char *out = (char *)malloc(out_len + 1);
+    if (!out) return NULL;
+    size_t i = 0, o = 0;
+    while (i + 2 < len) {
+        unsigned n = ((unsigned)src[i] << 16) | ((unsigned)src[i + 1] << 8) | src[i + 2];
+        out[o++] = T[(n >> 18) & 63]; out[o++] = T[(n >> 12) & 63];
+        out[o++] = T[(n >> 6) & 63];  out[o++] = T[n & 63];
+        i += 3;
+    }
+    if (i < len) {
+        unsigned n = (unsigned)src[i] << 16;
+        if (i + 1 < len) n |= (unsigned)src[i + 1] << 8;
+        out[o++] = T[(n >> 18) & 63]; out[o++] = T[(n >> 12) & 63];
+        out[o++] = (i + 1 < len) ? T[(n >> 6) & 63] : '=';
+        out[o++] = '=';
+    }
+    out[o] = 0;
+    return out;
+}
+#endif
+
+static char *zlist_of_array(cJSON *list)
+{
+    char *raw = cJSON_PrintUnformatted(list);
+    if (!raw) return NULL;
+#ifdef NVR_HAVE_ZLIB
+    uLong src_len = (uLong)strlen(raw);
+    uLong dst_len = compressBound(src_len);
+    unsigned char *zbuf = (unsigned char *)malloc(dst_len);
+    char *b64 = NULL;
+    if (zbuf && compress(zbuf, &dst_len, (const Bytef *)raw, src_len) == Z_OK)
+        b64 = b64_encode(zbuf, (size_t)dst_len);
+    free(zbuf);
+    free(raw);
+    return b64;
+#else
+    free(raw);
+    return NULL;
+#endif
+}
+
+static int evt_ext_cmp_desc(const void *a, const void *b)
+{
+    const rsdk_metadoc_t *x = a, *y = b;
+    if (x->key.ts > y->key.ts) return -1;
+    if (x->key.ts < y->key.ts) return 1;
+    return 0;
+}
+#endif /* RSDK_CFG_METADATA */
+
+char *cmd_AI_getEventExtInfoBatchByReverseTime(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    int ch1 = nvr_jint(a, "channel", 1);
+    uint32_t start = (uint32_t)nvr_jint(a, "startTime", 0);
+    int list_num = nvr_jint(a, "listNumber", 100);
+    int want_z = nvr_jbool(a, "zlist", 0);
+    if (ch1 < 1 || start == 0) return nvr_resp_err("invalid_param");
+    if (list_num <= 0) list_num = 100;
+    if (list_num > 500) list_num = 500;
+#if !RSDK_CFG_METADATA
+    (void)c;
+    return nvr_resp_err("Not enabled");
+#else
+    if (!c || !c->meta) return nvr_resp_err("Not enabled");
+    rsdk_meta_query_t q; memset(&q, 0, sizeof(q));
+    q.t0 = 0; q.t1 = start; q.chn = (int16_t)(ch1 - 1);
+    q.doc_type = RSDK_DOC_AI_EVENT; q.limit = 0;
+    rsdk_metadoc_list_t lst; memset(&lst, 0, sizeof(lst));
+    if (rsdk_meta_query(c->meta, &q, &lst) != RSDK_OK)
+        return nvr_resp_err("No Storage");
+    if (lst.count > 1)
+        qsort(lst.docs, (size_t)lst.count, sizeof(rsdk_metadoc_t), evt_ext_cmp_desc);
+    int emit = (lst.count < list_num) ? lst.count : list_num;
+    cJSON *arr = cJSON_CreateArray();
+    for (int i = 0; i < emit; i++) {
+        cJSON *doc = lst.docs[i].json ? cJSON_Parse(lst.docs[i].json) : NULL;
+        if (!doc) {
+            doc = cJSON_CreateObject();
+            cJSON_AddNumberToObject(doc, "startTime", lst.docs[i].key.ts);
+        }
+        cJSON_AddItemToArray(arr, doc);
+    }
+    rsdk_meta_free_list(&lst);
+    cJSON *o = cJSON_CreateObject();
+    if (want_z) {
+        char *zl = zlist_of_array(arr);
+        cJSON_Delete(arr);
+        if (zl) {
+            cJSON_AddStringToObject(o, "zlist", zl);
+            free(zl);
+        } else {
+            cJSON_AddStringToObject(o, "zlist", "");
+        }
+    } else {
+        cJSON_AddItemToObject(o, "list", arr);
+    }
+    return nvr_resp_content(o);
+#endif
 }

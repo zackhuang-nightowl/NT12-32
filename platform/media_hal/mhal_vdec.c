@@ -80,10 +80,10 @@ static int cfg_dec_path(struct mhal_vdec *d)
     dec.max_mem.bs_counts   = 8;
     dec.max_mem.max_ref_num = 2;
     dec.max_mem.max_bitrate = 8 * 1024 * 1024;
-    /* TODO(板级): dec.max_mem.ddr_id 与 data_pool[].ddr_id 应经
-     * vendor_common_get_ddrid(HD_COMMON_MEM_DISP_DEC_*_POOL, ...) 取（见样例 get_all_id），
-     * 并按 dts 配置的内存池划分。此处用默认池。 */
+    resolve_dec_ddrid();
+    dec.max_mem.ddr_id      = g_ddr_dec_in;
     dec.data_pool[0].mode   = HD_VIDEODEC_POOL_ENABLE;   /* 主(全分辨率)输出池 */
+    dec.data_pool[0].ddr_id = g_ddr_dec_out;
     dec.data_pool[0].counts = HD_VIDEODEC_SET_COUNT(3, 0);
     if (subyuv) {
         /* ★ 关键①:比特流窗口(单帧最大)。0=AUTO 由 max_bitrate(8Mbps)/fps 推 → ~50KB,远小于 8K
@@ -92,12 +92,6 @@ static int cfg_dec_path(struct mhal_vdec *d)
          * 4MB×bs_counts=8=32MB 会撑爆池→分配失败→无图。故 2MB×4=8MB,稳在池内(样例 transcode 给 1MB)。 */
         dec.max_mem.max_bs_size = 2 * 1024 * 1024;
         dec.max_mem.bs_counts   = 4;   /* 8K:少而大的比特流缓冲,4×2MB=8MB ≤ 20MB DIN 池 */
-        /* ★ 关键②:按 dts 实际位置给各池 ddr_id(比特流→DEC_IN/DDR0,全分辨率→DEC_OUT/DDR1,
-         * sub-yuv→RATIO/DDR1)。否则 data_pool[1] 默认 DDR0——那里没有 RATIO 池——sub-yuv 无处可写,
-         * 解码器产不出下采样图 → 送流成功却无图。样例 playback_with_sub_ratio 正是这样取 ddr_id 的。 */
-        resolve_dec_ddrid();
-        dec.max_mem.ddr_id      = g_ddr_dec_in;
-        dec.data_pool[0].ddr_id = g_ddr_dec_out;
         /* sub-yuv(下采样)输出用 RATIO 池 —— 样例的 disp_dec_out_ratio 池(DDR1)。 */
         dec.data_pool[1].mode   = HD_VIDEODEC_POOL_ENABLE;
         dec.data_pool[1].ddr_id = g_ddr_dec_out_ratio;
@@ -216,6 +210,8 @@ int mhal_vdec_open(int chn, mhal_codec_t codec, int w, int h, int fps,
      *    置 opened 后走 mhal_vout_commit() 批量 stop_list→start_list，一次成图（只 1 块 large graph）。
      *  - 离屏通道(仅解码不上屏)：单启解码器即可（不碰显示合成 graph）。 */
     d->opened = 1;
+    /* ZoomPan 可能在解码器 open 之前就到了：把暂存的 IN_CROP 写上，随后 start_list 带着裁剪起。 */
+    mhal_crop_apply_pending(d);
     if (bind_vout_win >= 0) {
         /* ★ 批量提交中(defer>0):只登记,不各自成图;由 mhal_vout_defer_end 一次 start_list 起全部。
          * 否则(单独开)立即成图。 */

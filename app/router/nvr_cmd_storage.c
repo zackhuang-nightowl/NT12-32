@@ -9,6 +9,54 @@
 #include "nvr_storage.h"     /* nvr_storage_scan/assemble */
 #include <stdio.h>
 #include <string.h>
+#include <sys/statvfs.h>     /* getStorageInfo: 可移动盘(USB/SD)容量 */
+
+/* 挂载点判定:/proc/mounts 里有该路径为挂载点则返回 1(区分"已挂 USB"与 rootfs 空目录)。 */
+static int stg_is_mountpoint(const char *path)
+{
+    FILE *f = fopen("/proc/mounts", "r");
+    if (!f) return 0;
+    char line[512], dev[160], mp[256]; int found = 0;
+    while (fgets(line, sizeof(line), f))
+        if (sscanf(line, "%159s %255s", dev, mp) == 2 && strcmp(mp, path) == 0) { found = 1; break; }
+    fclose(f);
+    return found;
+}
+
+/* 追加可移动盘(USB/SD)到 storage list:约定挂载点 /mnt/usb、/mnt/usb2、/mnt/sdcard
+ * (见 lib/udev/usb_auto_mount.sh)。GUI 升级/备份靠此发现 U 盘,再调 GUI_getFileList 列文件。 */
+static void stg_add_removable(cJSON *arr)
+{
+    static const struct { const char *name, *path; } rm[] = {
+        { "usb",    "/mnt/usb"    },
+        { "usb2",   "/mnt/usb2"   },
+        { "sdcard", "/mnt/sdcard" },
+    };
+    for (unsigned i = 0; i < sizeof(rm) / sizeof(rm[0]); i++) {
+        struct statvfs vf;
+        if (!stg_is_mountpoint(rm[i].path)) continue;
+        if (statvfs(rm[i].path, &vf) != 0 || vf.f_blocks == 0) continue;
+        /* 去重:RSDK 盘扫描(开机 USB 已插)可能已列同名但只看到裸块(freeSize 0)。
+         * 已挂载文件系统的 statvfs 才是权威 → 删掉旧同名,用挂载值重加一条。 */
+        int idx = 0; cJSON *it;
+        cJSON_ArrayForEach(it, arr) {
+            cJSON *nm = cJSON_GetObjectItem(it, "name");
+            if (nm && cJSON_IsString(nm) && strcmp(nm->valuestring, rm[i].name) == 0) {
+                cJSON_DeleteItemFromArray(arr, idx); break;
+            }
+            idx++;
+        }
+        unsigned long bs = vf.f_frsize ? vf.f_frsize : vf.f_bsize;
+        double total_mb = (double)((unsigned long long)vf.f_blocks * bs / 1024 / 1024);
+        double free_mb  = (double)((unsigned long long)vf.f_bavail * bs / 1024 / 1024);
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddStringToObject(e, "name", rm[i].name);
+        cJSON_AddNumberToObject(e, "totalSize", total_mb);
+        cJSON_AddNumberToObject(e, "freeSize",  free_mb);
+        cJSON_AddStringToObject(e, "status", "in_use");
+        cJSON_AddItemToArray(arr, e);
+    }
+}
 
 /* 统一名(hdd/hdd2/sdcard/usb):按类别 + 实际检测计数。seq 计数器由调用方按类持有。 */
 static void stg_name_of(const char *path, int *hdd_seq, int *usb_seq, char *out, size_t n)
@@ -73,6 +121,7 @@ char *cmd_getStorageInfo(cJSON *a, const nvr_cmd_ctx_t *c)
             cJSON_AddItemToArray(arr, e);
         }
     }
+    stg_add_removable(arr);   /* 追加已挂载的 USB/SD(供 GUI 升级/备份发现可移动盘) */
     return nvr_resp_content(o);
 }
 char *cmd_formatStorage(cJSON *a, const nvr_cmd_ctx_t *c)

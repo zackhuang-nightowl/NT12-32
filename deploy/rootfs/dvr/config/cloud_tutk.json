@@ -3,7 +3,8 @@
 
   "enable": true,
   "uid": "",
-  "auth_key": "",
+  "auth_key": "88888888",
+  "license_key": "000000",
   "server": { "region": "auto" },
   "av_port": 40633,
   "max_sessions": 8,

@@ -233,13 +233,9 @@ static nop_status_t handle_get_activity_zone_types(const nop_request_t *request,
                                                    nop_response_t *response,
                                                    void *handler_context)
 {
-    nop_json_t *triggers;
-    (void)request; (void)handler_context;
-    response->content = nop_json_obj();
-    triggers = nop_json_arr();
-    nop_json_arr_push_str(triggers, nop_detect_type_name(NOP_DETECT_PIXEL_CHANGE));
-    nop_json_add(response->content, "triggers", triggers);
-    return NOP_OK;
+    /* 只信 mapping：GetRules/SupportedRules 含 Motion 才报 pixelChange。
+     * 无 Motion / 无会话 → 501。本机桩会在「不支持」时误报 pixelChange，不用。 */
+    return nop_onvif_map_dispatch(handler_context, request, response);
 }
 
 /* ===========================================================================
@@ -266,8 +262,12 @@ static nop_status_t handle_get_trigger_activity_zone(const nop_request_t *reques
                                                      void *handler_context)
 {
     int channel = clamp_channel((int)nop_json_num(request->args, "channel", 1));
-    if (nop_onvif_map_is_onvif(handler_context, channel))
-        return nop_onvif_map_dispatch(handler_context, request, response);
+    /* ONVIF 以及 NOP 透传失败回落：先走 mapping。NOTIMPL 才用本机快照。 */
+    {
+        nop_status_t rc = nop_onvif_map_dispatch(handler_context, request, response);
+        if (rc != NOP_ERR_NOTIMPL)
+            return rc;
+    }
     if (g_activity_zone_json[channel]) {
         response->content = nop_json_parse(g_activity_zone_json[channel],
                                            strlen(g_activity_zone_json[channel]));

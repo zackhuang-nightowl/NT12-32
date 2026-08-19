@@ -64,16 +64,18 @@ int nvr_rec_channel_down(nvr_rec_sched_t *r, int chn)
     return 0;
 }
 
-uint64_t nvr_rec_trigger_event(nvr_rec_sched_t *r, int chn, int rectype, uint32_t start_epoch)
+uint64_t nvr_rec_trigger_event(nvr_rec_sched_t *r, int chn, int rectype, uint32_t start_epoch, int post_s)
 {
     rec_ch_t *c = ch_of(r, chn);
     if (!c || !c->in_use) return 0;
     time_t now = time(NULL);
     if (start_epoch == 0) start_epoch = (uint32_t)now;
+    int post = (post_s > 0) ? post_s : r->cfg.post_record_s;
+    if (post <= 0) post = 10;
 
     /* 进行中的同类型事件 → 仅延长后录窗口 */
     if (c->evt_active && c->evt_rectype == rectype) {
-        c->evt_until = now + r->cfg.post_record_s;
+        c->evt_until = now + post;
         return c->evt_id;
     }
 
@@ -91,9 +93,9 @@ uint64_t nvr_rec_trigger_event(nvr_rec_sched_t *r, int chn, int rectype, uint32_
     (void)start_epoch;
 #endif
     c->evt_active = 1; c->evt_rectype = rectype; c->evt_id = eid;
-    c->evt_start = start_epoch; c->evt_until = now + r->cfg.post_record_s;
-    NVR_LOGI("rec", "ch%d 事件录像 rectype=%d event_id=%llu%s", chn, rectype,
-             (unsigned long long)eid, (r->cfg.meta && eid) ? " (已登记云存)" : "");
+    c->evt_start = start_epoch; c->evt_until = now + post;
+    NVR_LOGI("rec", "ch%d 事件录像 rectype=%d event_id=%llu post=%ds%s", chn, rectype,
+             (unsigned long long)eid, post, (r->cfg.meta && eid) ? " (已登记云存)" : "");
     return eid;
 }
 
@@ -113,10 +115,20 @@ void nvr_rec_tick(nvr_rec_sched_t *r)
     for (int i = 0; i < REC_MAX_CH; i++) {
         rec_ch_t *c = &r->ch[i];
         if (c->evt_active && now >= c->evt_until) {
+            uint64_t eid = c->evt_id;
+            uint32_t start = c->evt_start;
 #if RSDK_CFG_METADATA
-            /* 事件结束：可在此把云存事件补 end_time（此处上传器亦能按时窗判定） */
+            if (eid && r->cfg.meta) {
+                rsdk_cloud_event_t ev;
+                if (rsdk_cloud_get(r->cfg.meta, eid, &ev) == RSDK_OK) {
+                    ev.end_time = (uint32_t)now;
+                    rsdk_cloud_event_begin(r->cfg.meta, &ev);
+                }
+            }
 #endif
             c->evt_active = 0; c->evt_id = 0;
+            if (eid && r->cfg.on_event_end)
+                r->cfg.on_event_end(r->cfg.end_user, i, eid, start);
         }
     }
 }

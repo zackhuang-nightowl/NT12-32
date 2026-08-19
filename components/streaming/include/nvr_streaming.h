@@ -61,8 +61,12 @@ void       nvr_stream_stop_all   (nvr_stream_mgr_t *m);
 /* 运行期：切主/子码流（换 url 重连）、开/关某通道录像 */
 rsdk_err_t nvr_stream_switch_stream(nvr_stream_mgr_t *m, int chn, int stream, const char *url);
 rsdk_err_t nvr_stream_set_record   (nvr_stream_mgr_t *m, int chn, int on);
+/* 仅事件待命:arm=1 时主流进预录环,事件触发后 flush+写盘至 post 窗结束;与连续录像互斥写盘。
+ * pre_s=预录秒数(0=无预录,仍可事件开录)。 */
+rsdk_err_t nvr_stream_set_event_arm(nvr_stream_mgr_t *m, int chn, int arm, int pre_s);
 /* 事件标记:置某通道当前录像段的事件(event_id/rectype/时窗)。event_id=0 清除。线程安全(仅置标志,
- * 由 puller 线程应用到 writer)。供事件(8012/ONVIF)→事件录像落盘。 */
+ * 由 puller 线程应用到 writer)。供事件(8012/ONVIF)→事件录像落盘。
+ * 若 event_arm:同时启动事件片段写盘(含预录 flush)。 */
 rsdk_err_t nvr_stream_set_event    (nvr_stream_mgr_t *m, int chn, uint64_t event_id,
                                     int rectype, uint32_t start, uint32_t end);
 /* 运行时更新录像盘组 + 对录像通道补开 writer(格式化后重组装盘组、免重启启用录像)。 */

@@ -62,7 +62,7 @@ const char *nop_status_msg(int status_code)
     case 200: return "OK";
     case 400: return "Bad Request";
     case 409: return "Conflict";
-    case 501: return "Not Implemented";
+    case 501: return "NOT_SUPPORT";
     case 507: return "Insufficient Storage";
     default:  return "Error";
     }

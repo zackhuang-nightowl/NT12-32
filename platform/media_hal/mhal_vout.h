@@ -46,7 +46,6 @@ void mhal_vout_push_black_bg(void);                                   /* 向专�
 /* 数字变焦:对某解码通道设**输入裁剪 ROI**(源画面千分比 0..1000),VPE 把 ROI 放大填满窗口。
  * x_pm/y_pm=0 且 w_pm/h_pm=1000 → 全画面(取消变焦)。返回 0 成功、-1 该通道未在解码。 */
 int  mhal_vout_set_crop(int decoder_chn, int x_pm, int y_pm, int w_pm, int h_pm);
-int  mhal_vout_osd(int win_idx, const char *text);           /* 通道名/时间/事件 OSD 叠加 */
 void mhal_vout_deinit(mhal_out_t out);
 
 #ifdef __cplusplus

@@ -2,7 +2,10 @@
 cmake_minimum_required(VERSION 3.13)
 project(nvr_cloud_tutk C)
 
-set(TUTK ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/tutk_sdk)
+# TUTK SDK 根：默认用外部完整 SDK(含 P2PTunnelServer/TUTKGlobal 全量符号);
+# 可用 -DNVR_TUTK_ROOT=... 覆盖。旧 third_party/tutk_sdk 内的库缺 P2PTunnelServer_* 符号。
+set(NVR_TUTK_ROOT "/home/zack/NT12-32/tutk" CACHE PATH "TUTK SDK root")
+set(TUTK ${NVR_TUTK_ROOT})
 
 add_library(nvr_cloud_tutk STATIC
     src/nvr_tutk.c
@@ -20,7 +23,10 @@ set(TUTK_LIB ${TUTK}/Lib/Linux/ArmCortexA53_NT98633_8.4.0)
 if(EXISTS ${TUTK_LIB}/libIOTCAPIs.so)
     target_compile_definitions(nvr_cloud_tutk PRIVATE NVR_HAVE_TUTK=1)
     target_link_libraries(nvr_cloud_tutk PUBLIC
-        ${TUTK_LIB}/libIOTCAPIs.so pthread)
+        ${TUTK_LIB}/libIOTCAPIs.so
+        ${TUTK_LIB}/libP2PTunnelAPIs.so
+        ${TUTK_LIB}/libTUTKGlobalAPIs.so
+        pthread)
     target_link_options(nvr_cloud_tutk PUBLIC -Wl,--allow-shlib-undefined)
     message(STATUS "cloud_tutk: TUTK P2PTunnel+IOTC enabled")
 else()

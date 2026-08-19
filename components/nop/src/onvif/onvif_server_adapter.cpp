@@ -330,19 +330,35 @@ static pthread_mutex_t           g_event_lock         = PTHREAD_MUTEX_INITIALIZE
 static const char *onvif_topic_for_detection(nop_detect_type_t detection_type)
 {
     switch (detection_type) {
-    case NOP_DETECT_HUMAN:              return "tns1:RuleEngine/MyRuleDetector/PeopleDetect";
-    case NOP_DETECT_VEHICLE:            return "tns1:RuleEngine/MyRuleDetector/VehicleDetect";
-    case NOP_DETECT_ANIMAL:             return "tns1:RuleEngine/MyRuleDetector/AnimalDetect";
+    /* ObjectDetection 家族(human/face/vehicle/animal):按 NOPMappingONVIF.md,统一走标准
+     * ObjectDetection topic + Data ClassTypes 区分类别,而非厂商私有 per-class topic
+     * (与入站 class_to_detect 读 ClassTypes 对称)。类别由 onvif_class_for_detection 给出。 */
+    case NOP_DETECT_HUMAN:
+    case NOP_DETECT_VEHICLE:
+    case NOP_DETECT_ANIMAL:
     case NOP_DETECT_FACE:
-    case NOP_DETECT_FACIAL_RECOGNITION: return "tns1:RuleEngine/MyRuleDetector/FaceDetect";
+    case NOP_DETECT_FACIAL_RECOGNITION:
+    case NOP_DETECT_OBJECT_DETECTION:   return "tns1:RuleEngine/ObjectDetector/Object";
     case NOP_DETECT_PACKAGE:            return "tns1:RuleEngine/MyRuleDetector/PackageDetect";
     case NOP_DETECT_LINE_CROSS:         return "tns1:RuleEngine/LineDetector/Crossed";
     case NOP_DETECT_FIELD_INTRUSION:    return "tns1:RuleEngine/FieldDetector/ObjectsInside";
-    case NOP_DETECT_OBJECT_DETECTION:   return "tns1:RuleEngine/ObjectDetector/Object";
     case NOP_DETECT_DOORBELL_RING:      return "tns1:Device/Trigger/DigitalInput";
     case NOP_DETECT_BABY_CRY:
     case NOP_DETECT_GUN_SHOT:
     case NOP_DETECT_FIRE_ALARM:         return "tns1:AudioAnalytics/Audio/DetectedSound";
+    default:                            return NULL;
+    }
+}
+
+/* ObjectDetection 家族 → ONVIF 官方对象类名(ClassTypes 值);非对象类返回 NULL。 */
+static const char *onvif_class_for_detection(nop_detect_type_t detection_type)
+{
+    switch (detection_type) {
+    case NOP_DETECT_HUMAN:              return "Human";
+    case NOP_DETECT_VEHICLE:            return "Vehicle";
+    case NOP_DETECT_ANIMAL:             return "Animal";
+    case NOP_DETECT_FACE:
+    case NOP_DETECT_FACIAL_RECOGNITION: return "Face";
     default:                            return NULL;
     }
 }
@@ -380,10 +396,15 @@ static void onvif_event_hub_sink(void *sink_context, const nop_event_t *event)
         strncpy(source_token, "VideoSourceConfigToken_1", sizeof(source_token) - 1);
     source_token[sizeof(source_token) - 1] = '\0';
 
-    /* Source item = the video source; Data item State=true = object present. */
-    message = onvif_init_NotificationMessage3(topic, PropertyOperation_Changed,
-                  "VideoSourceConfigurationToken", source_token, NULL, NULL,
-                  "State", "true", NULL, NULL);
+    /* Source item = the video source; Data item State=true = object present.
+     * ObjectDetection 家族再带 ClassTypes=官方类名(Human/Vehicle/Animal/Face),
+     * 消费端据此区分类别(与入站 class_to_detect 对称)。 */
+    {
+        const char *cls = onvif_class_for_detection(event->type);
+        message = onvif_init_NotificationMessage3(topic, PropertyOperation_Changed,
+                      "VideoSourceConfigurationToken", source_token, NULL, NULL,
+                      "State", "true", cls ? "ClassTypes" : NULL, cls);
+    }
     if (message)
         onvif_put_NotificationMessage(message);
 }

@@ -35,6 +35,7 @@ typedef struct {
     nvr_settings_t   *settings;           /* borrowed：设备落库(camera 表);可空(不持久化) */
     struct nop_nvr_channels *nop_chans;     /* borrowed：ONVIF 映射注册表；可空(不同步) */
     nop_onvif_map_backend_t *onvif_be;      /* borrowed：ONVIF 会话缓存；可空(不刷新) */
+    struct nop_app          *nop;           /* borrowed：nop 进程内分派(ONVIF 能力集经映射收集入库);可空 */
     int   reconnect_base_s;               /* 重连基础退避秒，默认 5 */
     int   reconnect_max_s;                /* 最大退避秒，默认 30 */
     void *user;                           /* 回调上下文 */
@@ -78,6 +79,8 @@ int  nvr_chan_set_stream(nvr_chan_mgr_t *m, int chn, int stream);
 
 /* 读并清"状态变化位图"(bit=chn)。供 GUI_longPolling 返回 ChannelStatusNotify。 */
 unsigned nvr_chan_drain_notify(nvr_chan_mgr_t *m);
+/* 等到有状态变化或 timeout_ms。timeout_ms<=0 立即 drain(不清等待)。 */
+unsigned nvr_chan_wait_notify(nvr_chan_mgr_t *m, int timeout_ms);
 
 /* 查询（供 preview OSD / NOP handler / 诊断） */
 int  nvr_chan_get   (nvr_chan_mgr_t *m, int chn, nvr_channel_t *out);
@@ -90,10 +93,22 @@ void nvr_chan_set_substate(nvr_chan_mgr_t *m, int chn, const nvr_chan_substate_t
 /* 取该通道 getChannelStatus 用的 0-7 码：FSM→conn 映射 + 子状态 → nvr_chan_status_code。 */
 int  nvr_chan_status_code_of(nvr_chan_mgr_t *m, int chn);
 
-/* NOP 透传:把一条 NOP 命令 POST 到该通道(0-based)的设备 8089/APPJsonCmd(args.channel 改设备侧 1),
- * 返回 malloc 的应答体(调用方 free);非 NOP 设备/无 IP/失败返回 NULL。供 AI_getChannelAICapabilities
- * 等"NOP 透传/ONVIF 映射"的接口在本地 handler 内对 NOP 设备直接透传。 */
+/* 等该通道首次取流尝试结束(出图或失败停等密码)或超时。0=已结束 1=超时。<0 无效。 */
+int  nvr_chan_wait_bind(nvr_chan_mgr_t *m, int chn, int timeout_ms);
+
+/* 激活成功后写入账密并落库，清 URL 缓存迫使 ONVIF/8012 用新凭据重连。 */
+int  nvr_chan_set_auth(nvr_chan_mgr_t *m, int chn, const char *user, const char *pass);
+/** 写入 NOP digest random + P_enh（random 空=普通模式）。同 IP 多源请逐通道调。 */
+int  nvr_chan_set_enh(nvr_chan_mgr_t *m, int chn, const char *random, const char *penh);
+
+/* 把一条 NOP 命令 POST 到该通道(0-based)设备的发现口 /APPJsonCmd。
+ * kind=NOP：任意 func；kind=nopOnvif：仅 nightowl_protocol 白名单；纯 ONVIF / 无 IP / 失败 → NULL。
+ * 未给 args_json 时带设备侧 dev_chn。 */
 char *nvr_chan_dev_post(nvr_chan_mgr_t *m, int chn, const char *func, const char *args_json);
+
+/* nightowl_protocol.md 里 nopOnvif 私有 NOP（白灯/警笛/一键报警/激活）。
+ * 1=应走发现口 /APPJsonCmd，不要 ONVIF SOAP。通用 ONVIF 返回 0。 */
+int nvr_chan_noponvif_priv_func(const char *func);
 
 #ifdef __cplusplus
 }

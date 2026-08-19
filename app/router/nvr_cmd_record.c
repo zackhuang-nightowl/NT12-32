@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* 取(无行则默认 record_on=1, stream main;触发默认**空**——本地录像不需触发,只云存用)。 */
+/* 取(无行则默认 record_on=1 给 GET；真正录像只在 SET 落库后由 rec_schedule_apply 开)。 */
 static void record_get_or_default(const nvr_cmd_ctx_t *c, int chn, nvr_record_cfg_t *r)
 {
     if (nvr_settings_record_get(c->settings, chn, r) != 0) {
@@ -68,9 +68,8 @@ char *cmd_X_NightOwl_getChannelRecordingSwitch(cJSON *a, const nvr_cmd_ctx_t *c)
     cJSON *o = cJSON_CreateObject(); cJSON_AddBoolToObject(o, "value", r.record_on);
     return nvr_resp_content(o);
 }
-/* ============ 持续录像:定时录像总开关 + 周排程(NVR 本地实现;之前误透传给相机)============
- * channel 1-based → chn0=channel-1(内部)。开关立即驱动 recorder 开/关 writer(启用控制生效);
- * 排程 rules(秒级区间)存库,时段细化由录像调度 tick 评估(见 nvr_record_sched)。 */
+/* ============ 持续录像:定时录像总开关 + 周排程(NVR 本地)
+ * GET 无库行 → 回开启 + 7×24(不写库)。SET 落库后 rec_schedule_apply 才真正开录。 */
 char *cmd_X_NightOwl_setChannelContinuousScheduleRecordingSwitch(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     int ch1 = nvr_jint(a, "channel", -1); if (ch1 < 1) return nvr_resp_err("invalid_channel");
@@ -107,17 +106,9 @@ char *cmd_X_NightOwl_getChannelContinuousRecordingSchedule(cJSON *a, const nvr_c
     int chn0 = nvr_jint(a, "channel", 1) - 1;
     nvr_rec_schedule_t r; nvr_settings_rec_sched_get(c->settings, chn0, &r);
     cJSON *rules = (r.rules[0]) ? cJSON_Parse(r.rules) : NULL;
-    if (!rules || !cJSON_IsArray(rules)) {                 /* 无存储 → 默认 7×24 全天一条 rule */
+    if (!cJSON_IsArray(rules)) {   /* 读DB:无行/非法 → 空数组(不再伪造 7×24 全满;出厂已由 DB 播种) */
         if (rules) cJSON_Delete(rules);
         rules = cJSON_CreateArray();
-        cJSON *rule = cJSON_CreateObject();
-        cJSON_AddStringToObject(rule, "id", "rule-id-1");
-        cJSON *wd = cJSON_CreateArray();
-        for (int d = 1; d <= 7; d++) cJSON_AddItemToArray(wd, cJSON_CreateNumber(d));
-        cJSON_AddItemToObject(rule, "weekdays", wd);
-        cJSON_AddStringToObject(rule, "startTime", "000000");
-        cJSON_AddStringToObject(rule, "endTime", "235959");
-        cJSON_AddItemToArray(rules, rule);
     }
     cJSON *o = cJSON_CreateObject(); cJSON_AddItemToObject(o, "rules", rules);
     return nvr_resp_content(o);
@@ -136,4 +127,140 @@ char *cmd_X_NightOwl_getChannelsPushNotificationSwitch(cJSON *a, const nvr_cmd_c
     nvr_push_cfg_t p; if (nvr_settings_push_get(c->settings, ch, &p) != 0) { memset(&p, 0, sizeof(p)); p.chn = ch; }
     cJSON *o = cJSON_CreateObject(); cJSON_AddBoolToObject(o, "value", p.switch_on);
     return nvr_resp_content(o);
+}
+
+/* ============ 事件录像周排程(按 sensor；存 schedule 表 domain=record_event) ============ */
+#define NVR_EVT_SCHED_DOMAIN "record_event"
+#define NVR_EVT_SCHED_MAX    14
+
+static void weekdays_csv_to_arr(const char *csv, cJSON *arr)
+{
+    char tmp[24];
+    snprintf(tmp, sizeof(tmp), "%s", csv ? csv : "");
+    for (char *p = strtok(tmp, ","); p; p = strtok(NULL, ",")) {
+        int d = atoi(p);
+        if (d >= 1 && d <= 7) cJSON_AddItemToArray(arr, cJSON_CreateNumber(d));
+    }
+}
+
+static void weekdays_arr_to_csv(cJSON *arr, char *buf, int cap)
+{
+    buf[0] = 0;
+    if (!cJSON_IsArray(arr) || cap < 2) return;
+    int first = 1;
+    cJSON *d;
+    cJSON_ArrayForEach(d, arr) {
+        int v = (int)cJSON_GetNumberValue(d);
+        if (v < 1 || v > 7) continue;
+        char num[4];
+        snprintf(num, sizeof(num), "%d", v);
+        if (!first) strncat(buf, ",", (size_t)cap - strlen(buf) - 1);
+        strncat(buf, num, (size_t)cap - strlen(buf) - 1);
+        first = 0;
+    }
+}
+
+char *cmd_GUI_getChannelEventRecordingSchedule(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    int ch1 = nvr_jint(a, "channel", -1);
+    const char *sensor = nvr_jstr(a, "sensor", NULL);
+    if (ch1 < 1 || !sensor || !sensor[0]) return nvr_resp_err("invalid_param");
+    int chn0 = ch1 - 1;
+
+    nvr_schedule_row_t rows[NVR_EVT_SCHED_MAX];
+    int n = (c && c->settings)
+        ? nvr_settings_schedule_list(c->settings, chn0, NVR_EVT_SCHED_DOMAIN, sensor,
+                                     rows, NVR_EVT_SCHED_MAX)
+        : 0;
+
+    /* 读DB:无行 → 空数组(不再伪造 7×24 全满;出厂已由 DB 播种 record_event 排程)。 */
+    cJSON *rules = cJSON_CreateArray();
+    for (int i = 0; i < n; i++) {
+        cJSON *rule = cJSON_CreateObject();
+        cJSON_AddStringToObject(rule, "id",
+                                rows[i].rule_id[0] ? rows[i].rule_id : "rule-id-1");
+        cJSON *wd = cJSON_CreateArray();
+        weekdays_csv_to_arr(rows[i].weekdays, wd);
+        cJSON_AddItemToObject(rule, "weekdays", wd);
+        cJSON_AddStringToObject(rule, "startTime",
+                                rows[i].start_hms[0] ? rows[i].start_hms : "000000");
+        cJSON_AddStringToObject(rule, "endTime",
+                                rows[i].end_hms[0] ? rows[i].end_hms : "235959");
+        cJSON_AddItemToArray(rules, rule);
+    }
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddItemToObject(o, "rules", rules);
+    return nvr_resp_content(o);
+}
+
+char *cmd_GUI_setChannelEventRecordingSchedule(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    int ch1 = nvr_jint(a, "channel", -1);
+    const char *sensor = nvr_jstr(a, "sensor", NULL);
+    cJSON *rules = a ? cJSON_GetObjectItem(a, "rules") : NULL;
+    if (ch1 < 1 || !sensor || !sensor[0] || !cJSON_IsArray(rules))
+        return nvr_resp_err("invalid_param");
+    if (!c || !c->settings) return nvr_resp_err("invalid_param");
+
+    int chn0 = ch1 - 1;
+    int nrule = cJSON_GetArraySize(rules);
+    if (nrule > NVR_EVT_SCHED_MAX) return nvr_resp_err("invalid_param");
+
+    nvr_schedule_row_t rows[NVR_EVT_SCHED_MAX];
+    memset(rows, 0, sizeof(rows));
+    int n = 0;
+    cJSON *rule;
+    cJSON_ArrayForEach(rule, rules) {
+        if (n >= NVR_EVT_SCHED_MAX) break;
+        if (!cJSON_IsObject(rule)) return nvr_resp_err("invalid_param");
+        const char *id = cJSON_GetStringValue(cJSON_GetObjectItem(rule, "id"));
+        const char *st = cJSON_GetStringValue(cJSON_GetObjectItem(rule, "startTime"));
+        const char *en = cJSON_GetStringValue(cJSON_GetObjectItem(rule, "endTime"));
+        cJSON *wd = cJSON_GetObjectItem(rule, "weekdays");
+        if (!st || !en || (int)strlen(st) != 6 || (int)strlen(en) != 6 || !cJSON_IsArray(wd))
+            return nvr_resp_err("invalid_param");
+        nvr_schedule_row_t *r = &rows[n];
+        r->chn = chn0;
+        snprintf(r->domain, sizeof(r->domain), "%s", NVR_EVT_SCHED_DOMAIN);
+        snprintf(r->sensor, sizeof(r->sensor), "%s", sensor);
+        snprintf(r->rule_id, sizeof(r->rule_id), "%s", id && id[0] ? id : "rule-id-1");
+        /* 同 id 多条时加后缀，满足 PRIMARY KEY(chn,domain,sensor,rule_id) */
+        if (n > 0) {
+            char uniq[32];
+            snprintf(uniq, sizeof(uniq), "%s-%d", r->rule_id, n + 1);
+            snprintf(r->rule_id, sizeof(r->rule_id), "%s", uniq);
+        }
+        weekdays_arr_to_csv(wd, r->weekdays, (int)sizeof(r->weekdays));
+        if (!r->weekdays[0]) return nvr_resp_err("invalid_param");
+        snprintf(r->start_hms, sizeof(r->start_hms), "%s", st);
+        snprintf(r->end_hms, sizeof(r->end_hms), "%s", en);
+        n++;
+    }
+
+    if (nvr_settings_schedule_replace(c->settings, chn0, NVR_EVT_SCHED_DOMAIN, sensor, rows, n) != 0)
+        return nvr_resp_err("persist_failed");
+    return nvr_resp_ok();
+}
+
+/* ============ 事件后录秒数(Post Record) ============ */
+char *cmd_getChannelRecordingTime(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    int ch1 = nvr_jint(a, "channel", -1);
+    if (ch1 < 1) return nvr_resp_err("invalid_param");
+    int chn0 = ch1 - 1;
+    int v = (c && c->settings) ? nvr_settings_record_post_s_get(c->settings, chn0) : 10;
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddNumberToObject(o, "value", v);
+    return nvr_resp_content(o);
+}
+
+char *cmd_setChannelRecordingTime(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    int ch1 = nvr_jint(a, "channel", -1);
+    if (ch1 < 1 || !nvr_jhas(a, "value") || !c || !c->settings)
+        return nvr_resp_err("invalid_param");
+    int sec = nvr_jint(a, "value", 10);
+    if (nvr_settings_record_post_s_set(c->settings, ch1 - 1, sec) != 0)
+        return nvr_resp_err("invalid_param");
+    return nvr_resp_ok();
 }

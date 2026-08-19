@@ -18,7 +18,9 @@
 #include "nop_sdk/nop_nvr_channels.h"
 #include "base/nop_json.h"
 
+#include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 /* Look the NOP func up in the single authoritative table (onvif_map_table.c). */
 static onvif_mapper_fn find_mapper(const char *func)
@@ -52,13 +54,29 @@ nop_status_t nop_onvif_map_dispatch(void *ctx, const nop_request_t *req,
     onvif_mapper_fn         fn;
     int                     channel;
 
-    if (!bc || !bc->onvif_backend || !req)
+    if (!bc || !bc->onvif_backend || !req) {
+        fprintf(stderr, "[onvif_map] dispatch '%s': no onvif_backend/ctx → 501\n",
+                (req && req->func) ? req->func : "?");
         return NOP_ERR_NOTIMPL;
+    }
     fn = find_mapper(req->func);
-    if (!fn)
+    if (!fn) {
+        fprintf(stderr, "[onvif_map] dispatch '%s': func NOT in map table → 501\n", req->func);
         return NOP_ERR_NOTIMPL;
+    }
     channel = (int)nop_json_num(req->args, "channel", 0);
-    return fn((nop_onvif_map_backend_t *)bc->onvif_backend, channel, req, resp);
+    {
+        struct timespec t0, t1;
+        nop_status_t rc;
+        long ms;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        rc = fn((nop_onvif_map_backend_t *)bc->onvif_backend, channel, req, resp);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        ms = (t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+        fprintf(stderr, "[onvif_map] dispatch '%s' ch=%d → rc=%d %ldms\n",
+                req->func, channel, (int)rc, ms);
+        return rc;
+    }
 }
 
 #else /* !NOP_ONVIF_MAP — ONVIF compiled out: keep the SDK linkable & native. */

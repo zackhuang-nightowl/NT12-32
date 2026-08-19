@@ -4,7 +4,7 @@
  *  界面 POST http://127.0.0.1:8089/APPJsonCmd 的 NOP JSON 进本路由：
  *    1) NVR 本地命令 → 读写 **设置库**（该 NVR 记录的记录存起来）+ 查真实子系统。
  *    2) 面向通道的相机命令 → 按 args.channel 用通道表找到**真实设备 IP**：
- *         kind=NOP     → 透传：HTTP POST 原样转发到设备 8089/APPJsonCmd
+ *         kind=NOP     → 透传：HTTP POST 原样转发到设备 发现口/APPJsonCmd
  *         kind=onvif/nopOnvif → 翻译：走 nopcore 映射(nop_app_dispatch)
  *    3) 其它 → 回落 nop_app_dispatch（nopcore 293 handler）。
  ***************************************************************************************/
@@ -39,6 +39,7 @@ typedef struct {
     struct nvr_playback *pb;       /* 本机回放引擎 */
     struct nvr_evt_hub *eh;        /* 事件中枢(longPolling 事件位图) */
     nvr_chan_persist_t *persist;   /* 通道映射/能力持久化 */
+    struct nvr_talk    *talk;      /* 双向对讲(本机 127.0.0.1:7000) */
     void  *disp_user;              /* 分辨率热切回调上下文(app) */
     void (*on_set_resolution)(void *disp_user, int w, int h);  /* setSysDisplay 热切 */
 } nvr_cmd_router_cfg_t;

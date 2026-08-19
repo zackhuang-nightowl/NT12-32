@@ -4,6 +4,7 @@
 #include "nvr_chan_nop_sync.h"
 #include "nvr_channel.h"
 #include <string.h>
+#include <stdio.h>
 
 void nvr_chan_to_nop_entry(const nvr_channel_t *d, nop_nvr_channel_entry_t *e)
 {
@@ -24,6 +25,7 @@ void nvr_chan_to_nop_entry(const nvr_channel_t *d, nop_nvr_channel_entry_t *e)
     snprintf(e->password, sizeof(e->password), "%s", d->pass);
     snprintf(e->name, sizeof(e->name), "%s", d->name);
     snprintf(e->video_source_token, sizeof(e->video_source_token), "%s", d->video_source_token);
+    snprintf(e->service_url, sizeof(e->service_url), "%s", d->service_url);
 }
 
 static int entry_connect_changed(const nop_nvr_channel_entry_t *prev,

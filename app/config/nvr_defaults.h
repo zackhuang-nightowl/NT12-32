@@ -11,8 +11,10 @@
 #define NVR_DEFAULTS_H
 
 /* ================= A · 设备标识 / 容量 ================= */
-#define NVR_DEF_MODEL       "NT12-32"   /* 机型(setDeviceInfo/配置缺省) */
+#define NVR_DEF_MODEL       "NOP12-32"  /* 机型(权威源 /User/OWLModel;此为回退缺省) */
 #define NVR_DEF_NAME        "NVR"       /* 设备名缺省 */
+#define NVR_DEF_FW_VERSION  "1.0.0"           /* 固件版本(getDeviceInfo/TUTK profile) */
+#define NVR_DEF_TUTK_DEV_TYPE "netVideoRecorder" /* TUTK profile 设备类型 */
 #define NVR_DEF_CAPACITY    32          /* 整机通道容量(= 16 PoE + 16 LAN) */
 
 /* ================= 通道容量缺省(GUI_CONFIG.json channels=[PoE,LAN] 读不到时用) ===== */
@@ -33,15 +35,24 @@
 #define NVR_DEF_ONVIF_PORT  80          /* 相机 ONVIF 默认端口 */
 #define NVR_DEF_ETH0_IP     "192.168.1.100"    /* eth0 静态缺省 IP */
 #define NVR_DEF_ETH0_MASK   "255.255.255.0"    /* eth0 静态缺省掩码 */
-#define NVR_DEF_VLAN_BASE   2000        /* eth1 PoE VLAN 基号(口 P → vid = base + P) */
+/* eth1 PoE VLAN 基号:物理口 P → vid = base + P。
+ * ★ base=2001 → 口 P 走 VLAN(2001+P)=2002..2017,与 PoE 交换芯片对物理口的 tag 一致
+ *   (实测 口1→VLAN2002、口3→VLAN2004)。段(198.18.<seg>)仍取口号 P,故口↔段 1:1
+ *   (口3→段3),且口16→VLAN2017 有对应接口。VLAN2001 留作 NVR 管理口。 */
+#define NVR_DEF_VLAN_BASE   2001   /* 本机 PoE 交换芯片 tag 口P→VLAN(2001+P);eth1.(2001+P)=段P。实测口9→VLAN2010 */
 #define NVR_DEF_TIMEZONE    "UTC"       /* 缺省时区(系统时钟恒 UTC,时区仅显示) */
 /* NTP 保留 3 个:主(当前)+ Apple + Google */
 #define NVR_DEF_NTP1        "pool.ntp.org"
 #define NVR_DEF_NTP2        "time.apple.com"
 #define NVR_DEF_NTP3        "time.google.com"
 
+/* ================= B2 · TUTK P2P(与 cloud_tutk/include/nvr_tutk.h 保持一致) ===== */
+#define NVR_DEF_TUTK_AUTHKEY    "88888888"
+#define NVR_DEF_TUTK_LICENSE    "000000"
+
 /* ================= C · 路径 ================= */
 #define NVR_DEF_OTA_STAGING "/mnt/update.rom"              /* OTA 固件下载暂存(下面烧写) */
+#define NVR_DEF_OTA_UPDATER "/dvr/bin/nvr_do_update.sh"    /* 下载校验后交更新器烧 A/B */
 #define NVR_DEF_GUI_CONFIG  "/mnt/custom/GUI_CONFIG.json"  /* LVGL 共享出图/容量配置 */
 
 /* ================= D · 显示 / 出图 ================= */
@@ -50,9 +61,11 @@
 #define NVR_DEF_LAYOUT      16          /* 缺省分屏布局 */
 #define NVR_DEF_GUI_MODE    9           /* GUI 缺省宫格(GUI_CONFIG 读不到时) */
 #define NVR_DEF_GUI_PAGE    1           /* GUI 缺省页 */
-#define NVR_DEF_ZOOM_MIN    100         /* 数字变焦下限 1.00x */
-#define NVR_DEF_ZOOM_MAX    500         /* 数字变焦上限 5.00x */
+#define NVR_DEF_ZOOM_MIN    100         /* 数字变焦下限：接口 ZoomRatio 100=1.00x 原画 */
+#define NVR_DEF_ZOOM_MAX    1000        /* 数字变焦上限：接口 ZoomRatio 0~1000 */
 #define NVR_DEF_WAIT_READY_MS 2000      /* 切宫格/切码流后等图上限 */
 #define NVR_DEF_SETTLE_MS   150         /* 首格出图后再沉降,让帧真到面板 */
+#define NVR_DEF_CMD_TIMEOUT_S  8        /* 阻塞 GUI 的 set/动作：完成后或超时再回 */
+#define NVR_DEF_CMD_CONNECT_S  3        /* 透传/相机 HTTP 连接超时 */
 
 #endif /* NVR_DEFAULTS_H */

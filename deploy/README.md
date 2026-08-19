@@ -10,6 +10,7 @@
 /dvr/bin/nvr_app                                 NVR 固件（aarch64）
 /dvr/bin/NO_xVR_GUI_V2-ca53-2.1.3_argb1555        界面（aarch64，读 /mnt/custom/*）
 /dvr/bin/nvr_supervisor.sh                        看护/重启脚本
+/dvr/bin/nvr_do_update.sh                         OTA A/B 烧写（校验后由 nvr_app 调用）
 /dvr/config/*.json                                NVR 配置（首启种子；运行期生成 nvr_settings.db/meta.db）
 /mnt/custom/                                      ⭐ 界面配置内容（GUI_CONFIG.json / gui_cfg.ini / _http_debug.json / data/Fonts）
 /etc/init.d/S99nvr                                开机自启（调用看护脚本）
@@ -24,7 +25,7 @@
 cp -r rootfs/mnt/custom/*  /mnt/custom/
 # 二进制 + 配置 + 看护
 cp -r rootfs/dvr           /dvr/
-chmod +x /dvr/bin/nvr_app /dvr/bin/nvr_supervisor.sh /dvr/bin/NO_xVR_*
+chmod +x /dvr/bin/nvr_app /dvr/bin/nvr_supervisor.sh /dvr/bin/nvr_do_update.sh /dvr/bin/NO_xVR_*
 cp rootfs/etc/init.d/S99nvr /etc/init.d/ && chmod +x /etc/init.d/S99nvr
 ```
 运行期依赖（设备 rootfs 需具备）：`libssl.so.3 libcrypto.so.3 libcurl.so.4 libhdal.so` + 标准 C/C++ 运行库（原厂固件均带）。

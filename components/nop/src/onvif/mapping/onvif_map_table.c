@@ -16,6 +16,7 @@
 
 const onvif_map_entry_t g_onvif_map_table[] = {
     /* ---- §2 PTZ (Pan-Tilt-Zoom) ---------------------------------------- */
+    { "getPtzCapabilities", onvif_map_getPtzCapabilities }, /* -> PTZ Node numeric limits */
     { "ptzMove",         onvif_map_ptzMove },        /* -> ContinuousMove       */
     { "ptzMoveByStep",   onvif_map_ptzMoveByStep },  /* -> ContinuousMove       */
     { "ptzMoveStop",     onvif_map_ptzMoveStop },    /* -> Stop                 */
@@ -29,8 +30,7 @@ const onvif_map_entry_t g_onvif_map_table[] = {
     { "setPtzHome",      onvif_map_setPtzHome },     /* -> SetHomePosition      */
     { "gotoPtzHome",     onvif_map_gotoPtzHome },    /* -> GotoHomePosition     */
     { "getPtzPatrols",   onvif_map_getPtzPatrols },  /* -> GetPresetTours       */
-    { "createPtzPatrol", onvif_map_createPtzPatrol },/* -> Create+ModifyPresetTour */
-    { "modifyPtzPatrol", onvif_map_modifyPtzPatrol },/* -> ModifyPresetTour     */
+    { "setPtzPatrol",    onvif_map_setPtzPatrol },   /* -> Create/ModifyPresetTour (upsert) */
     { "operatePtzPatrol",onvif_map_operatePtzPatrol},/* -> OperatePresetTour    */
     { "removePtzPatrol", onvif_map_removePtzPatrol },/* -> RemovePresetTour     */
 
@@ -43,14 +43,14 @@ const onvif_map_entry_t g_onvif_map_table[] = {
     { "X_NightOwl_setOSD", onvif_map_X_NightOwl_setOSD },  /* -> Set/Create/DeleteOSD */
 
     /* ---- §3 Media (Media2 VideoEncoder) -------------------------------- */
-    { "GUI_getChannelMediaProfiles", onvif_map_GUI_getChannelMediaProfiles }, /* -> GetVideoEncoderConfigurations(+Options) */
+    { "GUI_getChannelMediaProfiles", onvif_map_GUI_getChannelMediaProfiles }, /* -> GetVideoEncoderConfigurations */
     { "GUI_setChannelMediaProfiles", onvif_map_GUI_setChannelMediaProfiles }, /* -> SetVideoEncoderConfiguration */
 
     /* ---- §1/§4 Device capabilities (single ONVIF camera) --------------- */
-    { "X_NightOwl_getDeviceCapabilities", onvif_map_X_NightOwl_getDeviceCapabilities }, /* -> GetProfiles(flags)+GetNode(s)+PTZ caps */
+    { "X_NightOwl_getDeviceCapabilities", onvif_map_X_NightOwl_getDeviceCapabilities }, /* -> 连接缓存 caps */
 
     /* ---- §9 Smart AI: capabilities + line-cross / field-intrusion (Analytics rules) --- */
-    { "AI_getChannelAICapabilities",       onvif_map_AI_getChannelAICapabilities },       /* -> GetSupportedRules+GetRuleOptions */
+    { "AI_getChannelAICapabilities",       onvif_map_AI_getChannelAICapabilities },       /* -> 连接缓存 AI caps */
     { "AI_getChannelLineCrossDetect",      onvif_map_AI_getChannelLineCrossDetect },      /* -> GetRules(LineDetector)  */
     { "AI_setChannelLineCrossDetect",      onvif_map_AI_setChannelLineCrossDetect },      /* -> Create/DeleteRules      */
     { "AI_getChannelFieldIntrusionDetect", onvif_map_AI_getChannelFieldIntrusionDetect }, /* -> GetRules(FieldDetector) */
@@ -65,6 +65,7 @@ const onvif_map_entry_t g_onvif_map_table[] = {
     { "X_NightOwl_upgradeChannelFirmware", onvif_map_upgradeChannelFirmware }, /* -> StartFirmwareUpgrade */
 
     /* ---- §8 Motion activity zone (CellMotionDetector) ------------------ */
+    { "X_NightOwl_getChannelActivityZoneTypes",   onvif_map_X_NightOwl_getChannelActivityZoneTypes },   /* -> GetRules 含 Motion → pixelChange */
     { "X_NightOwl_getChannelTriggerActivityZone", onvif_map_X_NightOwl_getChannelTriggerActivityZone }, /* -> GetRules(CellMotion) */
     { "X_NightOwl_setChannelTriggerActivityZone", onvif_map_X_NightOwl_setChannelTriggerActivityZone }, /* -> Create/DeleteRules  */
 };
