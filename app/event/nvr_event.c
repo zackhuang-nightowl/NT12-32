@@ -177,6 +177,12 @@ static void evt_sink(void *sink_ctx, const nop_event_t *ev)
                                  ts + (uint32_t)post_s);
         }
     }
+    if (h->cfg.on_push) {
+        uint32_t ts_sec = (uint32_t)(ev->timestamp_ms / 1000);
+        uint64_t peid = eid;
+        if (!peid) peid = ((uint64_t)chn << 32) | (uint64_t)ts_sec;
+        h->cfg.on_push(h->cfg.push_user, chn, peid, ts_sec, ev->type);
+    }
     /* 抓拍入队：不阻塞事件发布线程。失败/满队列丢弃，不影响录像/图标。 */
     if (h->cfg.on_snap) {
         uint32_t ts_sec = (uint32_t)(ev->timestamp_ms / 1000);
@@ -309,6 +315,16 @@ void nvr_evt_set_meta(nvr_evt_hub_t *h,
     h->cfg.on_meta_enable = on_enable;
     h->cfg.on_meta_pull = on_pull;
     h->cfg.meta_user = meta_user;
+}
+
+void nvr_evt_set_push(nvr_evt_hub_t *h,
+                      void (*on_push)(void *user, int chn, uint64_t event_id, uint32_t ts,
+                                      nop_detect_type_t type),
+                      void *push_user)
+{
+    if (!h) return;
+    h->cfg.on_push = on_push;
+    h->cfg.push_user = push_user;
 }
 
 void nvr_evt_queue_meta_enable(nvr_evt_hub_t *h, int chn)

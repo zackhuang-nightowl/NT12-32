@@ -15,6 +15,7 @@
 #include "nvr_log.h"
 #include "nop_sdk/nop_error_str.h"
 #include "nvr_defaults.h"
+#include "nvr_gui_notify.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -30,6 +31,7 @@ static void session_clear(void)
 {
     g_user_type[0] = g_username[0] = g_user_level[0] = 0;
     g_logged_in = 0;
+    nvr_gui_set_ui_unlocked(0);
 }
 
 static void session_set(const char *ut, const char *user, const char *level)
@@ -38,6 +40,7 @@ static void session_set(const char *ut, const char *user, const char *level)
     snprintf(g_username, sizeof(g_username), "%s", user ? user : "");
     snprintf(g_user_level, sizeof(g_user_level), "%s", level ? level : "Admin");
     g_logged_in = 1;
+    nvr_gui_set_ui_unlocked(1);
 }
 
 static int session_is_admin(void)

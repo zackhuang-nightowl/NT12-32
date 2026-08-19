@@ -6,6 +6,7 @@
 #include "nvr_log.h"
 #include "rsdk_disk.h"
 #include "nvr_streaming.h"  /* nvr_stream_mgr_set_group:格式化后补开 writer */
+#include "nvr_rtsp_live.h"
 #include "nvr_storage.h"     /* nvr_storage_scan/assemble */
 #include <stdio.h>
 #include <string.h>
@@ -142,6 +143,7 @@ char *cmd_formatStorage(cJSON *a, const nvr_cmd_ctx_t *c)
     rsdk_group_t *g = NULL;
     if (c->sm && nvr_storage_assemble(c->stg, &g) == RSDK_OK && g) {
         nvr_stream_mgr_resume_recording(c->sm, g, was);
+        nvr_rtsp_live_set_group(g);
         NVR_LOGW("router", "格式化后重组装盘组成功 → 录像已恢复(免重启)");
     } else {
         NVR_LOGW("router", "盘组重组装失败(可能格式化失败/多盘缺盘/SATA异常),录像待重启");

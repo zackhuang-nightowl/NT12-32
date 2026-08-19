@@ -81,6 +81,8 @@ int  nvr_chan_set_stream(nvr_chan_mgr_t *m, int chn, int stream);
 unsigned nvr_chan_drain_notify(nvr_chan_mgr_t *m);
 /* 等到有状态变化或 timeout_ms。timeout_ms<=0 立即 drain(不清等待)。 */
 unsigned nvr_chan_wait_notify(nvr_chan_mgr_t *m, int timeout_ms);
+/* 唤醒挂起的 GUI_longPolling(向导页跳转等,不置 ChannelStatusNotify 位)。 */
+void nvr_chan_poke_longpoll(nvr_chan_mgr_t *m);
 
 /* 查询（供 preview OSD / NOP handler / 诊断） */
 int  nvr_chan_get   (nvr_chan_mgr_t *m, int chn, nvr_channel_t *out);
@@ -90,6 +92,8 @@ const char *nvr_chan_status_name(nvr_chan_status_t s);
 
 /* 子状态（鉴权失败/超解码预算/待激活/休眠/固件升级）：由信号点置位，供 0-7 状态码合成。 */
 void nvr_chan_set_substate(nvr_chan_mgr_t *m, int chn, const nvr_chan_substate_t *sub);
+/* 仅翻转固件升级子状态(status 码 6)，不覆盖鉴权/休眠等其它标志。 */
+void nvr_chan_set_fw_updating(nvr_chan_mgr_t *m, int chn, int on);
 /* 取该通道 getChannelStatus 用的 0-7 码：FSM→conn 映射 + 子状态 → nvr_chan_status_code。 */
 int  nvr_chan_status_code_of(nvr_chan_mgr_t *m, int chn);
 

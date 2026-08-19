@@ -42,9 +42,9 @@ int main(void)
     nvr_identity_cache_invalidate();
     assert(nvr_identity_get_sn(buf, sizeof(buf)) == 0 && buf[0] == 0);
     assert(nvr_identity_get_uid(buf, sizeof(buf)) == 0 && buf[0] == 0);
-    /* creds 缺文件 → 缺省 88888888 / 888888 */
+    /* creds 缺文件 → 缺省 00000000 / 888888 */
     nvr_identity_get_tutk_creds(buf, sizeof(buf), av, sizeof(av));
-    assert(strcmp(buf, "88888888") == 0);
+    assert(strcmp(buf, "00000000") == 0);
     assert(strcmp(av, "888888") == 0);
 
     /* --- SN 只读 + trim 尾换行 --- */
@@ -101,7 +101,7 @@ int main(void)
     rm_file("OWL/tutkdata.json");
     nvr_identity_ensure_provisioned();               /* 缺 → 建缺省 */
     nvr_identity_get_tutk_creds(buf, sizeof(buf), av, sizeof(av));
-    assert(strcmp(buf, "88888888") == 0 && strcmp(av, "888888") == 0);
+    assert(strcmp(buf, "00000000") == 0 && strcmp(av, "888888") == 0);
     /* 已存在 → 不覆盖真实值 */
     assert(nvr_identity_set_tutk_creds("00000000", "888888") == 0);
     nvr_identity_ensure_provisioned();

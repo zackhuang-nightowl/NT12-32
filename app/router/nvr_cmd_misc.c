@@ -10,7 +10,9 @@
 #include "nvr_onvif.h"
 #include "nvr_crypto.h"
 #include "nvr_log.h"
+#include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 #define NVR_NOP(name) \
 char *cmd_##name(cJSON *a, const nvr_cmd_ctx_t *c) { return nvr_cmd_nop_dispatch(a, c, #name); }
@@ -156,7 +158,85 @@ char *cmd_X_NightOwl_setDeviceActive(cJSON *a, const nvr_cmd_ctx_t *c)
     return nvr_resp_ok();
 }
 
-NVR_NOP(getCurrentClouds)
+char *cmd_getCurrentClouds(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a; (void)c;
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "currentCloud", "tutk");
+    cJSON *arr = cJSON_AddArrayToObject(o, "availableClouds");
+    cJSON_AddItemToArray(arr, cJSON_CreateString("tutk"));
+    return nvr_resp_content(o);
+}
+
+static void wifi_fill(nvr_chan_mgr_t *cm, int chn0, char *net, int ncap, int *signal)
+{
+    char *fwd;
+    if (net && ncap > 0) snprintf(net, (size_t)ncap, "Ethernet");
+    if (signal) *signal = 0;
+    if (!cm) return;
+    fwd = nvr_chan_dev_post(cm, chn0, "getCurrentWifi", NULL);
+    if (!fwd) return;
+    {
+        cJSON *j = cJSON_Parse(fwd);
+        free(fwd);
+        if (!j) return;
+        cJSON *ct = cJSON_GetObjectItem(j, "content");
+        if (cJSON_IsObject(ct)) {
+            const char *ssid = cJSON_GetStringValue(cJSON_GetObjectItem(ct, "ssid"));
+            cJSON *sig = cJSON_GetObjectItem(ct, "signal");
+            if (ssid && ssid[0] && net && ncap > 0)
+                snprintf(net, (size_t)ncap, "%s", ssid);
+            if (signal && cJSON_IsNumber(sig)) *signal = (int)sig->valuedouble;
+        }
+        cJSON_Delete(j);
+    }
+}
+
+char *cmd_X_NightOwl_getChannelInfo(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    int ch1 = nvr_jint(a, "channel", 0);
+    nvr_channel_t ch;
+    char name[64] = "";
+    char net[64];
+    int signal = 0;
+    const char *dtype = "standaloneIpCamera";
+    if (ch1 < 1) return nvr_resp_err("invalid_param");
+    if (!c->cm || nvr_chan_get(c->cm, ch1 - 1, &ch) != 0 ||
+        nvr_chan_status_code_of(c->cm, ch1 - 1) == 0)
+        return nvr_resp_not_support();
+    if (c->persist)
+        nvr_chan_persist_get_name(c->persist, ch1, name, sizeof(name));
+    if (!name[0]) snprintf(name, sizeof(name), "%s", ch.name[0] ? ch.name : "Camera");
+    if (ch.poe_port > 0) {
+        snprintf(net, sizeof(net), "Ethernet");
+        signal = 0;
+    } else {
+        wifi_fill(c->cm, ch1 - 1, net, (int)sizeof(net), &signal);
+        if (!net[0]) snprintf(net, sizeof(net), "WiFi Network");
+    }
+    if (ch.model[0] && (strncmp(ch.model, "DB-", 3) == 0 || strstr(ch.model, "doorbell") ||
+                        strstr(ch.model, "Doorbell")))
+        dtype = "doorbell";
+    {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "name", name);
+        cJSON_AddStringToObject(o, "firmwareVersion", ch.firmware[0] ? ch.firmware : "");
+        cJSON_AddStringToObject(o, "serialNumber", ch.serial[0] ? ch.serial : "");
+        cJSON_AddStringToObject(o, "model", ch.model[0] ? ch.model : "");
+        cJSON_AddStringToObject(o, "mac", ch.mac[0] ? ch.mac : "");
+        cJSON_AddStringToObject(o, "manufacturer",
+                                (ch.mac[0] && (strncmp(ch.mac, "54:2b:57", 8) == 0 ||
+                                               strncmp(ch.mac, "54:2B:57", 8) == 0))
+                                ? "NightOwl" : "");
+        cJSON_AddStringToObject(o, "type", dtype);
+        cJSON_AddStringToObject(o, "ip", ch.onvif_ip);
+        cJSON_AddStringToObject(o, "storageType", "none");
+        cJSON_AddStringToObject(o, "network", net);
+        cJSON_AddNumberToObject(o, "signalStrength", signal);
+        return nvr_resp_content(o);
+    }
+}
+
 NVR_NOP(getCloudStatusHistory)
 NVR_NOP(getChannelCloudRecordStats)
 NVR_NOP(getChannelCloudRecordStatsSwitch)

@@ -6,6 +6,7 @@
 #include "nvr_cmd_util.h"
 #include "nvr_streaming.h"  /* nvr_stream_recording_mask:RecordStatus */
 #include "nvr_event.h"      /* nvr_evt_masks:Motion/Human/Face/Car 位图 */
+#include "nvr_gui_notify.h"
 #include <stdint.h>
 #include "nvr_chan_status.h"
 #include "nvr_gui_config.h"
@@ -19,8 +20,20 @@
 
 char *cmd_GUI_setDeviceDisplayMode(cJSON *a, const nvr_cmd_ctx_t *c)
 {
-    int mode = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(a, "displayMode"));
-    int page = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(a, "displayPage"));
+    int mode = NVR_DEF_GUI_MODE, page = NVR_DEF_GUI_PAGE;
+    nvr_gui_config_get_display(&mode, &page);
+    if (nvr_jhas(a, "displayMode")) mode = nvr_jint(a, "displayMode", mode);
+    if (nvr_jhas(a, "displayPage")) page = nvr_jint(a, "displayPage", page);
+    if (page < 1) page = 1;
+    /* App 可选字段:轮巡秒数 / 事件弹窗 / 首页首格通道。文档允许不支持 autoSelectEventCamera。 */
+    if (c->settings) {
+        if (nvr_jhas(a, "firstView"))
+            nvr_settings_set_int(c->settings, "display.first_view", nvr_jint(a, "firstView", 1));
+        if (nvr_jhas(a, "autoChangeCamera"))
+            nvr_settings_set_int(c->settings, "display.auto_change", nvr_jint(a, "autoChangeCamera", -1));
+        if (nvr_jhas(a, "autoSelectEventCamera"))
+            nvr_settings_set_int(c->settings, "display.auto_event", nvr_jint(a, "autoSelectEventCamera", 0));
+    }
     /* ★ 切回 liveView:先**停回放**(关回放独占解码器),再按 mode 重开 live 解码。
      *   回放模式期间 live 一直不解码,只有这里收到 setDeviceDisplayMode 才恢复 live。 */
     if (c->pb) nvr_playback_control(c->pb, "stop", 0, 0, NULL, NULL);
@@ -34,10 +47,31 @@ char *cmd_GUI_setDeviceDisplayMode(cJSON *a, const nvr_cmd_ctx_t *c)
 }
 char *cmd_GUI_getDeviceDisplayMode(cJSON *a, const nvr_cmd_ctx_t *c)
 {
-    (void)a; (void)c; int m = NVR_DEF_GUI_MODE, pg = NVR_DEF_GUI_PAGE; nvr_gui_config_get_display(&m, &pg);  /* 从 GUI_CONFIG.json 读 */
+    (void)a;
+    int m = NVR_DEF_GUI_MODE, pg = NVR_DEF_GUI_PAGE;
+    nvr_gui_config_get_display(&m, &pg);
+    int modes[32];
+    int nm = nvr_gui_config_get_live_modes(modes, 32);
+    int first = c->settings ? nvr_settings_get_int(c->settings, "display.first_view", 1) : 1;
+    int auto_ch = c->settings ? nvr_settings_get_int(c->settings, "display.auto_change", -1) : -1;
+    int auto_ev = c->settings ? nvr_settings_get_int(c->settings, "display.auto_event", 0) : 0;
     cJSON *o = cJSON_CreateObject();
-    cJSON_AddNumberToObject(o, "displayMode", m); cJSON_AddNumberToObject(o, "displayPage", pg);
+    cJSON_AddNumberToObject(o, "displayMode", m);
+    cJSON_AddNumberToObject(o, "displayPage", pg);
+    cJSON *arr = cJSON_AddArrayToObject(o, "allDisplayModes");
+    for (int i = 0; i < nm; i++) cJSON_AddItemToArray(arr, cJSON_CreateNumber(modes[i]));
+    cJSON_AddNumberToObject(o, "firstView", first > 0 ? first : 1);
+    cJSON_AddNumberToObject(o, "autoChangeCamera", auto_ch);
+    cJSON_AddNumberToObject(o, "autoSelectEventCamera", auto_ev);
     return nvr_resp_content(o);
+}
+char *cmd_setDeviceDisplayMode(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    return cmd_GUI_setDeviceDisplayMode(a, c);
+}
+char *cmd_getDeviceDisplayMode(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    return cmd_GUI_getDeviceDisplayMode(a, c);
 }
 char *cmd_GUI_setChannelMapping(cJSON *a, const nvr_cmd_ctx_t *c)
 {
@@ -151,14 +185,16 @@ char *cmd_X_NightOwl_getChannelStatus(cJSON *a, const nvr_cmd_ctx_t *c)
     cJSON *o = cJSON_CreateObject(); cJSON_AddNumberToObject(o, "status", code);
     return nvr_resp_content(o);
 }
-/* longPolling:有 ChannelStatusNotify / 事件位 / RecordStatus 变化则立刻回;否则挂起最多 25s。
- * gui 收到 ChannelStatusNotify!=0 → 重拉 getChannelStatus。refresh:true 立即全量。 */
+/* longPolling:有 ChannelStatusNotify / 事件位 / RecordStatus / APPNotifySetupStatus 变化则立刻回;
+ * 否则挂起最多 25s。gui 收到 ChannelStatusNotify!=0 → 重拉 getChannelStatus。
+ * APPNotifySetupStatus 是长期状态:App 向导 notify 后 GUI 据此切页。refresh:true 立即全量。 */
 char *cmd_GUI_longPolling(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     int refresh = a ? nvr_jbool(a, "refresh", 0) : 0;
     unsigned notify = 0;
     uint32_t mo0 = 0, hu0 = 0, fa0 = 0, car0 = 0, rec0 = 0;
     uint32_t mo = 0, hu = 0, fa = 0, car = 0, rec = 0;
+    int setup0 = nvr_gui_setup_gen();
 
     if (c->eh) nvr_evt_masks(c->eh, &mo0, &hu0, &fa0, &car0);
     rec0 = c->sm ? nvr_stream_recording_mask(c->sm) : 0;
@@ -172,7 +208,7 @@ char *cmd_GUI_longPolling(cJSON *a, const nvr_cmd_ctx_t *c)
         if (wait_s < 1) wait_s = 1;
         if (wait_s > 30) wait_s = 30;
         notify = c->cm ? nvr_chan_drain_notify(c->cm) : 0;
-        if (!notify) {
+        if (!notify && nvr_gui_setup_gen() == setup0) {
             struct timespec ts;
             long t0, deadline;
             clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -190,6 +226,8 @@ char *cmd_GUI_longPolling(cJSON *a, const nvr_cmd_ctx_t *c)
                 rec = c->sm ? nvr_stream_recording_mask(c->sm) : 0;
                 if (notify || mo != mo0 || hu != hu0 || fa != fa0 || car != car0 || rec != rec0)
                     break;
+                if (nvr_gui_setup_gen() != setup0)
+                    break;
             }
         }
     }
@@ -203,6 +241,25 @@ char *cmd_GUI_longPolling(cJSON *a, const nvr_cmd_ctx_t *c)
     cJSON_AddNumberToObject(o, "HumanStatus", (double)hu);
     cJSON_AddNumberToObject(o, "CarStatus", (double)car);
     cJSON_AddNumberToObject(o, "RecordStatus", (double)rec);
+    {
+        int has = 0;
+        int st = nvr_gui_get_setup_status(&has);
+        if (has) cJSON_AddNumberToObject(o, "APPNotifySetupStatus", st);
+    }
+    return nvr_resp_content(o);
+}
+
+/* App 向导:0 BLE 配对页 / 1 P2P 配对页 / 2 关向导进 liveview / 3 关登录窗。
+ * 写入后立刻唤醒 GUI_longPolling,GUI 按 APPNotifySetupStatus 切页。 */
+char *cmd_notify_appSetupStatus(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    if (!nvr_jhas(a, "status")) return nvr_resp_err("invalid_param");
+    int status = nvr_jint(a, "status", 0);
+    if (status < 0 || status > 3) return nvr_resp_err("invalid_param");
+    nvr_gui_set_setup_status(status);
+    if (c && c->cm) nvr_chan_poke_longpoll(c->cm);
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "func", "notify_appSetupStatus");
     return nvr_resp_content(o);
 }
 /* 通道能力对象是否含某能力(capabilities 数组里有 name)。 */
@@ -246,10 +303,26 @@ char *cmd_X_NightOwl_getDeviceCapabilities(cJSON *a, const nvr_cmd_ctx_t *c)
     cJSON *dev = cJSON_AddObjectToObject(o, "device");
     cJSON *dc = cJSON_AddArrayToObject(dev, "capabilities");
     cJSON_AddItemToArray(dc, cJSON_CreateString("displayMode"));
-    cJSON_AddItemToArray(dc, cJSON_CreateString("groupInPrimary"));
+    /* 有空闲 LAN 槽才报可被 App attach；加满后不再报(AttachToMaster_InLan)。 */
+    {
+        int poe_n = 16, lan_n = 16, free_lan = 0;
+        nvr_gui_config_get_channels(&poe_n, &lan_n);
+        int lan_cap = NVR_IP_CH_BASE + lan_n;
+        if (lan_cap > NVR_MAX_CH) lan_cap = NVR_MAX_CH;
+        nvr_channel_t list[NVR_MAX_CH];
+        int n = c->cm ? nvr_chan_list(c->cm, list, NVR_MAX_CH) : 0;
+        int occ[NVR_MAX_CH] = {0};
+        for (int i = 0; i < n; i++)
+            if (list[i].enabled && list[i].chn >= 0 && list[i].chn < NVR_MAX_CH)
+                occ[list[i].chn] = 1;
+        for (int i = NVR_IP_CH_BASE; i < lan_cap; i++) if (!occ[i]) free_lan++;
+        if (free_lan > 0)
+            cJSON_AddItemToArray(dc, cJSON_CreateString("groupInPrimary"));
+    }
     cJSON_AddItemToArray(dc, cJSON_CreateString("multiStorage"));
     cJSON_AddItemToArray(dc, cJSON_CreateString("format"));
     cJSON_AddItemToArray(dc, cJSON_CreateString("cloudRecording"));
+    cJSON_AddItemToArray(dc, cJSON_CreateString("snooze"));
     cJSON_AddItemToArray(dc, cJSON_CreateString("bluetooth"));   /* BLE 配网 */
     if (any_ai)  cJSON_AddItemToArray(dc, cJSON_CreateString("ai"));
     if (any_ptz) cJSON_AddItemToArray(dc, cJSON_CreateString("ptz"));

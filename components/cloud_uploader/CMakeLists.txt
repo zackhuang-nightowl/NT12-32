@@ -20,6 +20,9 @@ target_include_directories(nvr_cloud_uploader PUBLIC
   ${NVR_ROOT}/components/recorder/include      # rsdk.h / rsdk_cloud.h
   ${NVR_ROOT}/common/include                   # nvr_log.h
 )
+target_include_directories(nvr_cloud_uploader PRIVATE
+  ${NVR_ROOT}/app/config                       # nvr_urls.h（出站 URL 总表）
+)
 target_link_libraries(nvr_cloud_uploader PUBLIC cjson)
 
 # recorder 生成 rsdk_config.h

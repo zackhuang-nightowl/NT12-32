@@ -5,8 +5,8 @@
  *
  *   Types: GetRules Type 含 Motion（或 GetSupportedRules CellMotion）→ triggers=["pixelChange"].
  *   activityZonePoints [[col,row]] <-> ActiveCells bitmap (row*cols+col bit).
- *   sensitivity level string <-> ONVIF Sensitivity 0..100. Grid = width x height
- *   (default 22x18). Values otherwise pass straight through.
+ *   SET: ModifyRules 已有 CellMotion（保留 Name / Enabled / delays）；无规则才 Create。
+ *   sensitivity level string <-> MinCount. Grid = width x height (default 22x18).
  */
 #include "onvif/mapping/nop_onvif_map.h"
 
@@ -142,10 +142,9 @@ nop_status_t onvif_map_X_NightOwl_setChannelTriggerActivityZone(nop_onvif_map_ba
 {
     onvif_session_t       *s;
     nop_onvif_cellmotion_t cm;
-    nop_onvif_rule_t       existing[MOT_MAX_RULES];
     nop_coord_cell_t       cells[MOT_MAX_CELLS];
     char                   cfg[100];
-    int                    ncell, n, i, w, h;
+    int                    ncell, i, w, h;
     nop_status_t           rc = NOP_OK;
 
     if (!nop_json_has(req->args, "activityZonePoints"))
@@ -172,8 +171,9 @@ nop_status_t onvif_map_X_NightOwl_setChannelTriggerActivityZone(nop_onvif_map_ba
     if (onvif_session_analytics_cfg(s, cfg, sizeof(cfg)) != 0) {
         onvif_session_end(be); return NOP_ERR_IO;
     }
-    /* Preserve the camera's current Sensitivity(0..100): sensitivity ↔ MinCount
-     * per §8, so we only drive MinCount + ActiveCells here. */
+    /* Preserve the camera's current Sensitivity(0..100): NOP sensitivity
+     * string maps to MinCount; ActiveCells is the grid. Adapter ModifyRules
+     * keeps the existing CellMotion Name / Enabled / delays. */
     {
         nop_onvif_cellmotion_t cur;
         memset(&cur, 0, sizeof(cur));
@@ -181,11 +181,6 @@ nop_status_t onvif_map_X_NightOwl_setChannelTriggerActivityZone(nop_onvif_map_ba
         if (nop_onvif_analytics_get_cellmotion(onvif_session_dev(s), cfg, &cur) >= 0)
             cm.sensitivity = cur.sensitivity;
     }
-    /* Replace: drop existing CellMotion rules, then create the new one. */
-    n = nop_onvif_analytics_get_rules(onvif_session_dev(s), cfg, "CellMotion",
-                                      existing, MOT_MAX_RULES);
-    for (i = 0; i < n; i++)
-        nop_onvif_analytics_delete_rule(onvif_session_dev(s), cfg, existing[i].name);
     if (nop_onvif_analytics_set_cellmotion(onvif_session_dev(s), cfg, &cm) != 0)
         rc = NOP_ERR_IO;
     onvif_session_end(be);

@@ -3,7 +3,7 @@
 
   "enable": true,
   "uid": "",
-  "auth_key": "88888888",
+  "auth_key": "00000000",
   "license_key": "000000",
   "server": { "region": "auto" },
   "av_port": 40633,

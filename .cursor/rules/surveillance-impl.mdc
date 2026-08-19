@@ -1,0 +1,31 @@
+---
+description: 监控行业实现习惯（线程/串行）与 MCU/hdal SDK sample 先行
+alwaysApply: true
+---
+
+# 实现习惯：监控行业 + SDK sample
+
+代码逻辑按**安防/NVR 行业常规**来写，不要按桌面服务或 Web 后端习惯随便开线程、随便并发打硬件。不明确时**先提问再实现**。
+
+## 线程 vs 串行
+
+先判断这条路径是「数据面」还是「控制面」，再决定并发：
+
+- **控制面串行**（默认）：设备绑定/鉴权、ONVIF SOAP、NOP 透传、格式化/装配磁盘、OTA、hdal 初始化与参数设置。同一设备、同一硬件模块上的 ioctl/SDK 调用**串行**；不要多线程同时改同一路 VDEC/VOUT/AOUT/存储。
+- **数据面可并行，但有界**：多路拉流、多路录像 writer 按通道隔离；解码/上屏跟 SDK 的通路与线程模型走，**不要**每路再套一层无关线程。
+- **禁止**：每个 NOP 命令、每次事件、每次抓拍都 `pthread_create`；在 HTTP/NOP handler 里直接调重量级 MCU SDK；无锁多线程抢同一 `hd_*` handle。
+- handler 里做短操作；阻塞或硬件调用丢到已有工作线程/队列。已有模块线程能消化的，不新开线程。
+
+拿不准「该串行还是该开线程」→ **提问**。
+
+## MCU / SoC SDK：先看 sample
+
+凡调用芯片侧 SDK（本机主要是 **na51090 hdal**：vdec / vout / vproc / aout / 存储相关），**先读该 SDK 的 sample，再写 `platform/media_hal` glue**。调用顺序、init/start/stop、buffer、线程、能否并发，以 sample 为准，不要只看头文件猜。
+
+入口：`platform/bsp_ref.txt` 的 `BSP_ROOT` → `${BSP_ROOT}/code/hdal/samples`（`media_flow`、`dvr_demon`、音频回放等）。本机常见位置：
+
+`C:\Users\Administrator\Desktop\NightOwl-project\NT12-32\NT98633\NT98633\SDK\NT9833x_SDK\software\board\na51090_linux_sdk\na51090_linux_sdk\code\hdal\samples`
+
+其它 vendor SDK（TUTK、Happytime 等）同样：**先对应该功能的 sample/demo**，再接到本工程 glue。hdal 调用只放 `platform/media_hal/`。
+
+sample 没有对应场景、或 sample 线程模型与现有 NVR 架构冲突 → **提问，等确认再实现**。

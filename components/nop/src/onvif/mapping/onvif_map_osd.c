@@ -6,8 +6,8 @@
  *     OSD_Name     <-> Text/Plain      OSD_DateTime <-> Text/DateAndTime
  *     OSD_WaterMark<-> Image
  *   positionType  <-> OSD position (TopLeft->UpperLeft, ...; Custom passes
- *     positionX/Y straight through as ONVIF normalized [-1,1]; Top/BottomMiddle
- *     have no ONVIF preset so map to Custom at x=0). enable=false -> DeleteOSD.
+ *     positionX/Y as ONVIF normalized [-1,1]. TopMiddle/BottomMiddle 无库内预置
+ *     枚举：下发 Custom+(0,±1) 归一化坐标，GET 按坐标反推预置名)。
  *
  * Values are passed to the ONVIF ABI directly (no coordinate transform needed:
  * OSD custom coords are already ONVIF-normalized per the spec).
@@ -22,6 +22,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 #define OSD_MAX 16
 
@@ -52,8 +53,8 @@ static void name_to_pos(const char *name, int *pos_type, float *x, float *y)
     else if (!strcmp(name, "TopRight"))     *pos_type = NOP_OSD_POS_UPPER_RIGHT;
     else if (!strcmp(name, "BottomLeft"))   *pos_type = NOP_OSD_POS_LOWER_LEFT;
     else if (!strcmp(name, "BottomRight"))  *pos_type = NOP_OSD_POS_LOWER_RIGHT;
-    else if (!strcmp(name, "TopMiddle"))    { *pos_type = NOP_OSD_POS_CUSTOM; *x = 0.0f; *y =  0.9f; }
-    else if (!strcmp(name, "BottomMiddle")) { *pos_type = NOP_OSD_POS_CUSTOM; *x = 0.0f; *y = -0.9f; }
+    else if (!strcmp(name, "TopMiddle"))    { *pos_type = NOP_OSD_POS_CUSTOM; *x = 0.0f; *y =  1.0f; }
+    else if (!strcmp(name, "BottomMiddle")) { *pos_type = NOP_OSD_POS_CUSTOM; *x = 0.0f; *y = -1.0f; }
     else if (!strcmp(name, "Custom"))       *pos_type = NOP_OSD_POS_CUSTOM;
 }
 
@@ -68,15 +69,19 @@ static void token_default_pos(int is_image, int text_type, int *pt, float *x, fl
     else                                   name_to_pos("TopRight",    pt, x, y);
 }
 
-/* ONVIF pos_type -> NOP positionType name. */
-static const char *pos_to_name(int pos_type)
+/* ONVIF pos_type -> NOP positionType name. Custom 在归一化 [-1,1] 上：
+ * 顶/底居中（|x| 小且 |y|≈1）反推 TopMiddle/BottomMiddle。 */
+static const char *pos_to_name(int pos_type, float x, float y)
 {
     switch (pos_type) {
     case NOP_OSD_POS_UPPER_LEFT:  return "TopLeft";
     case NOP_OSD_POS_UPPER_RIGHT: return "TopRight";
     case NOP_OSD_POS_LOWER_LEFT:  return "BottomLeft";
     case NOP_OSD_POS_LOWER_RIGHT: return "BottomRight";
-    default:                      return "Custom";
+    default:
+        if (fabs((double)x) < 0.2 && y >=  0.7f) return "TopMiddle";
+        if (fabs((double)x) < 0.2 && y <= -0.7f) return "BottomMiddle";
+        return "Custom";
     }
 }
 
@@ -118,7 +123,7 @@ nop_status_t onvif_map_X_NightOwl_getOSD(nop_onvif_map_backend_t *be, int ch,
         nop_json_t *e = nop_json_obj();
         nop_json_add_str(e, "osdToken", kind_to_token(osds[i].is_image, osds[i].text_type));
         nop_json_add_bool(e, "enable", true);
-        nop_json_add_str(e, "positionType", pos_to_name(osds[i].pos_type));
+        nop_json_add_str(e, "positionType", pos_to_name(osds[i].pos_type, osds[i].pos_x, osds[i].pos_y));
         if (osds[i].pos_type == NOP_OSD_POS_CUSTOM) {
             nop_json_add_int(e, "positionX", osds[i].pos_x);
             nop_json_add_int(e, "positionY", osds[i].pos_y);

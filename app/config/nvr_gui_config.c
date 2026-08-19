@@ -67,21 +67,43 @@ int nvr_gui_config_get_channels(int *poe_n, int *lan_n)
     return 0;
 }
 
+static int read_mode_array(cJSON *r, const char *key, int *out, int cap)
+{
+    int n = 0;
+    cJSON *arr = r ? cJSON_GetObjectItem(r, key) : NULL;
+    if (!cJSON_IsArray(arr)) return 0;
+    int sz = cJSON_GetArraySize(arr);
+    for (int i = 0; i < sz && n < cap; i++) {
+        cJSON *it = cJSON_GetArrayItem(arr, i);
+        if (cJSON_IsNumber(it)) out[n++] = (int)it->valuedouble;
+    }
+    return n;
+}
+
+int nvr_gui_config_get_live_modes(int *out, int cap)
+{
+    static const int kdef[] = { 1, 4, 9, 16 };
+    int n = 0;
+    cJSON *r = read_root();
+    if (r) {
+        n = read_mode_array(r, "allDisplayModes", out, cap);
+        cJSON_Delete(r);
+    }
+    if (n == 0) {
+        for (int i = 0; i < (int)(sizeof(kdef)/sizeof(kdef[0])) && n < cap; i++)
+            out[n++] = kdef[i];
+    }
+    return n;
+}
+
 int nvr_gui_config_get_playback_modes(int *out, int cap)
 {
     static const int kdef[] = { 1, 4, 9, 16 };
     int n = 0;
     cJSON *r = read_root();
     if (r) {
-        cJSON *arr = cJSON_GetObjectItem(r, "allPlaybackDisplayModes");
-        if (!cJSON_IsArray(arr)) arr = cJSON_GetObjectItem(r, "allDisplayModes");
-        if (cJSON_IsArray(arr)) {
-            int sz = cJSON_GetArraySize(arr);
-            for (int i = 0; i < sz && n < cap; i++) {
-                cJSON *it = cJSON_GetArrayItem(arr, i);
-                if (cJSON_IsNumber(it)) out[n++] = (int)it->valuedouble;
-            }
-        }
+        n = read_mode_array(r, "allPlaybackDisplayModes", out, cap);
+        if (n == 0) n = read_mode_array(r, "allDisplayModes", out, cap);
         cJSON_Delete(r);
     }
     if (n == 0) {

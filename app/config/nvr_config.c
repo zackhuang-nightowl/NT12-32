@@ -346,6 +346,7 @@ int nvr_config_overlay_from_settings(nvr_config_t *cfg, nvr_settings_t *settings
         if (r->ip[0])       snprintf(e->onvif_ip, sizeof(e->onvif_ip), "%s", r->ip);
         if (r->mac[0])      snprintf(e->mac, sizeof(e->mac), "%s", r->mac);
         if (r->model[0])    snprintf(e->model, sizeof(e->model), "%s", r->model);  /* 型号:重启回显 */
+        if (r->firmware[0]) snprintf(e->firmware, sizeof(e->firmware), "%s", r->firmware);
         if (r->onvif_port)  e->onvif_port = r->onvif_port;
         if (r->serial[0])   snprintf(e->serial, sizeof(e->serial), "%s", r->serial);
         if (r->service_url[0]) snprintf(e->service_url, sizeof(e->service_url), "%s", r->service_url);

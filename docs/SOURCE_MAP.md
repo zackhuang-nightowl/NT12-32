@@ -11,7 +11,7 @@
 | `recorder/` | `NT12-SDK/recorder_sdk/` | 整包，去 `build/` | librsdk，独立可编译 |
 | `onvif/` | —（glue） | ✅ 已实现 | `nvr_onvif.c` + `nvr_dev_classify.c`；协议在 happytime |
 | `streaming/` | —（glue） | ✅ 已实现 | 主+子常拉；目标机 `NopRtspClient`（NT12-SDK/OnvifClientLibrary），happytime 仍作依赖 |
-| `cloud_tutk/` | —（glue） | ✅ 已实现 | `nvr_tutk.c` P2PTunnel + `nvr_rtsp_live.c`；库在 `third_party/tutk_sdk/` |
+| `cloud_tutk/` | — | ✅ | `nvr_rtsp_live.c` + `nvr_tutk_cgi.c`；P2P 走 ODC `AVAPIs_Server_CLI` |
 | `storage/` | —（glue） | ✅ 已实现 | 裸盘方案 + 盘发现/装配/热插拔 |
 | `config/` | — | ✅ 已实现 | SQLite 设置库 `nvr_settings` |
 | `crypto/` | — | ✅ 已实现 | MD5/SHA/AES256 |

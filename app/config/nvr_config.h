@@ -37,6 +37,7 @@ typedef struct {
     int  enabled;          /* 0=禁用(跳过) 1=启用 */
     char mac[24];          /* 设备 MAC（发现分类得；IP 变更后按 mac 找回；持久化写 camera） */
     char model[48];        /* 型号：ONVIF discovery scopes 的 /hardware/（发现/添加时填，持久化） */
+    char firmware[64];     /* 相机固件版本（getDeviceInfo / GetDeviceInformation，持久化） */
     char serial[64];       /* 设备 SN：scopes /serial/ 或 /sn/（nopOnvif 激活用） */
     char service_url[128]; /* 发现得到的 device_service 路径 */
     /* --- 多视频源(Multi-VideoSource):一物理设备 N 源各占一 channel,按 videoSourceToken 区分 --- */

@@ -43,4 +43,7 @@
 #define NOP_ERRSTR_ALREADY_ACTIVE            "already_active_error"    /* X_NightOwl_setDeviceActive */
 #define NOP_ERRSTR_RANDOM_EMPTY              "random_empty_error"      /* EnhancedSecurity */
 
+#define NOP_ERRSTR_CAM_NOT_BINDED            "camera not binded"
+#define NOP_ERRSTR_CAM_DISCONNECTED          "camera disconnected"
+
 #endif /* NOP_SDK_ERROR_STR_H */

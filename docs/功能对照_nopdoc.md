@@ -72,7 +72,7 @@
 | 事件列表检索 | `X_NightOwl_queryEventList` | ✓ | 🟡 | handler在;接 rsdk_index/event hub | |
 | 录像覆盖区间 | `X_NightOwl_queryRecordingInterval` | ✓ | 🟡 | 接 rsdk | |
 | 回放能力 | `getPlaybackCapabilities` | ✓ | 🟡 | handler在 | |
-| 开始回放 | `startPlayback` | ✗ | 🟡 | 无 handler;rsdk_group_play 引擎✅,会话接线待补 | |
+| 开始回放 | `startPlayback` | ✓ | ✅ | `rtsp://iotc-tunnel:8554/playback/<startTime>`；Seek SET_PARAMETER | |
 | 事件下载(MP4) | `X_NightOwl_startEventDownload`/`getEventDownloadProgress` | ✓ | 🟡 | handler在;接 rsdk_backup_export | |
 | 回放引擎(检索/跨盘/导出) | — | — | ✅ | rsdk_group_query/play/backup | |
 
@@ -101,17 +101,17 @@
 ## 1.8 pushNotification 推送（NVR 侧）
 | 功能项 | NOP 命令 | handler | 我判断 | 说明 | 你判断 |
 |---|---|---|---|---|---|
-| 事件→推送脊柱 | — | — | 🟡 | 事件中枢 publish→nop push 引擎(结构在) | |
-| 通道推送开关 查询/设置 | `X_NightOwl_get/setChannelsPushNotificationSwitch` | ✓ | 🟡 | 接线 | |
-| 推送触发类型 | `X_NightOwl_get/setChannelPushNotificationTriggers` | ✓ | 🟡 | 接线 | |
-| 勿扰/打盹/带图 | `setSnooze`/`getSnooze`/`setPushPhotoSwitch` | ✓ | 🟡 | 接线 | |
-| 推送到手机(外部 HTTPS) | — | — | ❌ | push server 落地未实现 | |
+| 配置入库 | get/set Switch/Triggers/DND、Snooze、PushPhoto | ✓ | ✅ | SQLite `push_config`（0-based chn） | |
+| 事件→推送 | — | ✓ | ✅ | `nvr_evt` 入队 → 策略（开关/trigger/勿扰/打盹/1min 静默） | |
+| 配图 | — | ✓ | ✅ | 读已落盘 `rsdk_pic`（不另截）；hd/fd/vd 开带图才传，≤10KB | |
+| 推送到手机 | TPNS GET + 图床 POST | ✓ | ✅ | URL 见 `nvr_urls.h`（ServeDomainV2） | |
 
 ## 1.9 OTA / Wizard / 系统
 | 功能项 | NOP 命令 | handler | 我判断 | 说明 | 你判断 |
 |---|---|---|---|---|---|
-| NVR 自升级 | `upgradeFirmware`/`checkFirmwareUpgradeStatus` | ✗ | ❌ | 无 handler;升级流程未实现 | |
-| 通道(IPC)固件下推 | `X_NightOwl_upgradeChannelFirmware`/`checkChannelUpgradeStatus` | ✓ | 🟡 | handler在;下推流程未接 | |
+| NVR 自升级 | `upgradeFirmware`/`checkFirmwareUpgradeStatus` | ✓ | ✅ | MD5+版本+A/B | |
+| 查 NVR 服务器固件 | `GUI_checkServerFirmware` | ✓ | ✅ | NVR 查 ota.nowlsp.com（ServeDomainV2；prod/stage 编译期切 env） | |
+| 通道(IPC)固件下推 | `X_NightOwl_upgradeChannelFirmware`/`checkChannelUpgradeStatus` | ✓ | ✅ | NVR 下载后 NOP upload.cgi / ONVIF StartFirmwareUpgrade | |
 | Wizard 本地向导 | `setName`/`set_datetime`/`resetToFactorySettings` | ✓ | 🟡 | handler在;向导 UI 由界面驱动 | |
 | 设备重启 | `reboot` | ✗ | ❌ | 无 handler | |
 | 周维护自动重启(0-6AM)+固件检查 | — | — | 🟡 | 设置库 AutoReboot 在;定时逻辑待接 | |
@@ -174,14 +174,14 @@
 | 功能项 | NOP 命令 | handler | 我判断 | 你判断 |
 |---|---|---|---|---|
 | 传感器配置(human/face/vehicle/animal/package) | `get/setChannelSensorConfig` | ✓ | ⤳ 映射(§8 Object) | |
-| 活动区域 | `X_NightOwl_getChannelActivityZoneTypes`/`getChannelTriggerActivityZone` | ✓ | ⤳ 映射(§9 Line/Field) | |
+| 活动区域 | `X_NightOwl_get/setChannelTriggerActivityZone` / Types | ✓ | ⤳ 映射(§8 CellMotion ModifyRules) | |
 | 移动灵敏度 | `X_NightOwl_get/setChannelMotionSensitivity` | ✗/✓? | ⤳ | |
 | 事件上报(8012 事件中心) | (eMSG_CMD_*) | — | 🟡 | nop `svc_event8012_client` 在;app 逐相机 attach 未接 | |
 
 ## 2.8 相机 OTA / 录像触发（相机侧）
 | 功能项 | NOP 命令 | handler | 我判断 | 你判断 |
 |---|---|---|---|---|
-| 通道设备升级 | `X_NightOwl_upgradeChannelFirmware` | ✓ | 🟡 | |
+| 通道设备升级 | `X_NightOwl_upgradeChannelFirmware` | ✓ | ✅ | NVR 下载后下推 |
 | 相机录像触发类型 | `X_NightOwl_get/setChannelRecordingTriggers` | ✓ | ⤳/🟡 | |
 
 ---

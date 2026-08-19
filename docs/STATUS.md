@@ -2,7 +2,7 @@
 
 > 本文记录固件**当前已实现/可编译**的能力，供团队对照与补充。
 > 图例：✅ 已实现并主机自测/编译通过 · 🟡 结构就位，需上真机对接/调优 · ❌ 未开始（后续里程碑）
-> 最近更新：2026-08-18（ODC TUTK agent / `/User` 身份 / 6061+8554+7000 / Cognito 绑定 / 对讲）。
+> 最近更新：2026-08-19（ODC TUTK agent cgi/device.sh/profile + 出厂 AuthKey 00000000）。
 
 ---
 
@@ -75,7 +75,7 @@
 | 回放音频（AAC → `mhal_aout`，仅 1X 正放） | 🟡 | 已接线；真机出声待核 |
 | 事件列表/日历 | ✅ | meta `DOC_CLOUD` + 连续轨 `RSDK_RK_EVENT` |
 | USB 备份三件套 | ✅ | `rsdk_backup_export` → `/mnt/usb` |
-| 远程回放 RTSP（TUTK 隧道 URL） | ❌ | 见 [待办_TUTK_P2P_远程回放.md](待办_TUTK_P2P_远程回放.md) |
+| 远程回放 RTSP（TUTK 隧道 URL） | ✅ | `startPlayback` → `rtsp://iotc-tunnel:8554/playback/<startTime>`；Seek=`SET_PARAMETER playback_ctrl:seek`；RTP 拓展头 status/timestamp |
 
 ---
 
@@ -109,12 +109,12 @@
 
 | 能力 | 状态 | 实现位置 / 说明 |
 |---|---|---|
-| IOTC 登录 + P2P 会话 | ✅ | **ODC agent** `AVAPIs_Server_CLI`（`/dvr/tutk_cloud_agent/device.sh`）；不走 `nvr_tutk_init` |
-| 隧道映射 6061 命令 + 8554 live + 7000 对讲 | ✅ | App 命令 `iotc-tunnel:6061`；live `rtsp://iotc-tunnel:8554/live/chN`；对讲 `iotc-tunnel:7000`。8089 仍给 GUI/`/eventSnap` |
-| authkey 热更新 / UID 命令 | ✅ | `get/setIotcAuthKey` · `GUI_getUID`；凭据权威源 `/User`（`nvr_identity`） |
+| IOTC 登录 + P2P 会话 | ✅ | **ODC agent** `AVAPIs_Server_CLI`（`/dvr/tutk_cloud_agent/device.sh`）；不走 `nvr_tutk_init`。cgi=`nvr_tutk_cgi`（`-s` 读 `/User`，`-f` POST :6061） |
+| 隧道映射 6061 命令 + 8554 live/回放 + 7000 对讲 | ✅ | App 命令 `iotc-tunnel:6061`；live `rtsp://iotc-tunnel:8554/chN_{0\|1}.264`；回放 `/playback/<ts>`；对讲 `iotc-tunnel:7000`。8089 仍给 GUI/`/eventSnap` |
+| authkey 热更新 / UID 命令 | ✅ | `get/setIotcAuthKey` · `get/setAvPassword` · `get/setIotcUID` · `GUI_getUID`；出厂 `00000000`/`888888`；凭据权威源 `/User` |
 | 账户门控（owner / 出厂 / 本地 admin） | ✅ | `apply_remote_access`：有 owner 常开；出厂常开；仅本地 admin 默认关 |
 | aws 登录 + 向导绑定 | ✅ | Cognito `InitiateAuth`；owner 空则 GraphQL `addDevice` 写 stoken |
-| 远程回放推流 | ❌ | 需回放 RTSP server |
+| 远程回放推流 | ✅ | `nvr_rtsp_live` 同口回放；空白帧 2fps；不自主 Seek |
 
 ---
 
@@ -134,7 +134,7 @@
 | 电子放大 ZoomPan | ✅ | `mhal_vout_set_crop`；已 start 的 VPE 先 stop 再设 IN_CROP |
 | 网络落地（eth0/eth1 VLAN+DHCP、NTP） | ✅ | `nvr_netime.c`；口 P → VLAN(2001+P)=2002..2017 |
 | 周维护自动重启 | ✅ | `nvr_app.c` `auto_reboot_tick`；`GUI_get/setAutoRebootSetting` |
-| OTA（MD5 + 版本 + A/B） | 🟡 | 必校 MD5；版本必须更高，除非强制；`nvr_do_update.sh` 写非活动槽。真机 nandwrite 待核 |
+| OTA（MD5 + 版本 + A/B；查服务器；IPC 下推） | ✅ | NVR 自升级 `nvr_ota.c`。`GUI_checkServerFirmware` 查 NightOwl OTA。IPC：NVR 下载后 NOP `upload.cgi` / ONVIF `StartFirmwareUpgrade` |
 
 ---
 
@@ -144,7 +144,7 @@
 |---|---|
 | media_hal 板级 | 4K 时序 / YUV 抓拍（ddr_id 已按 dts）；回放 HDMI 音频真机出声 |
 | BLE GATT | 协议桥已接 router；BlueZ 0xFFF0 待板级 |
-| TUTK 远程回放 | `startPlayback` → 隧道 RTSP |
+| TUTK 远程回放 | 真机对 App 拖时间轴 / 事件回放回归 |
 | TS PCR / 推送 | 云存封装调优；推送开关已落库、外发未做 |
 
 ---

@@ -25,13 +25,13 @@ app/ → components/ → platform/media_hal → third_party + BSP(hdal)
 | ① | `components/nop` | NOP 2.0 核 + cap + ONVIF 映射 | `nop_app_*` / `nop_http_server` |
 | ② | `components/onvif` | ONVIF 客户端 + 设备三分类 + 34569 | `nvr_onvif_get_url` / `nvr_dev_classify` / `nvr_lan34569_*` |
 | ③ | `components/streaming` | 主+子常拉 → 硬解上屏 + 双 writer 录像 | `nvr_stream_mgr_*` |
-| ④ | `components/cloud_tutk` | 本机 live RTSP（`nvr_rtsp_live` :8554） | `nvr_rtsp_live_*` |
+| ④ | `components/cloud_tutk` | 本机 live+回放 RTSP（`nvr_rtsp_live` :8554） | `nvr_rtsp_live_*` / `nvr_rtsp_pb_*` |
 | ⑤ | `components/recorder` | 裸盘/索引/回放/导出 MP4 | `rsdk_*` |
 | ⑥ | `components/storage` | 盘发现/格式化/装配/热插拔 | `nvr_storage_*` |
 
 辅助：`config`（SQLite `nvr_settings` + 身份 `nvr_identity`）· `crypto` · `cloud_uploader`(VSaaS)
 
-**P2P 不走 `nvr_tutk_init`**。实码拉起 ODC agent：`/dvr/tutk_cloud_agent/device.sh` → `AVAPIs_Server_CLI`（真 license）。`nvr_tutk.c` 是遗留 glue，勿当现行路径。
+**P2P 不走固件内 IOTC。**实码拉起 ODC agent：`/dvr/tutk_cloud_agent/device.sh` → `AVAPIs_Server_CLI`（真 license）`popen nvr_tutk_cgi`（`-s` 读 `/User`，`-f` POST :6061）。出厂 IotcAuthKey=`00000000`、AvPassword=`888888`。
 
 ## 核心数据流
 
@@ -39,7 +39,7 @@ app/ → components/ → platform/media_hal → third_party + BSP(hdal)
 
 **录像**：主/子各一 writer（`slot.stream=0/1`），音频挂主流 → storage 裸盘(AES-256-CTR)
 
-**远程**：App → ODC TUTK agent → 本机（不对外直连）。命令 **`iotc-tunnel:6061`**（与 8089 同 `nvr_cmd_dispatch`）；GUI/缩略图 **8089**（含 GET `/eventSnap`）；live **`rtsp://iotc-tunnel:8554/live/chN`**；对讲 **`127.0.0.1:7000`**。远程回放 RTSP 未做。
+**远程**：App → ODC TUTK agent → 本机（不对外直连）。命令 **`iotc-tunnel:6061`**（与 8089 同 `nvr_cmd_dispatch`）；GUI/缩略图 **8089**（含 GET `/eventSnap`）；live **`rtsp://iotc-tunnel:8554/chN_0.264`（主）/`chN_1.264`（子）**；回放 **`rtsp://iotc-tunnel:8554/playback/<startTime>`**；对讲 **`127.0.0.1:7000`**。
 
 **界面**：独立 LVGL → `127.0.0.1:8089/APPJsonCmd` → `nvr_cmd_router`（中央表 `g_nvr_cmd_table`）
 
@@ -50,11 +50,12 @@ app/ → components/ → platform/media_hal → third_party + BSP(hdal)
 
 **账户**：本地 Admin/Technician/Viewer（SHA256，失败 3 次锁 1h）。`GUI_login` aws → Cognito `InitiateAuth`；owner 空则 GraphQL `addDevice` 写 `nop_owner`+stoken，并清本地用户。`GUI_forgetPassword` = UID 前 6 位 + 当日 ResetCode。
 
-**事件**：相机 8012 客户端 + ONVIF 轮询 → `nop_event_hub` → `nvr_evt` → 录像/longPolling 位图/云存 + **异步抓拍**（8012 JPEG 或 ONVIF GetSnapshot → `rsdk_pic`）。NOP 上线 `AI_setEventExtInfoConfig enable=true`；后录结束 `AI_getEventExtInfo` 取回写入 `meta_doc(AI_EVENT)`；App 查 NVR 本地四接口（不透传）。OSD 由 GUI 自绘，固件不叠 HDMI。`GUI_longPolling` 有变化立刻推（最多挂 25s）。
+**事件**：相机 8012 客户端 + ONVIF 轮询 → `nop_event_hub` → `nvr_evt` → 录像/longPolling 位图/云存 + **异步抓拍**（8012 JPEG 或 ONVIF GetSnapshot → `rsdk_pic`）+ **推送**（`app/push`：读事件图 → 图床 → TPNS；配置在 SQLite `push_config`，URL 在 `nvr_urls.h`）。NOP 上线 `AI_setEventExtInfoConfig enable=true`；后录结束 `AI_getEventExtInfo` 取回写入 `meta_doc(AI_EVENT)`；App 查 NVR 本地四接口（不透传）。OSD 由 GUI 自绘，固件不叠 HDMI。`GUI_longPolling` 有变化立刻推（最多挂 25s）。
 
 **对讲**：`app/talk`。`startSpeaker` 本机处理。NOP 相机 TCP `:7000`；ONVIF/nopOnvif 走 RTSP backchannel。App 音频经隧道打到 `iotc-tunnel:7000`。
 
 **OTA**：`.rom` 下载/本地 → 必校 payload **MD5**；包版本必须高于 `system.fw_version`，除非强制（`force` / 头 `force=1` / `nopUpgrade` 无 version）。通过后 `nvr_do_update.sh` 写非活动 rootfs（mtd6/mtd7），当前槽备份。
+**查新 / IPC 升级**（本地表，不透传）：`GUI_checkServerFirmware` 本机查 `NVR_URL_OTA_*`（`app/config/nvr_urls.h`；GUI 可不带 url）。IPC 由 NVR **先下载再下推**：NOP=`POST :发现口/cgi-bin/upload.cgi` + `GET upgrade_rate.cgi`；ONVIF=`StartFirmwareUpgrade` + POST 固件（§6）。`X_NightOwl_upgradeChannelFirmware` 200=已接受；无新版本仍 200，status=4。
 
 ## 绑定 / 鉴权 / 一机一 handle
 
@@ -72,9 +73,9 @@ app/ → components/ → platform/media_hal → third_party + BSP(hdal)
 
 ## 8089 三档 + mapping token
 
-GUI 走 **8089**；App 经 agent 走 **6061**（同 handler）。未命中 `g_nvr_cmd_table` 且带 `channel`：
+GUI 走 **8089**；App 经 agent 走 **6061**（同 handler）。OTA 查新/IPC 升级在本地表（`GUI_checkServerFirmware` / `upgradeChannelFirmware` / `checkChannelUpgradeStatus`），不透传。未命中 `g_nvr_cmd_table` 且带 `channel`：
 - `backend==0`（NOP）→ POST 该路相机 `/APPJsonCmd`（`channel` 改成该路 `dev_chn`）
-- **例外** `X_NightOwl_getChannelActivityZoneTypes` / `getChannelTriggerActivityZone`：NOP 透传失败 → ONVIF mapping（GetRules 含 Motion 才报 `triggers:["pixelChange"]`；区域从 CellMotion 取）
+- **例外** `X_NightOwl_getChannelActivityZoneTypes` / `get/setChannelTriggerActivityZone`：NOP 先透传；失败再 ONVIF CellMotion mapping（ModifyRules，不删建）。Types 仅 GetRules 含 Motion 才报 `triggers:["pixelChange"]`；区域从 CellMotion ActiveCells 取
 - **nopOnvif 仅协议那几条**（`kind==NOPONVIF` + `nightowl_protocol.md`：白灯 / 警笛 / 一键报警 / 激活）→ POST 发现口 `/APPJsonCmd`。PTZ / OSD / 编码 / AI 等**仍走 ONVIF SOAP**。上线时 GET 两个开关，**200** 写入 `capabilities[]`（`light` / `audioAlert`），**501** 不支持。
 - 其余 `backend!=0`（含 nopOnvif 非白名单 + 通用 ONVIF）→ 按该路 `host:port` **发 ONVIF SOAP**
 
@@ -89,6 +90,7 @@ mapping 请求必须带对 token：PTZ=`ProfileToken`（本源 `src_profile`）�
 - 新增本地 NOP 接口 = `g_nvr_cmd_table` 一行 + `cmd_<func>` handler
 - 弱符号钩子 `nvr_onvif_get_url` 供 ONVIF 可选接入
 - 身份只经 `nvr_identity_*`；P2P 只拉起/杀掉 ODC agent
+- 出站云 URL 只写 `app/config/nvr_urls.h`（ServeDomainV2；prod 默认 / `-DNVR_STAGE=ON` 为 stage）；本机相机/隧道拼接不收录
 - 外网不直连；本机口：8089 GUI、6061 agent cgi、8554 live、7000 对讲、UDP 34569
 
 ## 文档入口

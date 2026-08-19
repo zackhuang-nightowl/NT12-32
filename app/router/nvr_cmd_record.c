@@ -113,21 +113,6 @@ char *cmd_X_NightOwl_getChannelContinuousRecordingSchedule(cJSON *a, const nvr_c
     cJSON *o = cJSON_CreateObject(); cJSON_AddItemToObject(o, "rules", rules);
     return nvr_resp_content(o);
 }
-char *cmd_X_NightOwl_setChannelsPushNotificationSwitch(cJSON *a, const nvr_cmd_ctx_t *c)
-{
-    int ch = nvr_jint(a, "channel", -1); if (ch < 0) ch = 0;
-    nvr_push_cfg_t p; if (nvr_settings_push_get(c->settings, ch, &p) != 0) { memset(&p, 0, sizeof(p)); p.chn = ch; }
-    p.switch_on = nvr_jbool(a, "value", 0);
-    nvr_settings_push_set(c->settings, &p);
-    return nvr_resp_ok();
-}
-char *cmd_X_NightOwl_getChannelsPushNotificationSwitch(cJSON *a, const nvr_cmd_ctx_t *c)
-{
-    int ch = nvr_jint(a, "channel", -1); if (ch < 0) ch = 0;
-    nvr_push_cfg_t p; if (nvr_settings_push_get(c->settings, ch, &p) != 0) { memset(&p, 0, sizeof(p)); p.chn = ch; }
-    cJSON *o = cJSON_CreateObject(); cJSON_AddBoolToObject(o, "value", p.switch_on);
-    return nvr_resp_content(o);
-}
 
 /* ============ 事件录像周排程(按 sensor；存 schedule 表 domain=record_event) ============ */
 #define NVR_EVT_SCHED_DOMAIN "record_event"

@@ -23,6 +23,7 @@ set(NVR_APP_INCLUDES
     ${CMAKE_CURRENT_SOURCE_DIR}/preview
     ${CMAKE_CURRENT_SOURCE_DIR}/record_sched
     ${CMAKE_CURRENT_SOURCE_DIR}/event
+    ${CMAKE_CURRENT_SOURCE_DIR}/push
     ${CMAKE_CURRENT_SOURCE_DIR}/router
     ${CMAKE_CURRENT_SOURCE_DIR}/ota
     ${CMAKE_CURRENT_SOURCE_DIR}/netime
@@ -57,12 +58,14 @@ add_library(nvr_app_core STATIC
     preview/nvr_preview.c
     record_sched/nvr_record_sched.c
     event/nvr_event.c
+    push/nvr_push.c
     nop8012/nvr_nop8012.c
     nop8012/nvr_nop8012_proto.c
     router/nvr_cmd_router.c
     router/nvr_cmd_util.c
     router/nvr_cmd_table.c
     router/nvr_cmd_display.c
+    router/nvr_gui_notify.c
     router/nvr_cmd_lan.c
     router/nvr_cmd_system.c
     router/nvr_cmd_storage.c
@@ -70,6 +73,8 @@ add_library(nvr_app_core STATIC
     router/nvr_cmd_record.c
     router/nvr_cmd_ota.c
     router/nvr_cmd_event.c
+    router/nvr_http_assets.c
+    router/nvr_cmd_push.c
     router/nvr_cmd_account.c
     router/nvr_cognito.c
     router/nvr_graphql.c
@@ -79,6 +84,7 @@ add_library(nvr_app_core STATIC
     config/nvr_chan_persist.c
     channel/nvr_chan_status.c
     ota/nvr_ota.c
+    ota/nvr_ipc_ota.c
     netime/nvr_netime.c
     ble/nvr_ble.c
     playback/nvr_playback.c

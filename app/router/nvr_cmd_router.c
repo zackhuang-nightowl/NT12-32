@@ -5,8 +5,8 @@
  *    1) 黑名单 = 本地路由表 g_nvr_cmd_table[]:命中 → 本地 handler 处理。
  *    2) 非黑名单 → 按 camera 分流:
  *         backend==0 (NOP)           → 透传 POST 设备 /APPJsonCmd
- *           例外: getChannelActivityZoneTypes / getChannelTriggerActivityZone
- *                 透传失败 → mapping(GetRules Motion → pixelChange / CellMotion 区域)
+ *           例外: getChannelActivityZoneTypes / get/setChannelTriggerActivityZone
+ *                 先透传；失败 → mapping（CellMotion ModifyRules，写格子）
  *         kind==nopOnvif 且仅 nightowl_protocol 那几条(白灯/警笛/Panic/激活)
  *                                    → POST 发现口 /APPJsonCmd；其余 nopOnvif 命令仍走 ONVIF SOAP
  *         其余 backend!=0            → mapping → ONVIF SOAP
@@ -131,7 +131,8 @@ static int activity_zone_func(const char *func)
 {
     return func &&
            (strcmp(func, "X_NightOwl_getChannelActivityZoneTypes") == 0 ||
-            strcmp(func, "X_NightOwl_getChannelTriggerActivityZone") == 0);
+            strcmp(func, "X_NightOwl_getChannelTriggerActivityZone") == 0 ||
+            strcmp(func, "X_NightOwl_setChannelTriggerActivityZone") == 0);
 }
 
 /* rtsp://<ip>[:port]/... 里取 host */
@@ -174,9 +175,13 @@ char *nvr_cmd_dispatch(nvr_cmd_router_t *r, const char *json_in)
     if (fn) {
         /* GUI_longPolling 可挂起数秒等状态变化:先放 disp_lock,避免卡住其它 8089 本地命令。 */
         int lp = (func && strcmp(func, "GUI_longPolling") == 0);
-        if (lp) pthread_mutex_unlock(&r->disp_lock);
+        int ota_chk = (func && (strcmp(func, "GUI_checkServerFirmware") == 0 ||
+                                strcmp(func, "GUI_checkChannelServerFirmware") == 0));
+        int snap = (func && strcmp(func, "snapshotChannel") == 0);
+        int hold = !(lp || ota_chk || snap);
+        if (!hold) pthread_mutex_unlock(&r->disp_lock);
         char *out = fn(args, &r->ctx);
-        if (!lp) pthread_mutex_unlock(&r->disp_lock);
+        if (hold) pthread_mutex_unlock(&r->disp_lock);
         cJSON_Delete(req);
         /* handler 只做实际业务:返回 NULL = 未处理/未实现 → 路由统一回 501 NOT_SUPPORT。 */
         return out ? out : nvr_resp_not_support();
@@ -222,7 +227,7 @@ char *nvr_cmd_dispatch(nvr_cmd_router_t *r, const char *json_in)
                                         rewritten ? rewritten : json_in);
                 NVR_LOGI("router", "%s 透传 ch%d %s:%d %ldms",
                          func ? func : "?", channel, ip, port, mono_ms() - t0);
-                /* 活动区域：NOP 透传失败则改回 NVR 0-based channel，走 onvifMapping。 */
+                /* Motion 活动区域：NOP 透传失败则改回 NVR 0-based channel，走 CellMotion mapping。 */
                 if (activity_zone_func(func) && !nop_resp_ok(out)) {
                     NVR_LOGI("router", "%s 透传失败 → mapping 回落 ch%d",
                              func, channel);

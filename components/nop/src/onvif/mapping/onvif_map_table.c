@@ -30,7 +30,7 @@ const onvif_map_entry_t g_onvif_map_table[] = {
     { "setPtzHome",      onvif_map_setPtzHome },     /* -> SetHomePosition      */
     { "gotoPtzHome",     onvif_map_gotoPtzHome },    /* -> GotoHomePosition     */
     { "getPtzPatrols",   onvif_map_getPtzPatrols },  /* -> GetPresetTours       */
-    { "setPtzPatrol",    onvif_map_setPtzPatrol },   /* -> Create/ModifyPresetTour (upsert) */
+    { "setPtzPatrol",    onvif_map_setPtzPatrol },   /* 无 token=Create+Modify；有 token=Modify */
     { "operatePtzPatrol",onvif_map_operatePtzPatrol},/* -> OperatePresetTour    */
     { "removePtzPatrol", onvif_map_removePtzPatrol },/* -> RemovePresetTour     */
 
@@ -67,7 +67,7 @@ const onvif_map_entry_t g_onvif_map_table[] = {
     /* ---- §8 Motion activity zone (CellMotionDetector) ------------------ */
     { "X_NightOwl_getChannelActivityZoneTypes",   onvif_map_X_NightOwl_getChannelActivityZoneTypes },   /* -> GetRules 含 Motion → pixelChange */
     { "X_NightOwl_getChannelTriggerActivityZone", onvif_map_X_NightOwl_getChannelTriggerActivityZone }, /* -> GetRules(CellMotion) */
-    { "X_NightOwl_setChannelTriggerActivityZone", onvif_map_X_NightOwl_setChannelTriggerActivityZone }, /* -> Create/DeleteRules  */
+    { "X_NightOwl_setChannelTriggerActivityZone", onvif_map_X_NightOwl_setChannelTriggerActivityZone }, /* -> ModifyRules(CellMotion) */
 };
 
 const int g_onvif_map_table_len =

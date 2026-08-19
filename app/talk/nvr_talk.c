@@ -1,5 +1,6 @@
 /***************************************************************************************
  *  nvr_talk.c — 本机 127.0.0.1:7000 收 App 音频，转发到相机（NOP:7000 / ONVIF backchannel）。
+ *  App startSpeaker URL = tcp://iotc-tunnel:7000/speaker；POST 后不回 HTTP。
  ***************************************************************************************/
 #include "nvr_talk.h"
 #include "nvr_onvif.h"
@@ -22,6 +23,7 @@
 
 #define TALK_MAX_CH 32
 #define TALK_G711_PT 160   /* 20ms @ 8kHz */
+#define TALK_IDLE_S  20    /* 文档：20s 无数据关连接 */
 
 enum { CODEC_PCM = 0, CODEC_U = 1, CODEC_A = 2 };
 
@@ -54,6 +56,7 @@ struct nvr_talk {
     pthread_mutex_t lock;
     talk_ch_t ch[TALK_MAX_CH];
     int last_chn;
+    int sess_fd;           /* 同时只一会话；>=0 时拒新连接 */
     nvr_talk_enh_fn on_enh;
     void *on_enh_ud;
 };
@@ -572,6 +575,24 @@ static int fwd_audio(talk_ch_t *c, const uint8_t *data, int len)
 
 typedef struct { nvr_talk_t *t; int fd; } cli_arg_t;
 
+/* URI: /speaker/chN 、/chN ；/cgi-bin/speaker、/speaker、/tutkmty/speaker 用 last_chn。 */
+static int talk_uri_chn(const char *uri)
+{
+    const char *p;
+    if (!uri || !uri[0]) return -1;
+    p = strstr(uri, "/ch");
+    if (p && p[3] >= '1' && p[3] <= '9')
+        return atoi(p + 3) - 1;
+    return -1;
+}
+
+static void talk_sess_clear(nvr_talk_t *t, int fd)
+{
+    pthread_mutex_lock(&t->lock);
+    if (t->sess_fd == fd) t->sess_fd = -1;
+    pthread_mutex_unlock(&t->lock);
+}
+
 static void *client_thread(void *arg)
 {
     cli_arg_t *ca = arg;
@@ -579,12 +600,17 @@ static void *client_thread(void *arg)
     int fd = ca->fd;
     free(ca);
 
+    {
+        struct timeval tv = { TALK_IDLE_S, 0 };
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
+
     char buf[4096];
     size_t n = 0;
     int hdr_done = 0, chn = -1;
     while (n < sizeof(buf) - 1 && !hdr_done) {
         ssize_t r = recv(fd, buf + n, sizeof(buf) - 1 - n, 0);
-        if (r <= 0) { close(fd); return NULL; }
+        if (r <= 0) { talk_sess_clear(t, fd); close(fd); return NULL; }
         n += (size_t)r;
         buf[n] = 0;
         if (strstr(buf, "\r\n\r\n")) hdr_done = 1;
@@ -598,14 +624,14 @@ static void *client_thread(void *arg)
     if (hdr_done == 1) {
         char uri[256] = {0};
         sscanf(buf, "%*s %255s", uri);
-        const char *p = strstr(uri, "/ch");
-        if (p) chn = atoi(p + 3) - 1;
+        chn = talk_uri_chn(uri);
         char *body = strstr(buf, "\r\n\r\n");
         if (body) {
             body += 4;
             audio = (const uint8_t *)body;
             audio_len = (int)(n - (size_t)(body - buf));
         }
+        /* 文档：收到 POST 后不回 HTTP，保持 TCP 等音频。 */
     }
     pthread_mutex_lock(&t->lock);
     if (chn < 0 || chn >= TALK_MAX_CH || !t->ch[chn].active)
@@ -614,7 +640,7 @@ static void *client_thread(void *arg)
     if (chn >= 0 && chn < TALK_MAX_CH && t->ch[chn].active)
         local = t->ch[chn];
     pthread_mutex_unlock(&t->lock);
-    if (!local.active) { close(fd); return NULL; }
+    if (!local.active) { talk_sess_clear(t, fd); close(fd); return NULL; }
     local.cam_fd = -1; local.bc = NULL;
 
     if (audio_len > 0) fwd_audio(&local, audio, audio_len);
@@ -624,6 +650,7 @@ static void *client_thread(void *arg)
         if (fwd_audio(&local, (const uint8_t *)buf, (int)r) != 0) break;
     }
     ch_close_cam(&local);
+    talk_sess_clear(t, fd);
     close(fd);
     return NULL;
 }
@@ -637,11 +664,20 @@ static void *listen_thread(void *arg)
         if (select(t->listen_fd + 1, &rf, NULL, NULL, &tv) <= 0) continue;
         int cfd = accept(t->listen_fd, NULL, NULL);
         if (cfd < 0) continue;
+        pthread_mutex_lock(&t->lock);
+        if (t->sess_fd >= 0) {          /* 已有会话：拒新连接 */
+            pthread_mutex_unlock(&t->lock);
+            close(cfd);
+            continue;
+        }
+        t->sess_fd = cfd;
+        pthread_mutex_unlock(&t->lock);
         cli_arg_t *ca = malloc(sizeof(*ca));
-        if (!ca) { close(cfd); continue; }
+        if (!ca) { talk_sess_clear(t, cfd); close(cfd); continue; }
         ca->t = t; ca->fd = cfd;
         pthread_t th;
         if (pthread_create(&th, NULL, client_thread, ca) != 0) {
+            talk_sess_clear(t, cfd);
             close(cfd); free(ca); continue;
         }
         pthread_detach(th);
@@ -656,6 +692,7 @@ int nvr_talk_init(int listen_port, nvr_talk_t **out)
     if (!t) return -1;
     t->listen_port = listen_port > 0 ? listen_port : NVR_TALK_PORT;
     t->last_chn = -1;
+    t->sess_fd = -1;
     for (int i = 0; i < TALK_MAX_CH; i++) t->ch[i].cam_fd = -1;
     t->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (t->listen_fd < 0) { free(t); return -1; }
@@ -720,8 +757,7 @@ int nvr_talk_start(nvr_talk_t *t, int chn0, int backend,
     t->last_chn = chn0;
     pthread_mutex_unlock(&t->lock);
     if (url_out && url_cap > 0)
-        snprintf(url_out, url_cap, "https://iotc-tunnel:%d/speaker/ch%d",
-                 t->listen_port, chn0 + 1);
+        snprintf(url_out, url_cap, "tcp://iotc-tunnel:%d/speaker", t->listen_port);
     NVR_LOGI("talk", "ch%d start backend=%s ip=%s codec=%s",
              chn0, backend == NVR_BACKEND_NOP ? "NOP:7000" : "ONVIF-BC", ip,
              codec && codec[0] ? codec : "g711u");

@@ -338,7 +338,15 @@ static void parse_spots(const nop_json_t *arr, nop_onvif_tour_t *t)
         if (!sp) continue;
         snprintf(os->preset_token, sizeof(os->preset_token), "%s",
                  nop_json_str(sp, "presetToken", ""));
-        os->dwell_s = (int)nop_json_num(sp, "dwellTime", 5);
+        if (!os->preset_token[0]) {
+            /* 兼容旧栏位 preset（字符串 token，不是 HAL 数字下标）。 */
+            snprintf(os->preset_token, sizeof(os->preset_token), "%s",
+                     nop_json_str(sp, "preset", ""));
+        }
+        if (!os->preset_token[0])
+            continue;
+        os->dwell_s = (int)nop_json_num(sp, "dwellTime",
+                                        nop_json_num(sp, "dwell", 5));
         t->spot_count++;
     }
 }
@@ -368,7 +376,8 @@ nop_status_t onvif_map_getPtzPatrols(nop_onvif_map_backend_t *be, int ch,
         nop_json_t *e = nop_json_obj();
         nop_json_t *spots = nop_json_arr();
         nop_json_add_str(e, "token", tours[i].token);
-        nop_json_add_str(e, "name", tours[i].name);
+        if (tours[i].name[0])
+            nop_json_add_str(e, "name", tours[i].name);
         nop_json_add_str(e, "status", tour_status_to_nop(tours[i].status));
         nop_json_add_bool(e, "autoStart", tours[i].auto_start != 0);
         for (k = 0; k < tours[i].spot_count; k++) {
@@ -419,6 +428,8 @@ nop_status_t onvif_map_setPtzPatrol(nop_onvif_map_backend_t *be, int ch,
 
     token     = nop_json_str(req->args, "token", NULL);
     has_token = (token && token[0]);
+    if (!nop_json_has(req->args, "spots") || !nop_json_is_arr(nop_json_get(req->args, "spots")))
+        return NOP_ERR_PARAM;
 
     s = onvif_session_begin(be, ch);
     if (!s) return ptz_ext_fail(resp, "onvif_not_connected");
@@ -431,8 +442,7 @@ nop_status_t onvif_map_setPtzPatrol(nop_onvif_map_backend_t *be, int ch,
 
     memset(&tour, 0, sizeof(tour));
     if (has_token) {
-        /* Update: seed from the current tour so absent name/autoStart/spots keep
-         * their present values (ModifyPresetTour is a full overwrite). */
+        /* 有 token：全量 ModifyPresetTour。name/autoStart 缺席则保持现值。 */
         nop_onvif_tour_t cur[PTZ_MAX_TOURS];
         int nt = nop_onvif_ptz_get_tours(dev, profile, cur, PTZ_MAX_TOURS);
         int i, found = 0;
@@ -444,7 +454,7 @@ nop_status_t onvif_map_setPtzPatrol(nop_onvif_map_backend_t *be, int ch,
         }
         snprintf(tour.token, sizeof(tour.token), "%s", token);
     } else {
-        /* Create: obtain a device-assigned token, then fill + Modify. */
+        /* 无 token：CreatePresetTour 拿设备 token，再 Modify 写入 name/spots。 */
         if (nop_onvif_ptz_create_tour(dev, profile, created, sizeof(created)) != 0) {
             const char *e = ptz_ext_soap(dev);
             onvif_session_end(be);
@@ -457,12 +467,13 @@ nop_status_t onvif_map_setPtzPatrol(nop_onvif_map_backend_t *be, int ch,
         snprintf(tour.name, sizeof(tour.name), "%s", nop_json_str(req->args, "name", ""));
     if (nop_json_has(req->args, "autoStart"))
         tour.auto_start = nop_json_bool(req->args, "autoStart", false) ? 1 : 0;
-    if (nop_json_has(req->args, "spots"))
-        parse_spots(nop_json_get(req->args, "spots"), &tour);
+    parse_spots(nop_json_get(req->args, "spots"), &tour);
     tour.status[0] = '\0';                       /* status is get-only, never sent */
 
     if (nop_onvif_ptz_modify_tour(dev, profile, &tour) != 0) {
         const char *e = ptz_ext_soap(dev);
+        if (!has_token && tour.token[0])
+            nop_onvif_ptz_remove_tour(dev, profile, tour.token);
         onvif_session_end(be);
         return ptz_ext_fail(resp, e);
     }

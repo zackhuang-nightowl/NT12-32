@@ -7,8 +7,8 @@
 #include "nvr_identity.h"
 #include "nvr_log.h"
 #include "nvr_netime.h"
-#include "nvr_tutk.h"
 #include "nvr_ble.h"
+#include "nvr_gui_notify.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -150,6 +150,21 @@ char *cmd_set_datetime(cJSON *a, const nvr_cmd_ctx_t *c)
     NVR_LOGI("router", "set_datetime date='%s' time='%s' → epoch=%lld", date, tmv, (long long)epoch);
     return nvr_resp_ok();
 }
+/* App GET:与 set_datetime 同为 UTC 墙钟(gmtime),不是 cap 软时钟。 */
+char *cmd_get_datetime(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a; (void)c;
+    time_t now = time(NULL);
+    struct tm g;
+    gmtime_r(&now, &g);
+    char date[16], clock_str[16];
+    snprintf(date, sizeof(date), "%04d%02d%02d", g.tm_year + 1900, g.tm_mon + 1, g.tm_mday);
+    snprintf(clock_str, sizeof(clock_str), "%02d%02d%02d", g.tm_hour, g.tm_min, g.tm_sec);
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "date", date);
+    cJSON_AddStringToObject(o, "time", clock_str);
+    return nvr_resp_content(o);
+}
 /* 自动授时开关(协议 X_NightOwl_setTimeSyncSwitch):enable=true→自动 NTP;false→手动(不跑 NTP,
  * 不覆盖手动设的时间)。之前只存 SDK 内存变量、没连 NTP;此处落库并真正门控 NTP。 */
 char *cmd_X_NightOwl_setTimeSyncSwitch(cJSON *a, const nvr_cmd_ctx_t *c)
@@ -272,7 +287,6 @@ char *cmd_X_NightOwl_updateP2PCredential(cJSON *a, const nvr_cmd_ctx_t *c)
     /* 写回数据分区 tutkdata.json(IOTCKey + AVKey),持久且对齐 ODC。 */
     (void)c;
     (void)nvr_identity_set_tutk_creds(auth, av);
-    (void)nvr_tutk_update_authkey(auth);
 
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "func", "X_NightOwl_updateP2PCredential");
@@ -310,7 +324,28 @@ char *cmd_X_NightOwl_loginUser(cJSON *a, const nvr_cmd_ctx_t *c)
         cJSON_Delete(o);
         return nvr_resp_err("auth_failed");
     }
+    nvr_gui_set_ui_unlocked(1);
     return nvr_resp_content(o);
+}
+
+/* App/BLE:仅已登录(GUI 会话 / loginUser / notifyLoginSuccess / 向导解锁)才 200;否则 403。 */
+char *cmd_X_NightOwl_unlock(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    nvr_owner_row_t ow;
+    int allowed = nvr_gui_ui_unlocked();
+    (void)a;
+    memset(&ow, 0, sizeof(ow));
+    if (!allowed && c && c->settings &&
+        nvr_settings_owner_get(c->settings, &ow) == 0 && ow.owner_id[0])
+        allowed = 1;   /* App 已绑定 owner,P2P 会话视为已登录 */
+    if (!allowed)
+        return nvr_resp_status(403, "Forbidden");
+    nvr_gui_set_ui_unlocked(1);
+    {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "func", "X_NightOwl_unlock");
+        return nvr_resp_content(o);
+    }
 }
 
 /* 远程访问(BLE+P2P)开关:仅本地 admin 可控;绑 NOP 账户后固定打开 */
@@ -405,9 +440,53 @@ char *cmd_setIotcAuthKey(cJSON *a, const nvr_cmd_ctx_t *c)
     /* 写回数据分区(持久,重启不丢);仅改 IOTCKey,保留 AvPassword。 */
     if (nvr_identity_set_tutk_creds(value, NULL) != 0)
         return nvr_resp_err("persist_failed");
-    (void)nvr_tutk_update_authkey(value);   /* 进程内热更新 */
     NVR_LOGI("router", "setIotcAuthKey → %.8s", value);
     return nvr_resp_ok();
+}
+
+char *cmd_setAvPassword(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)c;
+    const char *value = nvr_jstr(a, "value", NULL);
+    if (!value || !value[0] || strlen(value) > 32)
+        return nvr_resp_err("invalid_param");
+    if (nvr_identity_set_tutk_creds(NULL, value) != 0)
+        return nvr_resp_err("persist_failed");
+    NVR_LOGI("router", "setAvPassword");
+    return nvr_resp_ok();
+}
+
+char *cmd_setIotcUID(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)c;
+    const char *value = nvr_jstr(a, "value", NULL);
+    if (!value || !value[0] || strlen(value) > 63)
+        return nvr_resp_err("invalid_param");
+    if (nvr_identity_set_uid(value) != 0)
+        return nvr_resp_err("persist_failed");
+    NVR_LOGI("router", "setIotcUID → %s", value);
+    return nvr_resp_ok();
+}
+
+char *cmd_notifyLoginSuccess(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a; (void)c;
+    nvr_gui_set_ui_unlocked(1);
+    NVR_LOGI("router", "notifyLoginSuccess");
+    return nvr_resp_ok();
+}
+
+char *cmd_notifySessionCount(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)c;
+    NVR_LOGI("router", "notifySessionCount value=%s", nvr_jstr(a, "value", ""));
+    return nvr_resp_ok();
+}
+
+char *cmd_getNotificationSetting(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a; (void)c;
+    return nvr_resp_not_support();   /* agent 启动引导:501 = 无内置推送配置 */
 }
 
 /* ---- ODC TUTK agent(AVAPIs_Server_CLI)启动引导:cgi 会向 :6061 拉取这些值 ---- */
@@ -442,7 +521,9 @@ char *cmd_getAvAccount(cJSON *a, const nvr_cmd_ctx_t *c)
 char *cmd_getProfile(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     (void)a; (void)c;
-    FILE *fp = fopen("/dvr/tutk_cloud_agent/profile.txt", "rb");
+    const char *paths[] = { "/tmp/tutk_profile.txt", "/dvr/tutk_cloud_agent/profile.txt" };
+    FILE *fp = NULL;
+    for (int i = 0; i < 2 && !fp; i++) fp = fopen(paths[i], "rb");
     if (!fp) return nvr_resp_not_support();
     fseek(fp, 0, SEEK_END); long n = ftell(fp); fseek(fp, 0, SEEK_SET);
     if (n <= 0 || n > 65536) { fclose(fp); return nvr_resp_not_support(); }

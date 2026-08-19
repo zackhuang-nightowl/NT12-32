@@ -85,6 +85,11 @@
 |---|---|---|---|
 | `upgradeFirmware` | 触发固件升级 | `cmd_upgradeFirmware` | ✅ |
 | `checkFirmwareUpgradeStatus` | 升级进度查询 | `cmd_checkFirmwareUpgradeStatus` | ✅ |
+| `GUI_checkServerFirmware` | 查 OTA 服务器是否有新 NVR 固件 | `cmd_GUI_checkServerFirmware` | ✅ |
+| `GUI_checkChannelServerFirmware` | 查通道相机是否有新固件 | `cmd_GUI_checkChannelServerFirmware` | ✅ |
+| `GUI_upgradeChannelFirmware` | U 盘文件升级通道相机 | `cmd_GUI_upgradeChannelFirmware` | ✅ |
+| `X_NightOwl_upgradeChannelFirmware` | NVR 下载后下推通道相机 | `cmd_X_NightOwl_upgradeChannelFirmware` | ✅ |
+| `X_NightOwl_checkChannelUpgradeStatus` | 通道升级状态 0–4 | `cmd_X_NightOwl_checkChannelUpgradeStatus` | ✅ |
 
 ### 8. 事件查询 —— 实现:[nvr_cmd_event.c](../app/router/nvr_cmd_event.c)
 底层:`rsdk` 录像索引(`rsdk_group_query`)

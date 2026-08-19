@@ -33,7 +33,7 @@
 | `getDeviceInfo` | ✔ | NVR 身份(SN/MAC/型号/FW) | 工厂区 + 设置库 |
 | `X_NightOwl_getDeviceCapabilities` | ✔ | NVR 聚合 device+channels 能力 | 含 `cloudRecording` |
 | `getName` / `GUI_getSysDisplay` / `GUI_getFeatureList` | ✔ | 设置库 / 静态列表 | |
-| `getIotcAuthKey` / `setIotcAuthKey` / `GUI_getUID` | ✔ | 设置库 `tutk.authkey` / `tutk.uid` | set 后 `nvr_app` 热更新或重启 TUTK |
+| `getIotcAuthKey` / `setIotcAuthKey` / `getAvPassword` / `setAvPassword` / `getIotcUID` / `GUI_getUID` | ✔ | `/User` 身份（`nvr_identity`） | 出厂 AuthKey=`00000000` AvPwd=`888888`；set 写回 tutkdata.json |
 | `GUI_getAutoRebootSetting` / `GUI_setAutoRebootSetting` | ✔ | 设置库 KV | 周维护 |
 | `GUI_getSystemLog` / `getLog` | 待做 | NVR 日志 | cap 空页 |
 
@@ -127,7 +127,7 @@
 | 音频告警：`get/setChannelAudioAlert(Switch|DetectSwitch)` | ✔ nopOnvif POST | 上线 GET 探测 → `audioAlert`；通用 ONVIF 501 |
 | 一键报警：`get/setPanicSwitch` | ✔ nopOnvif POST | 设备侧无 channel；NVR 用 channel 选机后剥掉 |
 | AI 传感器：`get/setChannelSensorConfig` / `getChannelSensorLinkage` | ~ | §8/§9 AI 映射 |
-| 活动区域：`X_NightOwl_getChannelActivityZoneTypes` / `getChannelTriggerActivityZone` | ✔ | NOP 透传；失败则 mapping。Types：GetRules 含 Motion → `triggers:["pixelChange"]`；Trigger 走 CellMotion |
+| 活动区域：`X_NightOwl_getChannelActivityZoneTypes` / `get/setChannelTriggerActivityZone` | ✔ | NOP 先透传；失败则 CellMotion mapping。Types：GetRules 含 Motion → `triggers:["pixelChange"]`；SET 对已有规则 ModifyRules |
 | 媒体档：`GUI_getChannelMediaProfiles`(相机档)/ `getProfile` | ? | 区分 NVR 档 vs 相机档 |
 
 > ⚠️ 注意易混：`getChannel*` 里既有**相机设置**（→PASSTHRU/TRANSLATE，如 SensorConfig/FloodLight/
@@ -142,4 +142,4 @@
 - 2026-08-11：**§A7 网络/时间整机命令** — `nvr_netime.c` 读 Linux 本地系统、写 BusyBox（对齐 na51090 SDK `S10_Net`/`default.script`）；`nvr_cmd_network.c` 接 LOCAL handler；UPnP/PoE/SMTP 测试由 cap 回落改为真实实现。详见 [修改日志.md](修改日志.md)「2026-08-11 · 网络 LOCAL 实现」。
 - 2026-08-12：**WAN/LAN 带宽** — `GUI_getWanInterface`/`getWanInterface` 读 `/sys/class/net` 实时链路；`GUI_getLanInterface` 读 eth0 `speed` 返回 `totalPhysicalBandwidth`/`maxRxBandwidth`；其余网络子项（allocated 带宽、DDNS 客户端、FTP 服务、Email SSL/自动发信、UPnP 映射、PoE PowerUsed、RemoteAccess↔TUTK 等）登记为**待实现**。
 - 2026-08-18：**nopOnvif 私有 NOP** — 白灯/警笛/Panic/激活走发现口 `/APPJsonCmd`；上线 GET 探测 `light`/`audioAlert`；`get/setDeviceActive` 移出 LOCAL 表。
-- 2026-08-18：**活动区域** — `getChannelActivityZoneTypes` / `getChannelTriggerActivityZone` NOP 透传失败回落 mapping；Types 仅 GetRules 含 Motion 才报 `pixelChange`。
+- 2026-08-19：**活动区域 SET** — `setChannelTriggerActivityZone` ModifyRules 已有 CellMotion（不删建）。NOP 先透传，失败再 mapping。

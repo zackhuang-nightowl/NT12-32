@@ -25,6 +25,7 @@ extern "C" {
 }
 
 #include <string.h>
+#include <stdio.h>
 
 /* nop_onvif_device_t layout mirrors onvif_adapter.cpp's definition: the opaque
  * handle is a thin wrapper around the vendored ONVIF_DEVICE. */
@@ -217,9 +218,20 @@ int nop_onvif_ptz_modify_tour(nop_onvif_device_t *device, const char *profile_to
     strncpy(pt->token, tour->token, sizeof(pt->token) - 1);
     strncpy(pt->Name, tour->name, sizeof(pt->Name) - 1);
     pt->AutoStart = tour->auto_start ? TRUE : FALSE;
+    /* Spec §2: StartingCondition 默认 Forward、非随机。不设 DirectionFlag 时
+     * Happytime 仍会打空 StartingCondition，部分相机会拒 Modify。 */
+    pt->StartingCondition.DirectionFlag = 1;
+    pt->StartingCondition.Direction = PTZPresetTourDirection_Forward;
+    pt->StartingCondition.RandomPresetOrderFlag = 1;
+    pt->StartingCondition.RandomPresetOrder = FALSE;
     for (int i = 0; i < tour->spot_count; i++) {
-        PTZPresetTourSpotList *sl = onvif_add_PTZPresetTourSpot(&pt->TourSpot);
+        PTZPresetTourSpotList *sl;
+        if (!tour->spots[i].preset_token[0])
+            continue;
+        sl = onvif_add_PTZPresetTourSpot(&pt->TourSpot);
         if (!sl) break;
+        /* Happytime 组 XML 看 PresetTokenFlag；只 strncpy 不会带上 PresetToken。 */
+        sl->PTZPresetTourSpot.PresetDetail.PresetTokenFlag = 1;
         strncpy(sl->PTZPresetTourSpot.PresetDetail.PresetToken, tour->spots[i].preset_token,
                 sizeof(sl->PTZPresetTourSpot.PresetDetail.PresetToken) - 1);
         sl->PTZPresetTourSpot.StayTimeFlag = 1;
@@ -513,11 +525,12 @@ int nop_onvif_media2_delete_osd(nop_onvif_device_t *device, const char *token)
 /* §3 Media — Media2 VideoEncoder                                           */
 /* ======================================================================== */
 
-/* Scan a range string ("1-500" or "30 25 15 1") for its min & max integers. */
-static void parse_int_minmax(const char *s, int *lo, int *hi)
+/* Scan a range/list string ("1 500" or "30 25 15 1") for its min & max.
+ * @return 1 if at least one integer was found. */
+static int parse_int_minmax(const char *s, int *lo, int *hi)
 {
     int have = 0, v, sign;
-    if (!s) return;
+    if (!s) return 0;
     while (*s) {
         if (*s == '-' && (s[1] >= '0' && s[1] <= '9')) { sign = -1; s++; }
         else if (*s >= '0' && *s <= '9') sign = 1;
@@ -527,6 +540,31 @@ static void parse_int_minmax(const char *s, int *lo, int *hi)
         v *= sign;
         if (!have) { *lo = *hi = v; have = 1; }
         else { if (v < *lo) *lo = v; if (v > *hi) *hi = v; }
+    }
+    return have;
+}
+
+static void opts_from_onvif(nop_onvif_venc_opts_t *out,
+                            const onvif_VideoEncoder2ConfigurationOptions *o)
+{
+    int i;
+    out->quality_min = (int)o->QualityRange.Min;
+    out->quality_max = (int)o->QualityRange.Max;
+    out->have_quality = (o->QualityRange.Min != 0.0f || o->QualityRange.Max != 0.0f);
+    out->bitrate_min = o->BitrateRange.Min;
+    out->bitrate_max = o->BitrateRange.Max;
+    out->have_bitrate = (o->BitrateRange.Min != 0 || o->BitrateRange.Max != 0);
+    if (o->GovLengthRangeFlag || o->GovLengthRange[0])
+        out->have_gov = parse_int_minmax(o->GovLengthRange, &out->gov_min, &out->gov_max);
+    if (o->FrameRatesSupportedFlag || o->FrameRatesSupported[0])
+        out->have_fps = parse_int_minmax(o->FrameRatesSupported, &out->fps_min, &out->fps_max);
+    out->res_count = 0;
+    for (i = 0; i < MAX_RES_NUMS && out->res_count < NOP_ONVIF_VENC_MAX_RES; i++) {
+        if (o->ResolutionsAvailable[i].Width <= 0)
+            break;
+        out->res_w[out->res_count] = o->ResolutionsAvailable[i].Width;
+        out->res_h[out->res_count] = o->ResolutionsAvailable[i].Height;
+        out->res_count++;
     }
 }
 
@@ -569,6 +607,7 @@ int nop_onvif_media2_get_vencs(nop_onvif_device_t *device,
 
 int nop_onvif_media2_get_venc_options(nop_onvif_device_t *device,
                                       const char *config_token,
+                                      const char *encoding,
                                       nop_onvif_venc_opts_t *out)
 {
     if (!device || !config_token || !out)
@@ -585,27 +624,23 @@ int nop_onvif_media2_get_venc_options(nop_onvif_device_t *device,
     if (!onvif_tr2_GetVideoEncoderConfigurationOptions(&device->dev, &req, &res))
         return -2;
 
-    int rc = -3;
-    if (res.Options) {
-        const onvif_VideoEncoder2ConfigurationOptions *o = &res.Options->Options;
-        int i;
-        out->quality_min = (int)o->QualityRange.Min;
-        out->quality_max = (int)o->QualityRange.Max;
-        out->bitrate_min = o->BitrateRange.Min;
-        out->bitrate_max = o->BitrateRange.Max;
-        parse_int_minmax(o->GovLengthRange, &out->gov_min, &out->gov_max);
-        parse_int_minmax(o->FrameRatesSupported, &out->fps_min, &out->fps_max);
-        for (i = 0; i < MAX_RES_NUMS && out->res_count < NOP_ONVIF_VENC_MAX_RES; i++) {
-            if (o->ResolutionsAvailable[i].Width <= 0)
+    const VideoEncoder2ConfigurationOptionsList *pick = NULL;
+    const VideoEncoder2ConfigurationOptionsList *first = res.Options;
+    if (encoding && encoding[0]) {
+        for (const VideoEncoder2ConfigurationOptionsList *l = res.Options; l; l = l->next) {
+            if (!strcmp(l->Options.Encoding, encoding)) {
+                pick = l;
                 break;
-            out->res_w[out->res_count] = o->ResolutionsAvailable[i].Width;
-            out->res_h[out->res_count] = o->ResolutionsAvailable[i].Height;
-            out->res_count++;
+            }
         }
-        rc = 0;
     }
+    if (!pick)
+        pick = first;
+
+    if (pick)
+        opts_from_onvif(out, &pick->Options);
     onvif_free_VideoEncoder2ConfigurationOptions(&res.Options);
-    return rc;
+    return pick ? 0 : -3;
 }
 
 int nop_onvif_media2_set_venc(nop_onvif_device_t *device, const nop_onvif_venc_t *c)
@@ -665,24 +700,31 @@ static char *build_geom_xml(int is_line, const float *xs, const float *ys, int n
     return buf;
 }
 
-/* Build "<tt:ClassFilter>...<tt:Type>Human</tt:Type>...</tt:ClassFilter>". */
-static char *build_class_xml(const char *csv)
+static int parse_bool_str(const char *v)
 {
-    char  *buf = (char *)malloc(64 + strlen(csv) * 4);
-    int    off;
-    const char *p = csv;
-    if (!buf) return NULL;
-    off = snprintf(buf, 32, "<tt:ClassFilter>");
-    while (*p) {
-        const char *comma = strchr(p, ',');
-        int len = comma ? (int)(comma - p) : (int)strlen(p);
-        if (len > 0)
-            off += snprintf(buf + off, 32 + len, "<tt:Type>%.*s</tt:Type>", len, p);
-        if (!comma) break;
-        p = comma + 1;
-    }
-    snprintf(buf + off, 32, "</tt:ClassFilter>");
-    return buf;
+    if (!v || !v[0]) return 1;
+    if (v[0] == '0' || v[0] == 'f' || v[0] == 'F' || v[0] == 'n' || v[0] == 'N')
+        return 0;
+    return 1;
+}
+
+/* CSV "Human,Vehicle" → SimpleItem StringList "Human Vehicle". */
+static void csv_to_spaces(const char *csv, char *out, int size)
+{
+    int i;
+    if (!csv || !out || size <= 0) return;
+    for (i = 0; csv[i] && i < size - 1; i++)
+        out[i] = (csv[i] == ',') ? ' ' : csv[i];
+    out[i] = '\0';
+}
+
+static SimpleItemList *add_simple(onvif_ItemList *params, const char *name, const char *value)
+{
+    SimpleItemList *si = onvif_add_SimpleItem(&params->SimpleItem);
+    if (!si) return NULL;
+    strncpy(si->SimpleItem.Name, name, sizeof(si->SimpleItem.Name) - 1);
+    strncpy(si->SimpleItem.Value, value, sizeof(si->SimpleItem.Value) - 1);
+    return si;
 }
 
 /* Pull "x=\"..\" y=\"..\"" pairs out of a geometry XML fragment. */
@@ -918,12 +960,16 @@ static int resolve_from_media2_list(MediaProfileList *head, const char *source_t
                                     nop_onvif_source_tokens_t *out)
 {
     char target[100] = "";
-    int found = 0, main_area = -1, sub_area = -1;
+    char sub_profile[100] = "";
+    char ptz_profile[100] = "";
+    int found = 0, main_area = -1, venc_sub = -1;
+    int sub_area = 0x7fffffff, ptz_area = 0x7fffffff, ana_area = 0x7fffffff;
     if (source_token && source_token[0])
         strncpy(target, source_token, sizeof(target) - 1);
     for (MediaProfileList *p = head; p; p = p->next) {
         onvif_MediaProfile *mp = &p->MediaProfile;
         const char *src;
+        int area = 0;
         if (!mp->Configurations.VideoSourceFlag)
             continue;
         src = mp->Configurations.VideoSource.SourceToken;
@@ -933,19 +979,37 @@ static int resolve_from_media2_list(MediaProfileList *head, const char *source_t
             continue;
         if (!found) {
             strncpy(out->source_token, src, sizeof(out->source_token) - 1);
-            strncpy(out->profile, mp->token, sizeof(out->profile) - 1);
             strncpy(out->vsc_token, mp->Configurations.VideoSource.token,
                     sizeof(out->vsc_token) - 1);
             found = 1;
         }
-        if (mp->Configurations.AnalyticsFlag && out->analytics_cfg[0] == '\0')
-            strncpy(out->analytics_cfg, mp->Configurations.Analytics.token,
-                    sizeof(out->analytics_cfg) - 1);
         if (mp->Configurations.VideoEncoderFlag) {
             const onvif_VideoEncoder2Configuration *ve = &mp->Configurations.VideoEncoder;
-            resolve_rank_venc(out, ve->token, ve->Resolution.Width * ve->Resolution.Height,
-                              &main_area, &sub_area);
+            area = ve->Resolution.Width * ve->Resolution.Height;
+            resolve_rank_venc(out, ve->token, area, &main_area, &venc_sub);
         }
+        /* 子码流 = 该源最低分辨率 Profile（无编码器当 0，优先当子）。 */
+        if (area < sub_area) {
+            sub_area = area;
+            strncpy(sub_profile, mp->token, sizeof(sub_profile) - 1);
+        }
+        /* PTZ：在带 PTZ 的 Profile 里取最低分辨率（NightOwl 约定子码流绑 PTZ）。 */
+        if (mp->Configurations.PTZFlag && area < ptz_area) {
+            ptz_area = area;
+            strncpy(ptz_profile, mp->token, sizeof(ptz_profile) - 1);
+        }
+        /* Analytics：同样取该源最低分辨率上带 Analytics 的。 */
+        if (mp->Configurations.AnalyticsFlag && area < ana_area) {
+            ana_area = area;
+            strncpy(out->analytics_cfg, mp->Configurations.Analytics.token,
+                    sizeof(out->analytics_cfg) - 1);
+        }
+    }
+    if (found) {
+        if (ptz_profile[0])
+            strncpy(out->profile, ptz_profile, sizeof(out->profile) - 1);
+        else if (sub_profile[0])
+            strncpy(out->profile, sub_profile, sizeof(out->profile) - 1);
     }
     return found ? 0 : -1;
 }
@@ -954,11 +1018,15 @@ static int resolve_from_media1_list(ONVIF_PROFILE *head, const char *source_toke
                                     nop_onvif_source_tokens_t *out)
 {
     char target[100] = "";
-    int found = 0, main_area = -1, sub_area = -1;
+    char sub_profile[100] = "";
+    char ptz_profile[100] = "";
+    int found = 0, main_area = -1, venc_sub = -1;
+    int sub_area = 0x7fffffff, ptz_area = 0x7fffffff, ana_area = 0x7fffffff;
     if (source_token && source_token[0])
         strncpy(target, source_token, sizeof(target) - 1);
     for (ONVIF_PROFILE *p = head; p; p = p->next) {
         const char *src;
+        int area = 0;
         if (!p->v_src_cfg)
             continue;
         src = p->v_src_cfg->Configuration.SourceToken;
@@ -970,19 +1038,34 @@ static int resolve_from_media1_list(ONVIF_PROFILE *head, const char *source_toke
             continue;
         if (!found) {
             strncpy(out->source_token, src, sizeof(out->source_token) - 1);
-            strncpy(out->profile, p->token, sizeof(out->profile) - 1);
             strncpy(out->vsc_token, p->v_src_cfg->Configuration.token,
                     sizeof(out->vsc_token) - 1);
             found = 1;
         }
-        if (p->va_cfg && out->analytics_cfg[0] == '\0')
-            strncpy(out->analytics_cfg, p->va_cfg->Configuration.token,
-                    sizeof(out->analytics_cfg) - 1);
         if (p->v_enc_cfg) {
             const onvif_VideoEncoderConfiguration *ve = &p->v_enc_cfg->Configuration;
-            resolve_rank_venc(out, ve->token, ve->Resolution.Width * ve->Resolution.Height,
-                              &main_area, &sub_area);
+            area = ve->Resolution.Width * ve->Resolution.Height;
+            resolve_rank_venc(out, ve->token, area, &main_area, &venc_sub);
         }
+        if (area < sub_area) {
+            sub_area = area;
+            strncpy(sub_profile, p->token, sizeof(sub_profile) - 1);
+        }
+        if (p->ptz_cfg && area < ptz_area) {
+            ptz_area = area;
+            strncpy(ptz_profile, p->token, sizeof(ptz_profile) - 1);
+        }
+        if (p->va_cfg && area < ana_area) {
+            ana_area = area;
+            strncpy(out->analytics_cfg, p->va_cfg->Configuration.token,
+                    sizeof(out->analytics_cfg) - 1);
+        }
+    }
+    if (found) {
+        if (ptz_profile[0])
+            strncpy(out->profile, ptz_profile, sizeof(out->profile) - 1);
+        else if (sub_profile[0])
+            strncpy(out->profile, sub_profile, sizeof(out->profile) - 1);
     }
     return found ? 0 : -1;
 }
@@ -1134,9 +1217,16 @@ int nop_onvif_analytics_get_rules(nop_onvif_device_t *device, const char *config
         memset(r, 0, sizeof(*r));
         strncpy(r->name, c->Name, sizeof(r->name) - 1);
         strncpy(r->type, strip_ns(c->Type), sizeof(r->type) - 1);
+        r->enabled = 1;   /* 无 Enabled 栏位 → 当作开启（兼容第三方相机） */
         for (SimpleItemList *si = c->Parameters.SimpleItem; si; si = si->next) {
-            if (!strcmp(si->SimpleItem.Name, "Direction"))
-                strncpy(r->direction, si->SimpleItem.Value, sizeof(r->direction) - 1);
+            const char *nm = si->SimpleItem.Name;
+            const char *val = si->SimpleItem.Value;
+            if (!strcmp(nm, "Direction"))
+                strncpy(r->direction, val, sizeof(r->direction) - 1);
+            else if (!strcmp(nm, "Enabled"))
+                r->enabled = parse_bool_str(val);
+            else if (!strcmp(nm, "ClassFilter") && !r->class_filter[0])
+                parse_stringlist(val, r->class_filter, sizeof(r->class_filter));
         }
         for (ElementItemList *ei = c->Parameters.ElementItem; ei; ei = ei->next) {
             const char *nm = ei->ElementItem.Name;
@@ -1144,7 +1234,7 @@ int nop_onvif_analytics_get_rules(nop_onvif_device_t *device, const char *config
             if (!any) continue;
             if (strstr(nm, "Segment") || strstr(nm, "Field") || strstr(nm, "Polygon"))
                 r->point_count = parse_points(any, r->x, r->y, NOP_ONVIF_RULE_MAX_PTS);
-            else if (strstr(nm, "ClassFilter") || strstr(nm, "Class"))
+            else if (!r->class_filter[0] && (strstr(nm, "ClassFilter") || strstr(nm, "Class")))
                 parse_classes(any, r->class_filter, sizeof(r->class_filter));
         }
         n++;
@@ -1164,12 +1254,14 @@ static ConfigList *build_rule_config(const nop_onvif_rule_t *r)
     snprintf(c->Type, sizeof(c->Type), "tt:%s", r->type);
 
     int is_line = (strstr(r->type, "Line") != NULL);
-    if (r->direction[0]) {
-        SimpleItemList *si = onvif_add_SimpleItem(&c->Parameters.SimpleItem);
-        if (si) {
-            strncpy(si->SimpleItem.Name, "Direction", sizeof(si->SimpleItem.Name) - 1);
-            strncpy(si->SimpleItem.Value, r->direction, sizeof(si->SimpleItem.Value) - 1);
-        }
+    if (r->direction[0])
+        add_simple(&c->Parameters, "Direction", r->direction);
+    /* NightOwl ■ Enabled：SimpleItem xs:boolean。缺省开启。 */
+    add_simple(&c->Parameters, "Enabled", r->enabled ? "true" : "false");
+    if (r->class_filter[0]) {
+        char spaces[128];
+        csv_to_spaces(r->class_filter, spaces, sizeof(spaces));
+        add_simple(&c->Parameters, "ClassFilter", spaces);
     }
     if (r->point_count > 0) {
         ElementItemList *ei = onvif_add_ElementItem(&c->Parameters.ElementItem);
@@ -1178,14 +1270,6 @@ static ConfigList *build_rule_config(const nop_onvif_rule_t *r)
                     sizeof(ei->ElementItem.Name) - 1);
             ei->ElementItem.AnyFlag = 1;
             ei->ElementItem.Any = build_geom_xml(is_line, r->x, r->y, r->point_count);
-        }
-    }
-    if (r->class_filter[0]) {
-        ElementItemList *ei = onvif_add_ElementItem(&c->Parameters.ElementItem);
-        if (ei) {
-            strncpy(ei->ElementItem.Name, "ClassFilter", sizeof(ei->ElementItem.Name) - 1);
-            ei->ElementItem.AnyFlag = 1;
-            ei->ElementItem.Any = build_class_xml(r->class_filter);
         }
     }
     return list;
@@ -1292,28 +1376,75 @@ int nop_onvif_analytics_set_cellmotion(nop_onvif_device_t *device, const char *c
         return -1;
 
     char b64[NOP_ONVIF_CELLS_MAX_BITS / 8 * 2 + 8];
-    base64_encode((uint8 *)in->active, (uint32)nbytes, b64, (uint32)sizeof(b64));
-
     char sens[16], mincnt[16];
+    base64_encode((uint8 *)in->active, (uint32)nbytes, b64, (uint32)sizeof(b64));
     snprintf(sens, sizeof(sens), "%d", in->sensitivity);
     snprintf(mincnt, sizeof(mincnt), "%d", in->min_count);
 
-    ConfigList *list = NULL;
-    ConfigList *node = onvif_add_Config(&list);
-    if (!node) return -3;
-    onvif_Config *c = &node->Config;
-    strncpy(c->Name, "CellMotion", sizeof(c->Name) - 1);
-    strncpy(c->Type, "tt:CellMotionDetector", sizeof(c->Type) - 1);
-    struct { const char *n, *v; } items[] = {
-        { "Sensitivity", sens }, { "MinCount", mincnt }, { "ActiveCells", b64 },
-    };
-    for (unsigned i = 0; i < sizeof(items) / sizeof(items[0]); i++) {
-        SimpleItemList *si = onvif_add_SimpleItem(&c->Parameters.SimpleItem);
-        if (si) {
-            strncpy(si->SimpleItem.Name, items[i].n, sizeof(si->SimpleItem.Name) - 1);
-            strncpy(si->SimpleItem.Value, items[i].v, sizeof(si->SimpleItem.Value) - 1);
+    tan_GetRules_REQ greq;
+    tan_GetRules_RES gres;
+    memset(&greq, 0, sizeof(greq));
+    memset(&gres, 0, sizeof(gres));
+    strncpy(greq.ConfigurationToken, config_token, sizeof(greq.ConfigurationToken) - 1);
+    if (!onvif_tan_GetRules(&device->dev, &greq, &gres))
+        return -2;
+
+    const onvif_Config *src = NULL;
+    for (ConfigList *l = gres.Rule; l; l = l->next) {
+        if (strstr(l->Config.Type, "CellMotion")) {
+            src = &l->Config;
+            break;
         }
     }
+
+    ConfigList *list = NULL;
+    ConfigList *node = onvif_add_Config(&list);
+    if (!node) {
+        onvif_free_Configs(&gres.Rule);
+        return -3;
+    }
+    onvif_Config *c = &node->Config;
+
+    if (src) {
+        int have_active = 0, have_min = 0, have_sens = 0;
+        strncpy(c->Name, src->Name, sizeof(c->Name) - 1);
+        strncpy(c->Type, src->Type, sizeof(c->Type) - 1);
+        for (SimpleItemList *si = src->Parameters.SimpleItem; si; si = si->next) {
+            const char *nm  = si->SimpleItem.Name;
+            const char *val = si->SimpleItem.Value;
+            if (!strcmp(nm, "ActiveCells")) {
+                val = b64; have_active = 1;
+            } else if (!strcmp(nm, "MinCount")) {
+                val = mincnt; have_min = 1;
+            } else if (!strcmp(nm, "Sensitivity") && in->sensitivity > 0) {
+                val = sens; have_sens = 1;
+            }
+            add_simple(&c->Parameters, nm, val);
+        }
+        if (!have_active) add_simple(&c->Parameters, "ActiveCells", b64);
+        if (!have_min)    add_simple(&c->Parameters, "MinCount", mincnt);
+        if (!have_sens && in->sensitivity > 0)
+            add_simple(&c->Parameters, "Sensitivity", sens);
+
+        tan_ModifyRules_REQ mreq;
+        tan_ModifyRules_RES mres;
+        memset(&mreq, 0, sizeof(mreq));
+        memset(&mres, 0, sizeof(mres));
+        strncpy(mreq.ConfigurationToken, config_token, sizeof(mreq.ConfigurationToken) - 1);
+        mreq.Rule = list;
+        int ok = onvif_tan_ModifyRules(&device->dev, &mreq, &mres) ? 0 : -2;
+        onvif_free_Configs(&mreq.Rule);
+        onvif_free_Configs(&gres.Rule);
+        return ok;
+    }
+
+    strncpy(c->Name, "CellMotion", sizeof(c->Name) - 1);
+    strncpy(c->Type, "tt:CellMotionDetector", sizeof(c->Type) - 1);
+    add_simple(&c->Parameters, "MinCount", mincnt);
+    add_simple(&c->Parameters, "ActiveCells", b64);
+    add_simple(&c->Parameters, "Enabled", "true");
+    if (in->sensitivity > 0)
+        add_simple(&c->Parameters, "Sensitivity", sens);
 
     tan_CreateRules_REQ creq;
     tan_CreateRules_RES cres;
@@ -1323,6 +1454,7 @@ int nop_onvif_analytics_set_cellmotion(nop_onvif_device_t *device, const char *c
     creq.Rule = list;
     int ok = onvif_tan_CreateRules(&device->dev, &creq, &cres) ? 0 : -2;
     onvif_free_Configs(&creq.Rule);
+    onvif_free_Configs(&gres.Rule);
     return ok;
 }
 

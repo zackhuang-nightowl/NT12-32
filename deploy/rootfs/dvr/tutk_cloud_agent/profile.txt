@@ -1,0 +1,331 @@
+{
+  "name": "Night Owl NVR",
+  "model": "NOP12-32",
+  "fwVer": "1.0.0",
+  "hwVer": "V0.0.00.000",
+  "manufacturer": "Night Owl",
+  "contact": {
+    "phone": "XXXX",
+    "address": "XXXX",
+    "email": "XXX"
+  },
+  "type": "videoRecorder",
+  "devicePicture": "https://XXXX",
+  "p2pProtocols": [
+    "iotc-tunnel:8554",
+    "iotc-tunnel:6061",
+    "iotc-tunnel:7000",
+    "iotc-tunnel:8089"
+  ],
+  "nebulaVersion": "1.0",
+  "functionSets": [
+    "liveStreaming",
+    "playback",
+    "authentication",
+    "powerControl",
+    "speaker",
+    "deviceInfo",
+    "ota",
+    "pushNotification",
+    "tunnel",
+    "X_NightOwl_dvrChannelManagement",
+    "X_NightOwl_recording",
+    "X_NightOwl_wifi",
+    "X_NightOwl_dvrChannelManagement"
+  ],
+  "functions": [
+    {
+      "func": "getLiveCapabilities",
+      "return": {
+        "protocol": "Array",
+        "streamType": "Array",
+        "channels": "Array"
+      }
+    },
+    {
+      "func": "startLiveStream",
+      "args": {
+        "channel": "Int",
+        "streamType": "String",
+        "preferProtocol": "Array"
+      },
+      "return": {
+        "url": "String"
+      }
+    },
+    {
+      "func": "getPlaybackCapabilities",
+      "return": {
+        "protocol": "Array",
+        "streamType": "Array",
+        "channels": "Array"
+      }
+    },
+    {
+      "func": "startPlayback",
+      "args": {
+        "channel": "Int",
+        "streamType": "String",
+        "preferProtocol": "Array",
+        "fileName": "String"
+      },
+      "return": {
+        "url": "String"
+      }
+    },
+    {
+      "func": "queryEventList",
+      "args": {
+        "resolution": "String",
+        "startTime": "Long",
+        "endTime": "Long",
+        "eventType": "String",
+        "channel": "Int"
+      },
+      "return": {
+        "list": "Array"
+      }
+    },
+    {
+      "func": "createCredential",
+      "args": {
+        "identity": "String"
+      },
+      "return": {
+        "identity": "String",
+        "psk": "String"
+      }
+    },
+    {
+      "func": "deleteCredential",
+      "args": {
+        "identity": "String"
+      }
+    },
+    {
+      "func": "reboot"
+    },
+    {
+      "func": "getSpeakerCapabilities",
+      "return": {
+        "protocol": "Array",
+        "channels": "Array"
+      }
+    },
+    {
+      "func": "startSpeaker",
+      "args": {
+        "channel": "Int",
+        "preferProtocol": "Array"
+      },
+      "return": {
+        "url": "String"
+      }
+    },
+    {
+      "func": "getDeviceInfo",
+      "return": {
+        "firmwareVersion": "String",
+        "skuNumber": "String",
+        "serialNumber": "String",
+        "mac": "String",
+        "name": "String"
+      }
+    },
+    {
+      "func": "setName",
+      "args": {
+        "name": "String"
+      }
+    },
+    {
+      "func": "getName",
+      "return": {
+        "name": "String"
+      }
+    },
+    {
+      "func": "queryStorageList",
+      "return": {
+        "list": "StringArray"
+      }
+    },
+    {
+      "func": "getStorageInfo",
+      "args": {
+        "value": "String"
+      },
+      "return": {
+        "totalSize": "Int",
+        "freeSize": "Int"
+      }
+    },
+    {
+      "func": "formatStorage",
+      "args": {
+        "value": "String"
+      }
+    },
+    {
+      "func": "upgradeFirmware",
+      "args": {
+        "url": "<query newest FW info url>",
+        "auto": "Boolean"
+      }
+    },
+    {
+      "func": "checkFirmwareUpgradeStatus",
+      "return": {
+        "status": "Int",
+        "fwVer": "String"
+      }
+    },
+    {
+      "func": "writeFirmware"
+    },
+    {
+      "func": "buildTunnel",
+      "args": {
+        "protocol": "String"
+      },
+      "return": {
+        "username": "String",
+        "password": "String"
+      }
+    },
+    {
+      "func": "X_NightOwl_setChannelLightAutoSwitch",
+      "args": {
+        "value": "Boolean",
+        "channel": "Int"
+      }
+    },
+    {
+      "func": "X_NightOwl_getChannelLightAutoSwitch",
+      "args": {
+        "channel": "Int"
+      },
+      "return": {
+        "value": "Boolean"
+      }
+    },
+    {
+      "func": "X_NightOwl_setChannelLightSwitch",
+      "args": {
+        "value": "Boolean",
+        "channel": "Int"
+      }
+    },
+    {
+      "func": "X_NightOwl_setChannelMotionSensitivity",
+      "args": {
+        "sensitivity": "String",
+        "channel": "Int"
+      }
+    },
+    {
+      "func": "X_NightOwl_getChannelMotionSensitivity",
+      "args": {
+        "channel": "Int"
+      },
+      "return": {
+        "sensitivity": "String"
+      }
+    },
+    {
+      "func": "X_NightOwl_setChannelsPushNotificationSwitch",
+      "args": {
+        "channels": "Array"
+      }
+    },
+    {
+      "func": "X_NightOwl_getChannelsPushNotificationSwitch",
+      "return": {
+        "channels": "Array"
+      }
+    },
+    {
+      "func": "X_NightOwl_setInputChannelName",
+      "args": {
+        "name": "String",
+        "channel": "Int"
+      }
+    },
+    {
+      "func": "X_NightOwl_getInputChannelName",
+      "args": {
+        "channel": "Int"
+      },
+      "return": {
+        "name": "String"
+      }
+    },
+    {
+      "func": "X_NightOwl_setChannelRecordingMode",
+      "args": {
+        "mode": "String",
+        "channel": "Int"
+      }
+    },
+    {
+      "func": "X_NightOwl_getChannelRecordingMode",
+      "args": {
+        "channel": "Int"
+      },
+      "return": {
+        "mode": "String"
+      }
+    },
+    {
+      "func": "X_NightOwl_setRecordingScheduleRules",
+      "args": {
+        "channel": "Int",
+        "rules": {
+          "weekdays": "Array",
+          "startTime": "String",
+          "endTime": "String"
+        }
+      }
+    },
+    {
+      "func": "X_NightOwl_getRecordingScheduleRules",
+      "args": {
+        "channel": "Int"
+      },
+      "return": {
+        "rules": {
+          "weekdays": "Array",
+          "startTime": "String",
+          "endTime": "String"
+        }
+      }
+    },
+    {
+      "func": "X_NightOwl_getChannelWifiSignalStrength",
+      "args": {
+        "channel": "Int"
+      },
+      "return": {
+        "strength": "Int"
+      }
+    },
+    {
+      "func": "X_NightOwl_getDeviceCapabilities",
+      "return": {
+        "channels": [
+          {
+            "channel": "Int",
+            "signal": "String",
+            "capabilities": "Array",
+            "light": "Array",
+            "ptz": "Array",
+            "sensor": "Array"
+          }
+        ]
+      }
+    },
+    {
+      "func": "X_NightOwl_resetToFactorySettings"
+    }
+  ]
+}

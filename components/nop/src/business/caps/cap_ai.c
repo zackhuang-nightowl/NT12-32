@@ -262,7 +262,7 @@ static nop_status_t handle_get_trigger_activity_zone(const nop_request_t *reques
                                                      void *handler_context)
 {
     int channel = clamp_channel((int)nop_json_num(request->args, "channel", 1));
-    /* ONVIF 以及 NOP 透传失败回落：先走 mapping。NOTIMPL 才用本机快照。 */
+    /* ONVIF，以及 NOP 透传失败回落：先走 mapping。NOTIMPL 才用本机快照。 */
     {
         nop_status_t rc = nop_onvif_map_dispatch(handler_context, request, response);
         if (rc != NOP_ERR_NOTIMPL)
@@ -286,9 +286,12 @@ static nop_status_t handle_set_trigger_activity_zone(const nop_request_t *reques
     int channel = clamp_channel((int)nop_json_num(request->args, "channel", 1));
     nop_json_t *snapshot;
     nop_json_t *points;
-    if (nop_onvif_map_is_onvif(handler_context, channel))
-        return nop_onvif_map_dispatch(handler_context, request, response);
-    (void)response;
+    /* ONVIF，以及 NOP 透传失败回落：Modify 已有 CellMotion。NOTIMPL 才落本机快照。 */
+    {
+        nop_status_t rc = nop_onvif_map_dispatch(handler_context, request, response);
+        if (rc != NOP_ERR_NOTIMPL)
+            return rc;
+    }
     if (!nop_json_has(request->args, "triggers") &&
         !nop_json_has(request->args, "activityZonePoints"))
         return NOP_ERR_PARAM;

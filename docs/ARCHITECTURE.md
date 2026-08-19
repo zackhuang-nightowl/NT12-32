@@ -2,7 +2,7 @@
 
 > SoC：Novatek **NT98633 / NA51090** · 32 通道（16 PoE + 16 LAN）· aarch64 Linux 4.19
 > 状态快照见 [STATUS.md](STATUS.md) · 文档索引见 [INDEX.md](INDEX.md)
-> 记忆同步：2026-08-18（对照 ODC TUTK agent / 身份 `/User` / 6061+8554+7000 / Cognito 绑定）
+> 记忆同步：2026-08-19（对照 ODC TUTK agent cgi / 出厂 AuthKey 00000000 / 6061+8554+7000）
 
 ---
 
@@ -62,13 +62,14 @@ nvr_firmware/
 │   ├── playback/     本机 HDMI 回放（墙钟时钟 + 音频）
 │   ├── record_sched/ 事件时窗 / 满盘策略编排
 │   ├── event/        AI 事件中枢 → 录像/图标/云存/抓拍
+│   ├── push/         推送策略 + 读事件图 + 图床/TPNS
 │   ├── talk/         双向对讲（本机 127.0.0.1:7000；NOP:7000 / ONVIF backchannel）
 │   ├── router/       8089/6061 中央路由表 g_nvr_cmd_table（含 Cognito/GraphQL/ResetCode）
-│   ├── config/       JSON 种子 + SQLite overlay + channels.json 持久化
+│   ├── config/       JSON 种子 + SQLite overlay + channels.json；出站 URL 总表 nvr_urls.h
 │   ├── nop8012/      逐 NOP 相机 8012 事件客户端
 │   ├── netime/       eth0/eth1 + 时区/NTP
 │   ├── ble/          BLE 配网命令桥（复用 router；板级 GATT 待接）
-│   └── ota/          OTA（MD5 + 版本门禁 + A/B）
+│   └── ota/          OTA（NVR 自升级 A/B + 查服务器 + IPC 下载下推）
 ├── components/
 │   ├── nop/          ① NOP 协议核 + cap handler + ONVIF 映射
 │   ├── onvif/        ② ONVIF 客户端 glue + 设备三分类 + UDP 34569
@@ -107,7 +108,7 @@ streaming 每通道两路常拉 (pmain / psub)
          ├──────────────────┬──────────────────┐
          ▼                  ▼                  ▼
   可见窗: mhal_vdec     writer_main/sub    nvr_rtsp_live_feed
-  → mhal_vout HDMI     slot.stream=0/1     (子码流 → 8554 RTP)
+  → mhal_vout HDMI     slot.stream=0/1     (主/子 → 8554 RTP)
          ▲             音频挂主流
 app/preview 宫格/全屏只改 decode_stream（不重连）
 ```
@@ -149,7 +150,7 @@ LVGL / 手机 App / BLE
 | 出厂（无本地账户） | 常开（供向导绑定） |
 | 仅本地 admin | 默认关；`GUI_setRemoteAccessState` 运行时开关（启动复位为关） |
 
-TUTK 实现是 **ODC agent**（`/dvr/tutk_cloud_agent` → `AVAPIs_Server_CLI`），不是 `nvr_tutk_init`、也不是 AV 裸推流。本机服务：8089 NOP（GUI + GET `/eventSnap`）、**6061** agent cgi（同 `nvr_cmd_dispatch`）、**8554** live RTSP（`rtsp://iotc-tunnel:8554/live/chN`）、**127.0.0.1:7000** 对讲。外网只经 agent，NVR 不接受直连。
+TUTK 实现是 **ODC agent**（`/dvr/tutk_cloud_agent` → `AVAPIs_Server_CLI`），不是 `nvr_tutk_init`、也不是 AV 裸推流。agent `popen nvr_tutk_cgi`：`-s` 读 `/User` 身份，`-f` POST 本机 **6061**（同 `nvr_cmd_dispatch`）。本机服务：8089 NOP（GUI + GET `/eventSnap`）、**6061** agent cgi、**8554** live/回放 RTSP（`rtsp://iotc-tunnel:8554/chN_0.264` 主 / `chN_1.264` 子；`/playback/<startTime>`）、**127.0.0.1:7000** 对讲。外网只经 agent，NVR 不接受直连。出厂 IotcAuthKey=`00000000`、AvPassword=`888888`。
 
 身份权威源是数据分区 **`/User`**（`nvr_identity`）：SN/MAC 只读；UID / IOTCKey / AVKey / MODEL 可写回文件。勿把 sn/mac/uid 写进 settings 库。
 
@@ -169,7 +170,10 @@ TUTK 实现是 **ODC agent**（`/dvr/tutk_cloud_agent` → `AVAPIs_Server_CLI`�
 云存: 事件触发 → rsdk_cloud → TS → VSaaS HTTPS
 ```
 
-远程回放（`startPlayback` → 隧道 RTSP）**未做**。
+远程回放：`startPlayback` → `rtsp://iotc-tunnel:8554/playback/<startTime>`（与 live 同口）。
+App DESCRIBE/SETUP/PLAY 后按时间流推盘上帧；间隙推空白帧（RTP 拓展头 status=0）。
+二次拖动：`SET_PARAMETER` `playback_ctrl: seek`（UTC y/m/d/h/min/sec）→ 停推清缓冲，等 PLAY 再推。
+HDMI 本机回放仍走 `GUI_playbackControl`，两条路径不混。
 
 ### 4.4 事件链路
 
@@ -211,7 +215,7 @@ ONVIF 事件轮询 ──map_backend─┼──► nop_event_hub ──► nvr_
 14b. nvr_talk_init(7000)                    对讲仅听 127.0.0.1
 15. nvr_cmd_router + nop_http_server(8089)  GUI 入口
 15b. nop_http_server(6061)                  ODC agent cgi（同 handler）
-15c. nvr_rtsp_live_start(8554)              隧道 live
+15c. nvr_rtsp_live_start(8554)              隧道 live+playback
 16. maybe_start_uploader                    有盘+meta+UID（UID ← nvr_identity）
 17. apply_remote_access                     门控 BLE + 拉起/杀掉 ODC agent
 主循环: storage_tick + chan_tick + rec_tick + 排程(5s) + preview/evt + NTP(60s)
@@ -228,7 +232,7 @@ ONVIF 事件轮询 ──map_backend─┼──► nop_event_hub ──► nvr_
 | streaming → platform | `mhal_vdec_*` / `mhal_vout_*` | 可见窗送 Annex-B，硬解上屏 |
 | playback → platform | `mhal_vdec_*` / `mhal_aout_*` | 录像帧上屏；AAC 硬解出声 |
 | streaming → recorder | `rsdk_rec_write_frame` | 主/子各 writer |
-| streaming → tutk | `nvr_rtsp_live_feed` | 子码流旁路给 8554 |
+| streaming → tutk | `nvr_rtsp_live_feed` / `_audio` | 主/子/音频旁路给 8554 |
 | app → recorder | `rsdk_format/open/rec/index/play/backup` | 见 recorder README |
 | app → nop | `nop_app_create` + `nop_http_server` | 8089 GUI + 6061 agent cgi |
 | app → onvif | `nvr_onvif_get_url`（弱符号） | PoE 自动取流 |
@@ -237,6 +241,8 @@ ONVIF 事件轮询 ──map_backend─┼──► nop_event_hub ──► nvr_
 | cloud_uploader → recorder | `rsdk_cloud_*` | 云存取段 |
 
 app 子模块契约：preview / record_sched / event 不互相 include；上线/掉线/图标一律经 `nvr_app.c` 回调。
+
+出站云 HTTP(S) URL 只写 [`app/config/nvr_urls.h`](../app/config/nvr_urls.h)，对齐 NOP_DOC **ServeDomainV2**：默认 production，`-DNVR_STAGE=ON` 为 stage。本机相机 `/APPJsonCmd`、IPC `upload.cgi`、`iotc-tunnel` 拼接不收录。
 
 ---
 
@@ -258,14 +264,16 @@ app 子模块契约：preview / record_sched / event 不互相 include；上线/
 | `nvr_cmd_playback.c` | 回放音频 / 文件列表 / USB 备份 |
 | `nvr_cmd_event.c` | 事件列表 / 日历 / thumbnailUrl |
 | `nvr_cmd_p2p.c` | live / startSpeaker / stopSpeaker / tunnel |
-| `nvr_cmd_ota.c` | 固件升级 |
+| `nvr_cmd_ota.c` | 固件升级（本机 A/B + 查 OTA 服务器 + 通道下推） |
 | `nvr_cmd_misc.c` | 通道聚合 / 增强安全 / 云统计 |
 
 未命中本地表且带 `channel`：
 - `backend==0` → 透传到**该通道物理设备** `/APPJsonCmd`（`args.channel` 改为该路 `dev_chn`，即启用的那路源）
-- **例外** `X_NightOwl_getChannelActivityZoneTypes` / `getChannelTriggerActivityZone`：NOP 透传失败 → mapping。Types 仅当 GetRules 支持 Motion 时回 `triggers:["pixelChange"]`；TriggerActivityZone 走 CellMotion GetRules。
+- **例外** `X_NightOwl_getChannelActivityZoneTypes` / `get/setChannelTriggerActivityZone`：NOP 先透传；失败再 ONVIF CellMotion mapping（ModifyRules，不删建）。Types 仅当 GetRules 支持 Motion 时回 `triggers:["pixelChange"]`；TriggerActivityZone 读写 CellMotion ActiveCells。
 - **nopOnvif 仅** `nightowl_protocol.md` 白灯 / 警笛 / Panic / DeviceActive → POST 发现口。其余 nopOnvif 命令仍 mapping SOAP。
 - 其余 `backend!=0` → 本机 mapping 翻成 ONVIF，发到**该通道** `host:port`（协议 channel 改 0-based 只为查表）。
+
+**OTA 在本地表**（不透传、不 mapping）：`GUI_checkServerFirmware` / `GUI_checkChannelServerFirmware` / `GUI_upgradeChannelFirmware` / `X_NightOwl_upgradeChannelFirmware` / `X_NightOwl_checkChannelUpgradeStatus`。NVR 查 OTA 服务器并下载，再按 NOP `upload.cgi` 或 ONVIF `StartFirmwareUpgrade` 下推。
 
 mapping token：连接时写入 handle 缓存；PTZ=`ProfileToken`；对焦=`VideoSourceToken`；OSD/Mask=`VSC`；AI=`AnalyticsCfg`；编码=`venc`。详见 [BIND_IPC_FLOW.md](BIND_IPC_FLOW.md)。
 
@@ -282,7 +290,7 @@ mapping token：连接时写入 handle 缓存；PTZ=`ProfileToken`；对焦=`Vid
 
 目标机另链：`onvifclient`（`NT12-SDK/OnvifClientLibrary`，`NopRtspClient`）· happytime · TUTK `.so` · hdal。
 
-CMake 选项：`NVR_WITH_ONVIF` · `NVR_WITH_TUTK` · `NVR_WITH_ONBOARD` · `NVR_STAGE`（预发云域名）。onboard 默认打开 ONVIF。
+CMake 选项：`NVR_WITH_ONVIF` · `NVR_WITH_ONBOARD` · `NVR_STAGE`（stage 云域名，对齐 ServeDomainV2；默认 production）。onboard 默认打开 ONVIF。
 
 ---
 
@@ -292,9 +300,9 @@ CMake 选项：`NVR_WITH_ONVIF` · `NVR_WITH_TUTK` · `NVR_WITH_ONBOARD` · `NVR
 
 - media_hal 4K 时序 / YUV 抓拍 / 回放音频真机出声
 - BLE 板级 BlueZ GATT 0xFFF0
-- TUTK **远程回放** RTSP（`startPlayback` → 隧道 URL）
 - 32 路并录 + ≤16 窗预览的 VPU/DDR 上限验证
 - 云存 TS PCR 连续性；推送外发
+- TUTK 远程回放真机对 App（Timeline Seek / 空白帧）回归
 
 ---
 

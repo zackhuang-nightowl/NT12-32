@@ -1144,8 +1144,8 @@ int nop_onvif_get_profiles2(nop_onvif_device_t *device)
         return -1;
     if (!tr2_GetProfiles(&device->dev))
         return -2;
-    /* 预解析 RTSP 地址到 media_profiles[].stream_uri */
-    tr2_GetStreamUris(&device->dev, "RtspUnicast");
+    /* Media2 GetStreamUri Protocol=RTSP（RTP interleaved over TCP）；不用 RtspUnicast。 */
+    tr2_GetStreamUris(&device->dev, "RTSP");
     for (MediaProfileList *p = device->dev.media_profiles; p; p = p->next)
         count++;
     return count;
@@ -1173,7 +1173,7 @@ int nop_onvif_get_stream_uri2(nop_onvif_device_t *device, const char *profile_to
 {
     if (!device || !profile_token || !out_uri || out_size == 0)
         return -1;
-    if (!tr2_GetStreamUris(&device->dev, "RtspUnicast"))
+    if (!tr2_GetStreamUris(&device->dev, "RTSP"))
         return -2;
     for (MediaProfileList *p = device->dev.media_profiles; p; p = p->next) {
         if (strcmp(p->MediaProfile.token, profile_token) == 0) {

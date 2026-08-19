@@ -9,7 +9,7 @@
  *        MAC eth1 ← /User/mac_addr_v2.eth1   (缺失回退 /sys/class/net/eth1/address)
  *    - UID / TUTK 凭据通过封装接口可配置(读+写回文件持久化):
  *        UID      ↔ /User/tutk_agent_udid
- *        IOTCKey  ↔ /User/OWL/tutkdata.json : "IotcAuthKey"  (缺省 88888888)
+ *        IOTCKey  ↔ /User/OWL/tutkdata.json : "IotcAuthKey"  (缺省 00000000)
  *        AVKey    ↔ /User/OWL/tutkdata.json : "AvPassword"   (缺省 888888)
  *        MODEL    ↔ /User/OWLModel                            (缺省 NOP12-32)
  *
@@ -57,7 +57,7 @@ int nvr_identity_set_tutk_creds(const char *iotckey, const char *avkey);
 /* 供 set_* 后使 SN/MAC 进程内缓存失效(通常无需;SN/MAC 恒定不写)。 */
 void nvr_identity_cache_invalidate(void);
 
-/* 首启兜底 provisioning:tutkdata.json 缺失则用缺省(88888888/888888)生成一份;
+/* 首启兜底 provisioning:tutkdata.json 缺失则用缺省(00000000/888888)生成一份;
  * 并把 SN/MAC/UID 当前状态打日志(UID/SN 为空会 WARN,提示待产测/注册写入)。启动时调用一次。 */
 void nvr_identity_ensure_provisioned(void);
 

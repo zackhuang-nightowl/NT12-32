@@ -195,7 +195,7 @@ int nop_onvif_media2_delete_osd(nop_onvif_device_t *device, const char *token);
 /* ======================================================================== */
 
 /** Max resolutions carried in the encoder options. */
-#define NOP_ONVIF_VENC_MAX_RES 24
+#define NOP_ONVIF_VENC_MAX_RES 32
 
 /** One video encoder configuration (current values), flattened to plain C. */
 typedef struct nop_onvif_venc {
@@ -211,12 +211,14 @@ typedef struct nop_onvif_venc {
     int  const_bitrate;           /**< 1 = CBR                             */
 } nop_onvif_venc_t;
 
-/** Encoder option ranges for one configuration (from GetOptions). */
+/** Encoder option ranges for one configuration (from GetOptions).
+ *  have_* is 1 only when the camera actually returned that field — mapping
+ *  must not invent Min/Max. */
 typedef struct nop_onvif_venc_opts {
-    int quality_min, quality_max;
-    int bitrate_min, bitrate_max;
-    int gov_min, gov_max;
-    int fps_min, fps_max;
+    int have_quality, quality_min, quality_max;
+    int have_bitrate, bitrate_min, bitrate_max;
+    int have_gov,     gov_min, gov_max;
+    int have_fps,     fps_min, fps_max;
     int res_count;
     int res_w[NOP_ONVIF_VENC_MAX_RES];
     int res_h[NOP_ONVIF_VENC_MAX_RES];
@@ -226,9 +228,12 @@ typedef struct nop_onvif_venc_opts {
 int nop_onvif_media2_get_vencs(nop_onvif_device_t *device,
                                nop_onvif_venc_t *out, int max);
 
-/** GetVideoEncoderConfigurationOptions for @p config_token. @return 0 or <0. */
+/** GetVideoEncoderConfigurationOptions for @p config_token.
+ *  If @p encoding is non-empty, pick the Options node matching it.
+ *  @return 0 or <0. */
 int nop_onvif_media2_get_venc_options(nop_onvif_device_t *device,
                                       const char *config_token,
+                                      const char *encoding,
                                       nop_onvif_venc_opts_t *out);
 
 /** SetVideoEncoderConfiguration from a full config. @return 0 or <0. */
@@ -252,8 +257,9 @@ typedef struct nop_onvif_rule {
                                   "CellMotionDetector"/"ObjectDetection"    */
     char  direction[16];     /**< line direction ("Left"/"Right"/"Any")    */
     char  class_filter[128]; /**< comma-joined trigger classes             */
+    int   enabled;           /**< 1=on；GetRules 无 Enabled 栏位时默认 1     */
     int   point_count;
-    float x[NOP_ONVIF_RULE_MAX_PTS];
+    float x[NOP_ONVIF_RULE_MAX_PTS]; /**< ONVIF 归一化 [-1,1]              */
     float y[NOP_ONVIF_RULE_MAX_PTS];
 } nop_onvif_rule_t;
 
@@ -269,9 +275,9 @@ int nop_onvif_analytics_config_token(nop_onvif_device_t *device, char *out, int 
  *  from GetProfiles by VideoSourceConfiguration.SourceToken. */
 typedef struct nop_onvif_source_tokens {
     char source_token[100];   /**< VideoSourceToken (physical input; the key)  */
-    char profile[100];        /**< a Media2 ProfileToken of this source (PTZ)  */
+    char profile[100];        /**< 该源 PTZ/控制用 Profile：优先子码流上带 PTZ 的 */
     char vsc_token[100];      /**< VideoSourceConfiguration token (OSD/Mask)   */
-    char analytics_cfg[100];  /**< VideoAnalyticsConfiguration token (rules)   */
+    char analytics_cfg[100];  /**< 该源子码流 VideoAnalyticsConfiguration token */
     char main_venc[100];      /**< VideoEncoderConfiguration token, main (max res) */
     char sub_venc[100];       /**< VideoEncoderConfiguration token, sub         */
 } nop_onvif_source_tokens_t;
@@ -430,7 +436,11 @@ typedef struct nop_onvif_cellmotion {
 int nop_onvif_analytics_get_cellmotion(nop_onvif_device_t *device, const char *config_token,
                                        nop_onvif_cellmotion_t *io);
 
-/** CreateRules with one CellMotionDetector rule (caller clears old rules first). */
+/**
+ * Write ActiveCells / MinCount onto the existing CellMotionDetector via
+ * ModifyRules (keep Name and other SimpleItems). CreateRules only if none
+ * exists. Never DeleteRules.
+ */
 int nop_onvif_analytics_set_cellmotion(nop_onvif_device_t *device, const char *config_token,
                                        const nop_onvif_cellmotion_t *in);
 

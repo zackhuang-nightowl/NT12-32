@@ -1,8 +1,9 @@
 /**
  * @file cap_ptz_patrol.c
  * @brief CAP_PTZ handlers for PTZ patrols, presets, and home position:
- *        createPtzPatrol / modifyPtzPatrol / operatePtzPatrol / removePtzPatrol /
- *        getPtzPatrols / getPtzPresets / setPtzPreset / removePtzPreset /
+ *        setPtzPatrol (无 token=新建 / 有 token=全量更新) / operatePtzPatrol /
+ *        removePtzPatrol / getPtzPatrols / getPtzPresets / setPtzPreset /
+ *        removePtzPreset / gotoPtzPreset / setPtzHome / gotoPtzHome.
  *        gotoPtzPreset / setPtzHome / gotoPtzHome. All gated by CAP_PTZ.
  *
  *        Preset/patrol/home metadata is kept in a small in-memory store (so the
@@ -401,65 +402,46 @@ static nop_status_t handle_get_ptz_patrols(const nop_request_t *request,
     return NOP_OK;
 }
 
-static nop_status_t handle_create_ptz_patrol(const nop_request_t *request,
-                                             nop_response_t *response,
-                                             void *handler_context)
+static nop_status_t handle_set_ptz_patrol(const nop_request_t *request,
+                                          nop_response_t *response,
+                                          void *handler_context)
 {
+    const char   *token;
     const char   *name;
     nop_json_t   *spots;
     ptz_patrol_t *patrol;
-    (void)handler_context;
+    int           has_token;
 
     if (!nop_json_has(request->args, "channel"))
         return NOP_ERR_PARAM;
+    /* ONVIF：无 token → CreatePresetTour + ModifyPresetTour；有 token → Modify。 */
     if (nop_onvif_map_is_onvif(handler_context, (int)nop_json_num(request->args, "channel", 0)))
         return nop_onvif_map_dispatch(handler_context, request, response);
+
+    spots = nop_json_get(request->args, "spots");
+    if (!spots || !nop_json_is_arr(spots))
+        return NOP_ERR_PARAM;
+    token     = nop_json_str(request->args, "token", NULL);
+    has_token = (token && token[0]);
+    if (has_token) {
+        patrol = patrol_find(token);
+        if (!patrol)
+            return NOP_ERR_PARAM;
+    } else {
+        patrol = patrol_alloc();
+        if (!patrol)
+            return NOP_ERR_PARAM;
+        patrol->used = 1;
+        make_token(patrol->token, sizeof patrol->token, "patrol_", s_patrol_seq++);
+    }
     name = nop_json_str(request->args, "name", NULL);
-    if (!name)
-        return NOP_ERR_PARAM;
-    spots = nop_json_get(request->args, "spots");
-    if (!spots || !nop_json_is_arr(spots))
-        return NOP_ERR_PARAM;
-
-    patrol = patrol_alloc();
-    if (!patrol)
-        return NOP_ERR_PARAM;
-    patrol->used = 1;
-    make_token(patrol->token, sizeof patrol->token, "patrol_", s_patrol_seq++);
-    copy_str(patrol->name, sizeof patrol->name, name);
+    if (name)
+        copy_str(patrol->name, sizeof patrol->name, name);
     patrol->spot_count = parse_spots(spots, patrol->spots, CAP_PTZ_PATROL_MAX_SPOTS);
 
     response->content = nop_json_obj();
-    nop_json_add_str(response->content, "token", patrol->token);
-    return NOP_OK;
-}
-
-static nop_status_t handle_modify_ptz_patrol(const nop_request_t *request,
-                                             nop_response_t *response,
-                                             void *handler_context)
-{
-    const char   *token;
-    nop_json_t   *spots;
-    ptz_patrol_t *patrol;
-    (void)handler_context;
-
-    if (!nop_json_has(request->args, "channel"))
-        return NOP_ERR_PARAM;
-    if (nop_onvif_map_is_onvif(handler_context, (int)nop_json_num(request->args, "channel", 0)))
-        return nop_onvif_map_dispatch(handler_context, request, response);
-    token = nop_json_str(request->args, "token", NULL);
-    if (!token || token[0] == '\0')
-        return NOP_ERR_PARAM;
-    spots = nop_json_get(request->args, "spots");
-    if (!spots || !nop_json_is_arr(spots))
-        return NOP_ERR_PARAM;
-
-    patrol = patrol_find(token);
-    if (!patrol)
-        return NOP_ERR_PARAM;
-    patrol->spot_count = parse_spots(spots, patrol->spots, CAP_PTZ_PATROL_MAX_SPOTS);
-
-    response->content = nop_json_obj();
+    if (response->content)
+        nop_json_add_str(response->content, "token", patrol->token);
     return NOP_OK;
 }
 
@@ -548,8 +530,7 @@ static nop_status_t handle_remove_ptz_patrol(const nop_request_t *request,
 
 void cap_ptz_patrol_register(nop_router_t *router)
 {
-    nop_router_register(router, "createPtzPatrol",  CAP_PTZ, handle_create_ptz_patrol);
-    nop_router_register(router, "modifyPtzPatrol",  CAP_PTZ, handle_modify_ptz_patrol);
+    nop_router_register(router, "setPtzPatrol",     CAP_PTZ, handle_set_ptz_patrol);
     nop_router_register(router, "operatePtzPatrol", CAP_PTZ, handle_operate_ptz_patrol);
     nop_router_register(router, "removePtzPatrol",  CAP_PTZ, handle_remove_ptz_patrol);
     nop_router_register(router, "getPtzCapabilities", CAP_PTZ, handle_get_ptz_capabilities);

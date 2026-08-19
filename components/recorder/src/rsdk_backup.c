@@ -367,11 +367,18 @@ rsdk_err_t rsdk_backup_export_seg(rsdk_dev_t*d,const rsdk_index_slot_t*seg,
 
 rsdk_err_t rsdk_backup_export(rsdk_group_t*g,uint32_t t0,uint32_t t1,int chn,
                               const rsdk_export_opt_t*opt,const char*path){
+    return rsdk_backup_export_stream(g,t0,t1,chn,-1,opt,path);
+}
+
+rsdk_err_t rsdk_backup_export_stream(rsdk_group_t*g,uint32_t t0,uint32_t t1,int chn,
+                                     int stream,const rsdk_export_opt_t*opt,const char*path){
     if(!g||!path) return RSDK_E_PARAM;
     int fmt=opt?opt->fmt:RSDK_EXPORT_MP4;
     const rsdk_muxer_t*mx=find_mux(fmt); if(!mx) return RSDK_E_PARAM;
     rsdk_index_slot_t segs[256];
-    int ns=rsdk_group_query(g,t0,t1,chn,-1,segs,256);
+    int ns=rsdk_group_query_stream(g,t0,t1,chn,-1,stream,segs,256);
+    if(ns<=0 && stream==1)
+        ns=rsdk_group_query_stream(g,t0,t1,chn,-1,0,segs,256);
     if(ns<=0) return RSDK_E_NOTFOUND;
     rsdk_group_player_t*gp; rsdk_err_t rc=rsdk_group_play_open(g,segs,ns,&gp); if(rc) return rc;
     void*ctx=mx->open(path,opt); if(!ctx){ rsdk_group_play_close(gp); return RSDK_E_IO; }

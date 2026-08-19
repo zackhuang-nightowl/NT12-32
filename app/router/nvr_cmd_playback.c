@@ -5,6 +5,7 @@
 #include "nvr_cmd_util.h"
 #include "nvr_playback.h"
 #include "nvr_gui_config.h"
+#include "nvr_rtsp_live.h"
 #include "rsdk_backup.h"
 #include "rsdk_types.h"
 #include "nvr_log.h"
@@ -17,6 +18,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <errno.h>
 #if defined(_WIN32)
 #include <direct.h>
@@ -81,26 +83,31 @@ char *cmd_GUI_getPlaybackMode(cJSON *a, const nvr_cmd_ctx_t *c)
     return nvr_resp_content(o);
 }
 
-/* getPlaybackCapabilities(文档):protocol / streamType / channels。
- * 本机 HDMI 回放已通;远程隧道未通前不报 rtsp-iotc-tunnel 以免 App 误开。 */
+/* getPlaybackCapabilities:只报本机实际有的协议/码流/已接相机通道。回放不支持 HLS。 */
 char *cmd_getPlaybackCapabilities(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     (void)a;
     cJSON *o = cJSON_CreateObject();
     cJSON *proto = cJSON_AddArrayToObject(o, "protocol");
-    cJSON_AddItemToArray(proto, cJSON_CreateString("rtsp-iotc-tunnel"));
+    if (nvr_rtsp_live_port() > 0)
+        cJSON_AddItemToArray(proto, cJSON_CreateString("rtsp-iotc-tunnel"));
 
     cJSON *st = cJSON_AddArrayToObject(o, "streamType");
     cJSON_AddItemToArray(st, cJSON_CreateString("video"));
     cJSON_AddItemToArray(st, cJSON_CreateString("subVideo"));
+    cJSON_AddItemToArray(st, cJSON_CreateString("audio"));
     cJSON_AddItemToArray(st, cJSON_CreateString("audioAndVideo"));
     cJSON_AddItemToArray(st, cJSON_CreateString("audioAndSubVideo"));
 
-    int cap = c->settings ? nvr_settings_get_int(c->settings, "system.capacity", 32) : 32;
-    if (cap < 1) cap = 32;
     cJSON *chs = cJSON_AddArrayToObject(o, "channels");
-    for (int ch1 = 1; ch1 <= cap; ch1++)
-        cJSON_AddItemToArray(chs, cJSON_CreateNumber(ch1));
+    if (c->cm) {
+        nvr_channel_t list[32];
+        int n = nvr_chan_list(c->cm, list, 32);
+        for (int i = 0; i < n; i++) {
+            if (nvr_chan_status_code_of(c->cm, list[i].chn) == 0) continue;
+            cJSON_AddItemToArray(chs, cJSON_CreateNumber(list[i].chn + 1));
+        }
+    }
     return nvr_resp_content(o);
 }
 
@@ -156,6 +163,9 @@ typedef struct {
     char         out_dir[256];
     pb_bak_slice_t *slices;
     int          nslices;
+    char         dates[16][12];
+    int          ndates;
+    uint32_t     t0, t1;
 } pb_bak_job_t;
 
 static pb_bak_job_t g_bak;
@@ -264,6 +274,11 @@ char *cmd_GUI_ChannelBackupFiles(cJSON *a, const nvr_cmd_ctx_t *c)
     snprintf(g_bak.storage, sizeof(g_bak.storage), "%s", storage ? storage : "usb");
     snprintf(g_bak.out_dir, sizeof(g_bak.out_dir), "%s", dir);
     g_bak.slices = sl; g_bak.nslices = ns;
+    g_bak.ndates = 0; g_bak.t0 = 0; g_bak.t1 = 0;
+    if (ns > 0) {
+        g_bak.t0 = (uint32_t)sl[0].startTime;
+        g_bak.t1 = (uint32_t)sl[ns - 1].endTime;
+    }
     g_bak.running = 1; g_bak.percent = 0; g_bak.abort = 0;
     if (pthread_create(&g_bak.th, NULL, bak_thread, &g_bak) != 0) {
         free(sl); g_bak.slices = NULL; g_bak.running = 0;
@@ -279,6 +294,116 @@ char *cmd_GUI_GetChannelBackupStatus(cJSON *a, const nvr_cmd_ctx_t *c)
     cJSON *o = cJSON_CreateObject();
     cJSON_AddNumberToObject(o, "percent", g_bak.percent);
     if (g_bak.info[0]) cJSON_AddStringToObject(o, "info", g_bak.info);
+    return nvr_resp_content(o);
+}
+
+static uint32_t bak_ymd_epoch(const char *ymd, int end_of_day)
+{
+    int y = 0, mo = 0, d = 0;
+    struct tm tm;
+    if (!ymd || strlen(ymd) != 8 || sscanf(ymd, "%4d%2d%2d", &y, &mo, &d) != 3)
+        return 0;
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return 0;
+    memset(&tm, 0, sizeof(tm));
+    tm.tm_year = y - 1900; tm.tm_mon = mo - 1; tm.tm_mday = d;
+    if (end_of_day) { tm.tm_hour = 23; tm.tm_min = 59; tm.tm_sec = 59; }
+    tm.tm_isdst = -1;
+    return (uint32_t)mktime(&tm);
+}
+
+/* App:按通道+日期备份到 USB。与 GUI_ChannelBackupFiles 共用 g_bak。 */
+char *cmd_startRecordingBackup(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    if (!c->group) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "err", "ERR");
+        return nvr_resp_content(o);
+    }
+    if (g_bak.running) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "err", "ERR_BUSY");
+        return nvr_resp_content(o);
+    }
+    int ch1 = nvr_jint(a, "channel", 0);
+    cJSON *dates = a ? cJSON_GetObjectItem(a, "date") : NULL;
+    if (ch1 < 1 || !cJSON_IsArray(dates) || cJSON_GetArraySize(dates) <= 0) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "err", "ERR");
+        return nvr_resp_content(o);
+    }
+    char dir[256];
+    int dr = bak_resolve_dir("usb", dir, (int)sizeof(dir));
+    if (dr == -1) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "err", "ERR_FILESYS");
+        return nvr_resp_content(o);
+    }
+    if (dr == -2) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "err", "ERR_NO_DISK");
+        return nvr_resp_content(o);
+    }
+
+    int ns = cJSON_GetArraySize(dates);
+    if (ns > 16) ns = 16;
+    pb_bak_slice_t *sl = (pb_bak_slice_t *)calloc((size_t)ns, sizeof(*sl));
+    if (!sl) return nvr_resp_err("oom");
+    if (g_bak.th_ok) { pthread_join(g_bak.th, NULL); g_bak.th_ok = 0; }
+    free(g_bak.slices); g_bak.slices = NULL;
+    memset(&g_bak, 0, sizeof(g_bak));
+    g_bak.ndates = 0;
+    for (int i = 0; i < ns; i++) {
+        cJSON *it = cJSON_GetArrayItem(dates, i);
+        const char *ymd = cJSON_IsString(it) ? it->valuestring : NULL;
+        uint32_t t0 = bak_ymd_epoch(ymd, 0);
+        uint32_t t1 = bak_ymd_epoch(ymd, 1);
+        if (!t0 || !t1) { free(sl); return nvr_resp_err("invalid_param"); }
+        sl[i].startTime = (int)t0;
+        sl[i].endTime = (int)t1;
+        if (ymd && g_bak.ndates < 16) {
+            snprintf(g_bak.dates[g_bak.ndates], sizeof(g_bak.dates[0]), "%s", ymd);
+            g_bak.ndates++;
+        }
+    }
+    g_bak.group = c->group;
+    g_bak.chn0 = ch1 - 1;
+    g_bak.stream = 0;
+    snprintf(g_bak.storage, sizeof(g_bak.storage), "usb");
+    snprintf(g_bak.out_dir, sizeof(g_bak.out_dir), "%s", dir);
+    g_bak.slices = sl; g_bak.nslices = ns;
+    g_bak.t0 = (uint32_t)sl[0].startTime;
+    g_bak.t1 = (uint32_t)sl[ns - 1].endTime;
+    g_bak.running = 1; g_bak.percent = 0; g_bak.abort = 0;
+    if (pthread_create(&g_bak.th, NULL, bak_thread, &g_bak) != 0) {
+        free(sl); g_bak.slices = NULL; g_bak.running = 0;
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "err", "ERR");
+        return nvr_resp_content(o);
+    }
+    g_bak.th_ok = 1;
+    return nvr_resp_ok();
+}
+
+char *cmd_getRecordingBackupProgress(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a; (void)c;
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddNumberToObject(o, "channel", g_bak.chn0 + 1);
+    int pct = g_bak.percent;
+    if (pct < 0) pct = 0;
+    cJSON_AddNumberToObject(o, "percentage", pct);
+    cJSON *arr = cJSON_AddArrayToObject(o, "date");
+    for (int i = 0; i < g_bak.ndates; i++)
+        cJSON_AddItemToArray(arr, cJSON_CreateString(g_bak.dates[i]));
+    cJSON_AddNumberToObject(o, "startTime", (double)g_bak.t0);
+    cJSON_AddNumberToObject(o, "endTime", g_bak.running ? -1 : (double)g_bak.t1);
+    char usb[256];
+    if (!g_bak.th_ok && !g_bak.running && g_bak.nslices <= 0)
+        cJSON_AddStringToObject(o, "err", "ERR_NO_TASK");
+    else if (bak_resolve_dir("usb", usb, (int)sizeof(usb)) == -2)
+        cJSON_AddStringToObject(o, "err", "ERR_NO_DISK");
+    else if (g_bak.percent < 0)
+        cJSON_AddStringToObject(o, "err", "ERR");
     return nvr_resp_content(o);
 }
 

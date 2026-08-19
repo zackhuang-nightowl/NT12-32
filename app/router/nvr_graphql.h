@@ -1,5 +1,6 @@
 /***************************************************************************************
  *  nvr_graphql.h — Night Owl Protect GraphQL（addDevice → cloudToken/stoken）。
+ *  POST NVR_URL_GRAPHQL（见 app/config/nvr_urls.h）。
  ***************************************************************************************/
 #ifndef NVR_GRAPHQL_H
 #define NVR_GRAPHQL_H

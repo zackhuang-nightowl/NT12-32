@@ -4,6 +4,7 @@
 #include "nvr_ota.h"
 #include "nvr_defaults.h"
 #include "nvr_log.h"
+#include "cJSON.h"
 
 #include <ctype.h>
 #include <curl/curl.h>
@@ -84,7 +85,7 @@ static int ver_token(const char **p)
 }
 
 /* >0 : a>b；0 : 相等；<0 : a<b。只比数字段（1.0.10 > 1.0.9）。 */
-static int ver_cmp(const char *a, const char *b)
+int nvr_ota_ver_cmp(const char *a, const char *b)
 {
     if (!a) a = "";
     if (!b) b = "";
@@ -93,6 +94,41 @@ static int ver_cmp(const char *a, const char *b)
         if (va != vb) return va - vb;
     }
     return 0;
+}
+
+static int ver_cmp(const char *a, const char *b)
+{
+    return nvr_ota_ver_cmp(a, b);
+}
+
+void nvr_ota_ver_norm(const char *raw, const char *model, char *out, size_t cap)
+{
+    const char *p;
+    size_t ml;
+    if (!out || cap == 0) return;
+    out[0] = 0;
+    if (!raw || !raw[0]) return;
+    p = raw;
+    if (model && model[0]) {
+        ml = strlen(model);
+        if (strlen(raw) > ml) {
+            int i, match = 1;
+            for (i = 0; i < (int)ml; i++) {
+                unsigned char a = (unsigned char)raw[i];
+                unsigned char b = (unsigned char)model[i];
+                if (a >= 'A' && a <= 'Z') a = (unsigned char)(a - 'A' + 'a');
+                if (b >= 'A' && b <= 'Z') b = (unsigned char)(b - 'A' + 'a');
+                if (a != b) { match = 0; break; }
+            }
+            if (match && raw[ml] == '_')
+                p = raw + ml + 1;
+        }
+    } else {
+        const char *us = strrchr(raw, '_');
+        if (us && us[1] && isdigit((unsigned char)us[1]))
+            p = us + 1;
+    }
+    snprintf(out, cap, "%s", p);
 }
 
 static int file_md5_hex(const char *path, long offset, char *out, size_t cap)
@@ -454,3 +490,145 @@ int nvr_ota_progress(void)
 }
 const char *nvr_ota_state(void) { return g_state; }
 void nvr_ota_deinit(void) {}
+
+/* ---- OTA 服务器 GET JSON / 下载 ---- */
+
+typedef struct { char *buf; size_t len; } ota_mem_t;
+
+static size_t ota_mem_write(void *p, size_t sz, size_t n, void *u)
+{
+    size_t a = sz * n;
+    ota_mem_t *m = u;
+    char *nb = realloc(m->buf, m->len + a + 1);
+    if (!nb) return 0;
+    m->buf = nb;
+    memcpy(m->buf + m->len, p, a);
+    m->len += a;
+    m->buf[m->len] = 0;
+    return a;
+}
+
+static void curl_common(CURL *c)
+{
+    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 2L);
+}
+
+int nvr_ota_build_check_url(char *out, size_t cap,
+                            const char *base, const char *env,
+                            const char *product, const char *model)
+{
+    if (!out || cap == 0) return -1;
+    out[0] = 0;
+    if (!base || !base[0] || !env || !env[0] || !product || !product[0] ||
+        !model || !model[0])
+        return -1;
+    if (snprintf(out, cap, "%s/%s/%s/%s", base, env, product, model) >= (int)cap)
+        return -1;
+    return 0;
+}
+
+int nvr_ota_query(const char *url, nvr_ota_meta_t *out)
+{
+    CURL *c;
+    ota_mem_t m = {0};
+    long http = 0;
+    CURLcode rc;
+    cJSON *j, *v;
+    if (!url || !url[0] || !out) return -1;
+    memset(out, 0, sizeof(*out));
+    c = curl_easy_init();
+    if (!c) return -1;
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, ota_mem_write);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, &m);
+    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 20L);
+    curl_common(c);
+    rc = curl_easy_perform(c);
+    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http);
+    curl_easy_cleanup(c);
+    if (rc != CURLE_OK) {
+        NVR_LOGW("ota", "查询失败 %s curl=%s", url, curl_easy_strerror(rc));
+        free(m.buf);
+        return -1;
+    }
+    if (http != 200 || !m.buf) {
+        NVR_LOGW("ota", "查询 HTTP %ld %s", http, url);
+        free(m.buf);
+        return -2;
+    }
+    j = cJSON_Parse(m.buf);
+    free(m.buf);
+    if (!j) return -2;
+    v = cJSON_GetObjectItem(j, "version");
+    if (cJSON_IsString(v) && v->valuestring)
+        snprintf(out->version, sizeof(out->version), "%s", v->valuestring);
+    v = cJSON_GetObjectItem(j, "description");
+    if (!v) v = cJSON_GetObjectItem(j, "summary");
+    if (cJSON_IsString(v) && v->valuestring)
+        snprintf(out->description, sizeof(out->description), "%s", v->valuestring);
+    v = cJSON_GetObjectItem(j, "url");
+    if (cJSON_IsString(v) && v->valuestring)
+        snprintf(out->url, sizeof(out->url), "%s", v->valuestring);
+    v = cJSON_GetObjectItem(j, "file_checksum");
+    if (cJSON_IsString(v) && v->valuestring)
+        snprintf(out->checksum, sizeof(out->checksum), "%s", v->valuestring);
+    cJSON_Delete(j);
+    return 0;
+}
+
+typedef struct {
+    void (*fn)(int pct, void *ud);
+    void *ud;
+} dl_prog_t;
+
+static int on_dl_progress(void *p, curl_off_t dltotal, curl_off_t dlnow,
+                          curl_off_t ul, curl_off_t un)
+{
+    dl_prog_t *d = p;
+    (void)ul; (void)un;
+    if (d && d->fn && dltotal > 0)
+        d->fn((int)(dlnow * 100 / dltotal), d->ud);
+    return 0;
+}
+
+int nvr_ota_http_download(const char *url, const char *dst,
+                          void (*prog)(int pct, void *ud), void *ud)
+{
+    FILE *f;
+    CURL *c;
+    dl_prog_t d = { prog, ud };
+    int ok = 0;
+    if (!url || !url[0] || !dst || !dst[0]) return -1;
+    f = fopen(dst, "wb");
+    if (!f) { NVR_LOGE("ota", "无法写 %s", dst); return -1; }
+    c = curl_easy_init();
+    if (c) {
+        long http = 0;
+        curl_easy_setopt(c, CURLOPT_URL, url);
+        curl_easy_setopt(c, CURLOPT_WRITEDATA, f);
+        curl_easy_setopt(c, CURLOPT_TIMEOUT, 600L);
+        curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
+        curl_common(c);
+        if (prog) {
+            curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
+            curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, on_dl_progress);
+            curl_easy_setopt(c, CURLOPT_XFERINFODATA, &d);
+        }
+        ok = (curl_easy_perform(c) == CURLE_OK);
+        curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http);
+        ok = ok && (http == 200 || http == 0);
+        curl_easy_cleanup(c);
+    }
+    fclose(f);
+    if (!ok) unlink(dst);
+    return ok ? 0 : -1;
+}
+
+int nvr_ota_file_md5(const char *path, char *out, size_t cap)
+{
+    return file_md5_hex(path, 0, out, cap);
+}

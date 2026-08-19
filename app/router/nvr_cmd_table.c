@@ -11,6 +11,8 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
     /* --- display 出图 --- */
     { "GUI_setDeviceDisplayMode",              cmd_GUI_setDeviceDisplayMode },
     { "GUI_getDeviceDisplayMode",              cmd_GUI_getDeviceDisplayMode },
+    { "setDeviceDisplayMode",                  cmd_setDeviceDisplayMode },
+    { "getDeviceDisplayMode",                  cmd_getDeviceDisplayMode },
     { "GUI_setChannelMapping",                 cmd_GUI_setChannelMapping },
     { "GUI_getChannelMapping",                 cmd_GUI_getChannelMapping },
     { "GUI_setDeviceDisplayExt",               cmd_GUI_setDeviceDisplayExt },
@@ -19,6 +21,8 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
     { "GUI_setSysDisplay",                     cmd_GUI_setSysDisplay },
     { "X_NightOwl_getChannelStatus",           cmd_X_NightOwl_getChannelStatus },
     { "GUI_longPolling",                       cmd_GUI_longPolling },
+    { "notify_appSetupStatus",                 cmd_notify_appSetupStatus },
+    { "notify_APPSetupStatus",                 cmd_notify_appSetupStatus },
     { "GUI_playbackControl",                   cmd_GUI_playbackControl },
     { "GUI_setPlaybackMode",                   cmd_GUI_setPlaybackMode },
     { "GUI_getPlaybackMode",                   cmd_GUI_getPlaybackMode },
@@ -26,6 +30,8 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
     { "getLiveCapabilities",                   cmd_getLiveCapabilities },
     { "startLiveStream",                       cmd_startLiveStream },
     { "stopLiveStream",                        cmd_stopLiveStream },
+    { "startPlayback",                         cmd_startPlayback },
+    { "stopPlayback",                          cmd_stopPlayback },
     { "getSpeakerCapabilities",                cmd_getSpeakerCapabilities },
     { "startSpeaker",                          cmd_startSpeaker },
     { "stopSpeaker",                           cmd_stopSpeaker },
@@ -42,6 +48,9 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
     { "GUI_setLanDevice",                      cmd_GUI_setLanDevice },
     { "GUI_LanAddDevice",                      cmd_GUI_LanAddDevice },
     { "GUI_LanDelDevice",                      cmd_GUI_LanDelDevice },
+    { "X_NightOwl_attachIPDevices",            cmd_X_NightOwl_attachIPDevices },
+    { "X_NightOwl_detachIPDevice",             cmd_X_NightOwl_detachIPDevice },
+    { "X_NightOwl_getAttachStatus",            cmd_X_NightOwl_getAttachStatus },
 
     /* --- system 设备 --- */
     { "setName",                               cmd_setName },
@@ -53,6 +62,7 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
     { "X_NightOwl_setTimezone",                cmd_X_NightOwl_setTimezone },
     { "X_NightOwl_getTimezone",                cmd_X_NightOwl_getTimezone },
     { "set_datetime",                          cmd_set_datetime },
+    { "get_datetime",                          cmd_get_datetime },
     { "X_NightOwl_setTimeSyncSwitch",          cmd_X_NightOwl_setTimeSyncSwitch },
     { "X_NightOwl_getTimeSyncSwitch",          cmd_X_NightOwl_getTimeSyncSwitch },
     { "reboot",                                cmd_reboot },
@@ -61,15 +71,21 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
     { "X_NightOwl_getOwner",                   cmd_X_NightOwl_getOwner },
     { "X_NightOwl_updateP2PCredential",        cmd_X_NightOwl_updateP2PCredential },
     { "X_NightOwl_loginUser",                  cmd_X_NightOwl_loginUser },
+    { "X_NightOwl_unlock",                     cmd_X_NightOwl_unlock },
     { "GUI_getRemoteAccessState",              cmd_GUI_getRemoteAccessState },
     { "GUI_setRemoteAccessState",              cmd_GUI_setRemoteAccessState },
     { "GUI_getFeatureList",                    cmd_GUI_getFeatureList },
     { "getIotcAuthKey",                        cmd_getIotcAuthKey },
     { "setIotcAuthKey",                        cmd_setIotcAuthKey },
     { "getIotcUID",                            cmd_getIotcUID },
+    { "setIotcUID",                            cmd_setIotcUID },
     { "getAvPassword",                         cmd_getAvPassword },
+    { "setAvPassword",                         cmd_setAvPassword },
     { "getAvAccount",                          cmd_getAvAccount },
     { "getProfile",                            cmd_getProfile },
+    { "notifyLoginSuccess",                    cmd_notifyLoginSuccess },
+    { "notifySessionCount",                    cmd_notifySessionCount },
+    { "getNotificationSetting",                cmd_getNotificationSetting },
     { "GUI_getUID",                            cmd_GUI_getUID },
     { "GUI_getAutoRebootSetting",              cmd_GUI_getAutoRebootSetting },
     { "GUI_setAutoRebootSetting",              cmd_GUI_setAutoRebootSetting },
@@ -89,13 +105,14 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
 
     /* --- misc 通道聚合/安全 --- */
     { "getChannelsStatus",                     cmd_getChannelsStatus },
+    { "X_NightOwl_getChannelInfo",             cmd_X_NightOwl_getChannelInfo },
     { "getChannelStats",                       cmd_getChannelStats },            /* 待做:通道统计 */
     { "getChannelLoading",                     cmd_getChannelLoading },          /* 待做:加载状态 */
     { "getEnhancedSecurity",                   cmd_getEnhancedSecurity },        /* NVR 代查 NOP digest random */
     { "setEnhancedSecurity",                   cmd_setEnhancedSecurity },        /* NVR 代开/关 digest，入库 P_enh/空 */
     { "X_NightOwl_getDeviceActive",            cmd_X_NightOwl_getDeviceActive }, /* NVR 代查/代激活 nopOnvif */
     { "X_NightOwl_setDeviceActive",            cmd_X_NightOwl_setDeviceActive },
-    { "getCurrentClouds",                      cmd_getCurrentClouds },           /* 待做:云存状态 */
+    { "getCurrentClouds",                      cmd_getCurrentClouds },
     { "getCloudStatusHistory",                 cmd_getCloudStatusHistory },      /* 待做:云存历史 */
     { "getChannelCloudRecordStats",            cmd_getChannelCloudRecordStats }, /* 待做:云存统计 */
     { "getChannelCloudRecordStatsSwitch",      cmd_getChannelCloudRecordStatsSwitch }, /* 待做 */
@@ -137,8 +154,6 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
     /* --- record 录像/推送 --- */
     { "X_NightOwl_setChannelRecordingTriggers",           cmd_X_NightOwl_setChannelRecordingTriggers },
     { "X_NightOwl_getChannelRecordingTriggers",           cmd_X_NightOwl_getChannelRecordingTriggers },
-    { "X_NightOwl_setChannelsPushNotificationSwitch",     cmd_X_NightOwl_setChannelsPushNotificationSwitch },
-    { "X_NightOwl_getChannelsPushNotificationSwitch",     cmd_X_NightOwl_getChannelsPushNotificationSwitch },
     { "X_NightOwl_setChannelRecordingSwitch",             cmd_X_NightOwl_setChannelRecordingSwitch },
     { "X_NightOwl_getChannelRecordingSwitch",             cmd_X_NightOwl_getChannelRecordingSwitch },
     { "X_NightOwl_setChannelContinuousScheduleRecordingSwitch", cmd_X_NightOwl_setChannelContinuousScheduleRecordingSwitch },
@@ -162,6 +177,8 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
     { "GUI_getFileList",                       cmd_GUI_getFileList },            /* System 域文件列表,非回放 */
     { "GUI_ChannelBackupFiles",                cmd_GUI_ChannelBackupFiles },
     { "GUI_GetChannelBackupStatus",            cmd_GUI_GetChannelBackupStatus },
+    { "startRecordingBackup",                  cmd_startRecordingBackup },
+    { "getRecordingBackupProgress",            cmd_getRecordingBackupProgress },
     { "GUI_StopChannelBackup",                 cmd_GUI_StopChannelBackup },
     { "GUI_getChannelEventRecordingSchedule",  cmd_GUI_getChannelEventRecordingSchedule },
     { "GUI_setChannelEventRecordingSchedule",  cmd_GUI_setChannelEventRecordingSchedule },
@@ -172,9 +189,15 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
     { "upgradeFirmware",                       cmd_upgradeFirmware },
     { "GUI_upgradeFirmware",                   cmd_upgradeFirmware },
     { "checkFirmwareUpgradeStatus",            cmd_checkFirmwareUpgradeStatus },
+    { "GUI_checkServerFirmware",               cmd_GUI_checkServerFirmware },
+    { "GUI_checkChannelServerFirmware",        cmd_GUI_checkChannelServerFirmware },
+    { "GUI_upgradeChannelFirmware",            cmd_GUI_upgradeChannelFirmware },
+    { "X_NightOwl_upgradeChannelFirmware",     cmd_X_NightOwl_upgradeChannelFirmware },
+    { "X_NightOwl_checkChannelUpgradeStatus",  cmd_X_NightOwl_checkChannelUpgradeStatus },
 
     /* --- event 事件 --- */
     { "X_NightOwl_queryEventList",             cmd_X_NightOwl_queryEventList },
+    { "X_NightOwl_queryEventListWithSpecificOrder", cmd_X_NightOwl_queryEventListWithSpecificOrder },
     { "X_NightOwl_queryEventCalendar",         cmd_X_NightOwl_queryEventCalendar },
     { "X_NightOwl_queryContinuousCalendar",    cmd_X_NightOwl_queryContinuousCalendar },
     { "X_NightOwl_queryRecordingInterval",     cmd_X_NightOwl_queryRecordingInterval },
@@ -182,6 +205,25 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
     { "AI_getEventExtInfoBatchByReverseTime",  cmd_AI_getEventExtInfoBatchByReverseTime },
     { "AI_getEventExtInfoConfig",              cmd_AI_getEventExtInfoConfig },
     { "AI_setEventExtInfoConfig",              cmd_AI_setEventExtInfoConfig },
+    { "snapshotChannel",                       cmd_snapshotChannel },
+    { "X_NightOwl_getEventDownloadCapability", cmd_X_NightOwl_getEventDownloadCapability },
+    { "X_NightOwl_startEventDownload",         cmd_X_NightOwl_startEventDownload },
+    { "X_NightOwl_getEventDownloadProgress",   cmd_X_NightOwl_getEventDownloadProgress },
+    { "X_NightOwl_startEventDownloadwithURL",  cmd_X_NightOwl_startEventDownloadwithURL },
+
+    /* --- push 推送 --- */
+    { "X_NightOwl_getChannelPushNotificationSwitch",      cmd_X_NightOwl_getChannelPushNotificationSwitch },
+    { "X_NightOwl_setChannelPushNotificationSwitch",      cmd_X_NightOwl_setChannelPushNotificationSwitch },
+    { "X_NightOwl_getChannelsPushNotificationSwitch",     cmd_X_NightOwl_getChannelsPushNotificationSwitch },
+    { "X_NightOwl_setChannelsPushNotificationSwitch",     cmd_X_NightOwl_setChannelsPushNotificationSwitch },
+    { "X_NightOwl_getChannelPushNotificationTriggers",    cmd_X_NightOwl_getChannelPushNotificationTriggers },
+    { "X_NightOwl_setChannelPushNotificationTriggers",    cmd_X_NightOwl_setChannelPushNotificationTriggers },
+    { "X_NightOwl_getChannelPushNotificationDoNotDisturb", cmd_X_NightOwl_getChannelPushNotificationDoNotDisturb },
+    { "X_NightOwl_setChannelPushNotificationDoNotDisturb", cmd_X_NightOwl_setChannelPushNotificationDoNotDisturb },
+    { "setSnooze",                             cmd_setSnooze },
+    { "getSnooze",                             cmd_getSnooze },
+    { "setPushPhotoSwitch",                    cmd_setPushPhotoSwitch },
+    { "getPushPhotoSwitch",                    cmd_getPushPhotoSwitch },
 };
 
 const int g_nvr_cmd_table_len = (int)(sizeof(g_nvr_cmd_table) / sizeof(g_nvr_cmd_table[0]));

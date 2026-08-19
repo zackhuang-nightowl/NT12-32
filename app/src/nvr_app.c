@@ -20,11 +20,11 @@
 #include "nvr_playback.h"
 #include "nvr_record_sched.h"
 #include "nvr_event.h"
+#include "nvr_push.h"
 #include "nvr_nop8012.h"
 #include "nvr_settings.h"
 #include "nvr_identity.h"
 #include "nvr_cloud_uploader.h"
-#include "nvr_tutk.h"
 #include "nvr_rtsp_live.h"   /* tunnel 内直播 RTSP 服务(:8554),供 ODC agent P2PTunnel 映射 */
 #include "nvr_crypto.h"
 #include "nvr_netime.h"
@@ -35,6 +35,8 @@
 #include "nop_sdk/nop_caps.h"        /* CAP_PTZ:NVR 无本地 HAL_PTZ,须显式开(PTZ 经 ONVIF 映射代理相机) */
 #include "nop_sdk/nop_nvr_channels.h"
 #include "nvr_cmd_router.h"
+#include "nvr_gui_notify.h"
+#include "nvr_http_assets.h"
 #include "nop_sdk/nop_http_server.h"
 #include "nop_sdk/nop_onvif.h"
 #include "nvr_chan_persist.h"
@@ -79,6 +81,7 @@ struct nvr_app {
     struct nvr_nop8012  *n8012;     /* NOP 8012 事件中心客户端(逐相机) */
     nvr_chan_persist_t *persist;    /* 通道映射/能力持久化(channels.json) */
     nvr_evt_hub_t    *eh;
+    nvr_push_t       *push;         /* 事件→图床/TPNS */
     nvr_chan_mgr_t   *cm;
     nvr_talk_t       *talk;
     nvr_cloud_uploader_t *up;       /* 云存上传器（有盘+meta+udid 时启动） */
@@ -147,6 +150,11 @@ static void app_on_snap(void *user, int chn, uint64_t eid, uint32_t ts,
     (void)eid; (void)ts;
 #endif
     if (from_onvif) nop_onvif_free_buffer(jpeg);
+}
+
+static void app_on_push(void *user, int chn, uint64_t eid, uint32_t ts, nop_detect_type_t type)
+{
+    nvr_push_on_event((nvr_push_t *)user, chn, eid, ts, type);
 }
 
 /* ---- NOP EventExtInfo：打开相机缓存，事件结束后取回写入 meta.db ---- */
@@ -324,12 +332,13 @@ static void app_on_event_end(void *user, int chn, uint64_t eid, uint32_t start_e
     nvr_evt_queue_meta_pull(a->eh, chn, eid, start_epoch);
 }
 
-/* GET /eventSnap?eid= — 协议 URL 为 iotc-tunnel:8089，App 只经 TUTK 映射取图。
+/* GET /eventSnap?eid= /snapshot/chN.jpg /download/*.mp4 — 隧道映射本机 nop 口取图/录像。
  * POST /APPJsonCmd 不走这里。 */
 static int app_http_uri(void *ctx, int fd, const char *method, const char *uri)
 {
     nvr_app_t *a = ctx;
     if (!method || strcasecmp(method, "GET") != 0) return 0;
+    if (nvr_http_assets_serve(fd, uri)) return 1;
     if (!uri || strncmp(uri, "/eventSnap", 10) != 0) return 0;
     if (uri[10] && uri[10] != '?') return 0;
 #if RSDK_CFG_METADATA
@@ -531,8 +540,9 @@ static char *ble_dispatch_bridge(void *ud, const char *json, int enc)
 }
 
 /* P2P 采用 ODC 的 TUTK 代理程序(AVAPIs_Server_CLI,含 TUTK 真 license),按官方文档
- * (APP_client_Agent.md)集成:agent 收 APP 命令→cgi→POST iotc-tunnel:6061→本机 nvr_cmd_dispatch;
- * 媒体走 tunnel 内 RTSP。此处只负责按 UID 拉起/杀掉 agent(device.sh 自带看护重启)。 */
+ * (APP_client_Agent.md)集成:agent 收 APP 命令→cgi→POST 127.0.0.1:6061→本机 nvr_cmd_dispatch;
+ * 媒体走 tunnel 内 RTSP。拉起对照相机样例:
+ *   device.sh <UID> <cgi> <profile>（同一进程 --cgipath/--profilepath/--start）。 */
 #define TUTK_AGENT_DIR "/dvr/tutk_cloud_agent"
 #define TUTK_PROFILE_OUT "/tmp/tutk_profile.txt"   /* 由 config 生成(rootfs 只读),device.sh 用它 */
 
@@ -553,7 +563,7 @@ static int write_tutk_profile(nvr_app_t *a)
     char fw[32], type[32], model[32], sn[64] = "";
     nvr_settings_get_str(a->settings, "system.fw_version",  fw,   sizeof(fw),   NVR_DEF_FW_VERSION);
     nvr_settings_get_str(a->settings, "tutk.device_type",   type, sizeof(type), NVR_DEF_TUTK_DEV_TYPE);
-    nvr_settings_get_str(a->settings, "system.model",       model,sizeof(model),NVR_DEF_MODEL);
+    nvr_identity_get_model(model, sizeof(model));              /* MODEL ← /User/OWLModel */
     nvr_identity_get_sn(sn, sizeof(sn));                       /* SN ← /User/OWLSerialNumber */
 
     cJSON_DeleteItemFromObject(j, "fwVer");        cJSON_AddStringToObject(j, "fwVer", fw);
@@ -561,17 +571,28 @@ static int write_tutk_profile(nvr_app_t *a)
     cJSON_DeleteItemFromObject(j, "model");        cJSON_AddStringToObject(j, "model", model);
     if (sn[0]) { cJSON_DeleteItemFromObject(j, "serialNumber"); cJSON_AddStringToObject(j, "serialNumber", sn); }
 
-    /* 对讲：App 映射 iotc-tunnel:7000 → 本机 127.0.0.1:7000 */
+    /* 对讲/命令/缩略图/直播:App 映射 iotc-tunnel:PORT → 本机 127.0.0.1:PORT */
     {
+        static const char *need[] = {
+            "iotc-tunnel:8554", "iotc-tunnel:6061",
+            "iotc-tunnel:7000", "iotc-tunnel:8089"
+        };
         cJSON *pp = cJSON_GetObjectItem(j, "p2pProtocols");
+        if (!cJSON_IsArray(pp)) {
+            cJSON_DeleteItemFromObject(j, "p2pProtocols");
+            pp = cJSON_AddArrayToObject(j, "p2pProtocols");
+        }
         if (cJSON_IsArray(pp)) {
-            int has = 0;
-            cJSON *it;
-            cJSON_ArrayForEach(it, pp) {
-                if (cJSON_IsString(it) && it->valuestring && strstr(it->valuestring, ":7000"))
-                    has = 1;
+            for (int k = 0; k < 4; k++) {
+                int has = 0;
+                cJSON *it;
+                cJSON_ArrayForEach(it, pp) {
+                    if (cJSON_IsString(it) && it->valuestring &&
+                        strcmp(it->valuestring, need[k]) == 0)
+                        has = 1;
+                }
+                if (!has) cJSON_AddItemToArray(pp, cJSON_CreateString(need[k]));
             }
-            if (!has) cJSON_AddItemToArray(pp, cJSON_CreateString("iotc-tunnel:7000"));
         }
     }
 
@@ -596,7 +617,10 @@ static void start_tutk(nvr_app_t *a)
         nvr_settings_get_str(a->settings, "tutk.uid", uid, sizeof(uid), "");
     if (!uid[0]) { printf("[app] TUTK: 无 UID(/User/tutk_agent_udid 空),agent 未启动\n"); a->tutk_on = 0; return; }
 
-    if (access(TUTK_AGENT_DIR "/device.sh", X_OK) != 0) {
+    /* squashfs 可能无 +x;运行期补执行位 */
+    (void)system("chmod +x " TUTK_AGENT_DIR "/device.sh " TUTK_AGENT_DIR "/nvr_tutk_cgi "
+                 TUTK_AGENT_DIR "/AVAPIs_Server_CLI 2>/dev/null");
+    if (access(TUTK_AGENT_DIR "/device.sh", R_OK) != 0) {
         printf("[app] TUTK: 未找到 %s/device.sh,agent 未启动\n", TUTK_AGENT_DIR); a->tutk_on = 0; return;
     }
     /* cgi 用 http://iotc-tunnel:6061 走命令 → 确保 iotc-tunnel 解析到本机
@@ -604,12 +628,18 @@ static void start_tutk(nvr_app_t *a)
     int hrc = system("grep -q iotc-tunnel /etc/hosts || echo '127.0.0.1 iotc-tunnel' >> /etc/hosts");
     (void)hrc;
     write_tutk_profile(a);   /* config → /tmp/tutk_profile.txt(fwVer/type/model/serialNumber) */
-    char cmd[256];
+    /* APP_client_Agent.md 相机样例: device.sh <UID> <CGI_PATH> <PROFILE_PATH> */
+    const char *prof = TUTK_PROFILE_OUT;
+    if (access(TUTK_PROFILE_OUT, R_OK) != 0)
+        prof = TUTK_AGENT_DIR "/profile.txt";
+    char cmd[512];
     snprintf(cmd, sizeof(cmd),
-             "cd " TUTK_AGENT_DIR " && sh ./device.sh %s >/tmp/tutk_agent.log 2>&1 &", uid);
+             "sh %s/device.sh '%s' '%s/nvr_tutk_cgi' '%s' >/tmp/tutk_agent.log 2>&1 &",
+             TUTK_AGENT_DIR, uid, TUTK_AGENT_DIR, prof);
     int rc = system(cmd); (void)rc;
     a->tutk_on = 1;
-    printf("[app] ODC TUTK agent 已启动(UID=%s,cmd→:6061)\n", uid);
+    printf("[app] ODC TUTK agent 已启动(UID=%s cgi=%s/nvr_tutk_cgi profile=%s)\n",
+           uid, TUTK_AGENT_DIR, prof);
 }
 static void stop_tutk(nvr_app_t *a)
 {
@@ -859,6 +889,16 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
     nvr_preview_set_cm(a->pv, a->cm);     /* 迟绑：preview 按显示模式切通道主/子码流 */
     nvr_evt_set_snap(a->eh, app_on_snap, a);
     nvr_evt_set_meta(a->eh, app_on_meta_enable, app_on_meta_pull, a);
+    {
+        nvr_push_opt_t po = { .settings = a->settings, .persist = a->persist,
+                              .group = a->group, .meta = a->meta };
+        if (nvr_push_start(&po, &a->push) == 0 && a->eh)
+            nvr_evt_set_push(a->eh, app_on_push, a->push);
+        else {
+            a->push = NULL;
+            printf("[app] 警告: 推送引擎启动失败\n");
+        }
+    }
     /* NVR_MANUAL_ONLY：只连手动添加(LanAddDevice/setLanDevice)的相机，
      * 不加载配置通道、不自动发现绑定。用于受控测试/护 IPC(不拿错凭据轰别的相机)。 */
     a->manual_only = (getenv("NVR_MANUAL_ONLY") != NULL);
@@ -963,11 +1003,13 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
         printf("[app] 8d: TUTK agent 命令端点 :%d %s\n",
                agent_port, a->nop_http_agent ? "就绪" : "启动失败"); fflush(stdout);
 
-        /* 8e) tunnel 内直播 RTSP 服务(:8554);streaming(stream_router)已 feed 子码流,
-         *     startLiveStream 选通道后 APP 经 P2PTunnel 映射 rtsp://iotc-tunnel:8554/live/chN。 */
+        /* 8e) tunnel 内 RTSP(:8554)直播+远程回放;streaming 旁路主/子/音频,
+         *     URL host=iotc-tunnel,App 经 P2PTunnel 映射。 */
         int rtsp_port = nvr_settings_get_int(a->settings, "tutk.tunnel_rtsp_port", 8554);
         int rrc = nvr_rtsp_live_start(rtsp_port);
-        printf("[app] 8e: tunnel 直播 RTSP :%d %s\n", rtsp_port, rrc == 0 ? "就绪" : "启动失败");
+        nvr_rtsp_live_set_group(a->group);
+        printf("[app] 8e: tunnel RTSP :%d %s (live+playback)\n",
+               rtsp_port, rrc == 0 ? "就绪" : "启动失败");
         fflush(stdout);
     }
 
@@ -1107,6 +1149,7 @@ void nvr_app_run(nvr_app_t *app)
 {
     if (!app) return;
     unsigned tick = 0;
+    int ble_bound_last = -1, ble_unlock_last = -1;
     memset(app->rec_applied, -1, sizeof(app->rec_applied));       /* 强制首轮下发 */
     memset(app->evt_arm_applied, -1, sizeof(app->evt_arm_applied));
     memset(app->pre_s_applied, -1, sizeof(app->pre_s_applied));
@@ -1116,6 +1159,17 @@ void nvr_app_run(nvr_app_t *app)
         nvr_rec_tick(app->rs);                       /* 结束到期事件时窗 */
         if (tick % 5 == 0) rec_schedule_apply(app);  /* 每 5s 评估连续录像排程(时段+开关) */
         nvr_evt_tick(app->eh);                        /* 事件位图衰减(供 longPolling) */
+        if (app->ble) {                               /* 向导/登录解锁变化 → BLE 广播 */
+            nvr_owner_row_t ow;
+            int bound = (app->settings &&
+                         nvr_settings_owner_get(app->settings, &ow) == 0 && ow.owner_id[0]) ? 1 : 0;
+            int unlocked = nvr_gui_ui_unlocked();
+            if (bound != ble_bound_last || unlocked != ble_unlock_last) {
+                nvr_ble_update_adv(app->ble, bound, unlocked);
+                ble_bound_last = bound;
+                ble_unlock_last = unlocked;
+            }
+        }
         if (tick % 60 == 0 && app->settings) {        /* 每 60s：NTP 重试 + 周维护重启 */
             nvr_time_tick(app->settings);
             auto_reboot_tick(app);
@@ -1137,16 +1191,16 @@ void nvr_app_stop(nvr_app_t *app)
     if (app->n8012) { nvr_nop8012_stop(app->n8012); app->n8012 = NULL; }
     if (app->talk) { nvr_talk_deinit(app->talk); app->talk = NULL; }
     if (app->ble) { nvr_ble_destroy(app->ble); app->ble = NULL; }
-    if (app->tutk_on) { nvr_tutk_stop(); nvr_tutk_deinit(); app->tutk_on = 0; }
+    stop_tutk(app);
     if (app->up) { nvr_cloud_uploader_stop(app->up); app->up = NULL; }
     if (app->cm) { nvr_chan_stop_all(app->cm); nvr_chan_mgr_deinit(app->cm); app->cm = NULL; }
+    if (app->push) { nvr_push_stop(app->push); app->push = NULL; }
     if (app->eh) { nvr_evt_deinit(app->eh); app->eh = NULL; }
     if (app->pb) { nvr_playback_destroy(app->pb); app->pb = NULL; }   /* 回放先停(用 pv/sm) */
     if (app->pv) { nvr_preview_deinit(app->pv); app->pv = NULL; }
     if (app->persist) { nvr_chan_persist_close(app->persist); app->persist = NULL; }
     if (app->rs) { nvr_rec_sched_deinit(app->rs); app->rs = NULL; }
     if (app->nop_hub) { nop_event_hub_destroy(app->nop_hub); app->nop_hub = NULL; }
-    nvr_rtsp_live_stop();
     if (app->nop_http_agent) { nop_http_server_stop(app->nop_http_agent); app->nop_http_agent = NULL; }
     if (app->nop_http) { nop_http_server_stop(app->nop_http); app->nop_http = NULL; }
     if (app->router) { nvr_cmd_router_stop(app->router); app->router = NULL; }
@@ -1155,6 +1209,7 @@ void nvr_app_stop(nvr_app_t *app)
     if (app->nop)    { nop_app_destroy(app->nop); app->nop = NULL; }
     if (app->nop_chans) { nop_nvr_channels_destroy(app->nop_chans); app->nop_chans = NULL; }
     if (app->sm) { nvr_stream_stop_all(app->sm); nvr_stream_mgr_deinit(app->sm); app->sm = NULL; }
+    nvr_rtsp_live_stop();
     mhal_vout_deinit(MHAL_OUT_HDMI);
 #if RSDK_CFG_METADATA
     if (app->meta) { rsdk_meta_close(app->meta); app->meta = NULL; }

@@ -3,8 +3,10 @@
  * @brief §3 Media handlers — NOP GUI_get/setChannelMediaProfiles <-> ONVIF
  *        Media2 VideoEncoder configuration (+ options ranges).
  *
- *   get: GetVideoEncoderConfigurations（一次 SOAP）-> profiles[] current；
- *        Min/Max 用现值（Options 是另一次 ONVIF，GUI 要范围再另发）。
+ *   get: GetVideoEncoderConfigurations + GetVideoEncoderConfigurationOptions
+ *        （现值 + 相机 Options：ResolutionsAvailable / BitrateRange /
+ *        QualityRange / GovLengthRange / FrameRatesSupported）。
+ *        Min/Max/options 只填相机回的，不写默认值。
  *   set: profiles[] -> apply onto the current config baseline ->
  *        SetVideoEncoderConfiguration.
  *
@@ -38,14 +40,23 @@ static int name_to_index(const char *name)
     return 0;  /* "main" and default */
 }
 
-/* {"current":cur,"Min":lo,"Max":hi} */
-static nop_json_t *range_obj(int cur, int lo, int hi)
+/* {"current":cur} plus Min/Max only when the camera supplied a range. */
+static nop_json_t *range_current(int cur)
 {
     nop_json_t *o = nop_json_obj();
     nop_json_add_int(o, "current", cur);
+    return o;
+}
+static nop_json_t *range_obj(int cur, int lo, int hi)
+{
+    nop_json_t *o = range_current(cur);
     nop_json_add_int(o, "Min", lo);
     nop_json_add_int(o, "Max", hi);
     return o;
+}
+static nop_json_t *range_from_opt(int cur, int have, int lo, int hi)
+{
+    return have ? range_obj(cur, lo, hi) : range_current(cur);
 }
 
 /* Graceful "no data" response per the API doc (statusCode 200 + content.error):
@@ -104,10 +115,10 @@ nop_status_t onvif_map_GUI_getChannelMediaProfiles(nop_onvif_map_backend_t *be, 
             name = index_to_name(i);
         }
 
-        /* Options/ranges (ResolutionsAvailable/BitrateRange/GovLengthRange/
-         * FrameRatesSupported per spec §3) come from a separate ONVIF call;
-         * without it the GUI's dropdowns collapse to the single current value. */
-        have_opt = (nop_onvif_media2_get_venc_options(dev, vencs[i].token, &opt) == 0);
+        /* Ranges come from GetVideoEncoderConfigurationOptions (spec §3).
+         * Missing Options → only current; never invent Min/Max. */
+        have_opt = (nop_onvif_media2_get_venc_options(dev, vencs[i].token,
+                                                      vencs[i].encoding, &opt) == 0);
 
         e = nop_json_obj();
         encoding = nop_json_obj();
@@ -132,18 +143,19 @@ nop_status_t onvif_map_GUI_getChannelMediaProfiles(nop_onvif_map_backend_t *be, 
         nop_json_add(e, "VideoEncoderResolution", resolution);
 
         nop_json_add(e, "VideoEncoderGovLength",
-                     have_opt ? range_obj(vencs[i].gov_length, opt.gov_min, opt.gov_max)
-                              : range_obj(vencs[i].gov_length, vencs[i].gov_length, vencs[i].gov_length));
+                     range_from_opt(vencs[i].gov_length, have_opt && opt.have_gov,
+                                    opt.gov_min, opt.gov_max));
         nop_json_add_bool(e, "VideoEncoderGuaranteedFrameRate", vencs[i].guaranteed_framerate != 0);
         nop_json_add_bool(e, "VideoEncoderConstantBitRate", vencs[i].const_bitrate != 0);
         nop_json_add(e, "VideoEncoderFrameRateLimit",
-                     have_opt ? range_obj(vencs[i].fps, opt.fps_min, opt.fps_max)
-                              : range_obj(vencs[i].fps, vencs[i].fps, vencs[i].fps));
+                     range_from_opt(vencs[i].fps, have_opt && opt.have_fps,
+                                    opt.fps_min, opt.fps_max));
         nop_json_add(e, "VideoEncoderBitrateLimit",
-                     have_opt ? range_obj(vencs[i].bitrate_kbps, opt.bitrate_min, opt.bitrate_max)
-                              : range_obj(vencs[i].bitrate_kbps, vencs[i].bitrate_kbps, vencs[i].bitrate_kbps));
+                     range_from_opt(vencs[i].bitrate_kbps, have_opt && opt.have_bitrate,
+                                    opt.bitrate_min, opt.bitrate_max));
         nop_json_add(e, "VideoEncoderQuality",
-                     range_obj(vencs[i].quality, 0, 100));   /* doc fixes Min=0/Max=100 */
+                     range_from_opt(vencs[i].quality, have_opt && opt.have_quality,
+                                    opt.quality_min, opt.quality_max));
         nop_json_arr_push(arr, e);
     }
     onvif_session_end(be);

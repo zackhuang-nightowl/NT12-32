@@ -2,6 +2,8 @@
  *  nvr_graphql.c — Protect GraphQL addDevice。见 nvr_graphql.h / APP guide 埋点。
  ***************************************************************************************/
 #include "nvr_graphql.h"
+#include "nvr_identity.h"
+#include "nvr_defaults.h"
 #include "nvr_log.h"
 #include "cJSON.h"
 
@@ -9,12 +11,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#if defined(NVR_BUILD_STAGE)
-#  define NVR_GQL_URL "https://protect-staging.nowlsp.com/graphql"
-#else
-#  define NVR_GQL_URL "https://protect.nowlsp.com/graphql"
-#endif
 
 static const char *ADD_DEVICE_QUERY =
     "mutation addDevice($data: AddDeviceInput!) {"
@@ -62,9 +58,9 @@ nvr_gql_rc_t nvr_graphql_add_device(const nvr_gql_add_device_in_t *in,
     cJSON_AddStringToObject(data, "role", "admin");
     cJSON_AddStringToObject(data, "p2pProvider", "tutk");
     cJSON_AddStringToObject(cred, "primaryKey",
-                            (in->primary_key && in->primary_key[0]) ? in->primary_key : "88888888");
+                            (in->primary_key && in->primary_key[0]) ? in->primary_key : NVR_IDENTITY_DEF_IOTCKEY);
     cJSON_AddStringToObject(cred, "avKey",
-                            (in->av_key && in->av_key[0]) ? in->av_key : "888888");
+                            (in->av_key && in->av_key[0]) ? in->av_key : NVR_IDENTITY_DEF_AVKEY);
     if (in->bluetooth_id && in->bluetooth_id[0])
         cJSON_AddStringToObject(cred, "bluetoothId", in->bluetooth_id);
     cJSON_AddItemToObject(data, "credentials", cred);
@@ -86,7 +82,7 @@ nvr_gql_rc_t nvr_graphql_add_device(const nvr_gql_add_device_in_t *in,
     hdr = curl_slist_append(hdr, auth);
     hdr = curl_slist_append(hdr, "Cache-Control: no-cache");
 
-    curl_easy_setopt(c, CURLOPT_URL, NVR_GQL_URL);
+    curl_easy_setopt(c, CURLOPT_URL, NVR_URL_GRAPHQL);
     curl_easy_setopt(c, CURLOPT_POSTFIELDS, body);
     curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdr);
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, on_write);

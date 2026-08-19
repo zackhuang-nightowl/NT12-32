@@ -3,10 +3,9 @@
  * @brief §9 Smart AI handlers — NOP AI_*ChannelLineCrossDetect /
  *        *FieldIntrusionDetect <-> ONVIF Analytics Line/Field rules.
  *
- *   get: analytics GetRules(Line|Field) -> rules[] with line/area points
- *        (ONVIF normalized -> NOP thousandths), direction, triggers.
- *   set: replace all rules of that type -> DeleteRules(existing) + CreateRules
- *        per enabled rule (NOP thousandths -> ONVIF normalized).
+ *   get: GetRules → rules[]（Enabled 缺省 true；几何 ONVIF [-1,1] → NOP 千分位）
+ *   set: 按 Name ModifyRules（写 Enabled/ClassFilter/几何）；没有则 Create。
+ *        不 DeleteRules。空 line/area → 全幅 [-1,1]。
  *
  * ClassFilter <-> triggers uses the single table below (also used by §8). The
  * geometry transform is onvif_coord.*; values otherwise pass straight through.
@@ -125,6 +124,32 @@ static nop_json_t *csv_to_triggers(const char *csv)
     return arr;
 }
 
+static void default_fullframe_geom(nop_onvif_rule_t *r, int is_line)
+{
+    /* NOPMappingONVIF.md §9：空 line/area → 几何落到 ONVIF 归一化 [-1,1] 全幅。 */
+    if (is_line) {
+        r->x[0] = -1.0f; r->y[0] =  1.0f;
+        r->x[1] =  1.0f; r->y[1] = -1.0f;
+        r->point_count = 2;
+    } else {
+        r->x[0] = -1.0f; r->y[0] =  1.0f;
+        r->x[1] =  1.0f; r->y[1] =  1.0f;
+        r->x[2] =  1.0f; r->y[2] = -1.0f;
+        r->x[3] = -1.0f; r->y[3] = -1.0f;
+        r->point_count = 4;
+    }
+}
+
+static int find_rule_by_name(const nop_onvif_rule_t *rules, int n, const char *name)
+{
+    int i;
+    if (!name || !name[0]) return -1;
+    for (i = 0; i < n; i++)
+        if (!strcmp(rules[i].name, name))
+            return i;
+    return -1;
+}
+
 /* ---- shared get/set over a rule type ("LineDetector"/"FieldDetector") --- */
 
 static nop_status_t ai_get_rules(nop_onvif_map_backend_t *be, int ch,
@@ -136,6 +161,7 @@ static nop_status_t ai_get_rules(nop_onvif_map_backend_t *be, int ch,
     char             cfg[100];
     nop_json_t      *arr;
     int              n, i, k;
+    int              is_line = (strcmp(onvif_type, "LineDetector") == 0);
 
     s = onvif_session_begin(be, ch);
     if (!s) return NOP_ERR_IO;
@@ -144,32 +170,33 @@ static nop_status_t ai_get_rules(nop_onvif_map_backend_t *be, int ch,
     }
     n = nop_onvif_analytics_get_rules(onvif_session_dev(s), cfg, onvif_type,
                                       rules, AI_MAX_RULES);
-    /* ★ 空规则但相机**支持**该类型(GetSupportedRules 含 LineDetector/FieldDetector)→ 先建一条默认
-     * (全帧几何)规则,让 GUI 有实例可显示/编辑,用户再改。见相机文档 §3 @fixed=false 补建策略。 */
+    /* @fixed=false 且 GetRules 为空：预创建 maxInstances 条（Enabled=false，全幅几何）。
+     * fixed=true 时 Create 会失败，保持空列表。 */
     if (n == 0) {
         nop_onvif_ai_caps_t caps;
-        int is_line = (strcmp(onvif_type, "LineDetector") == 0);
-        int supported = 0;
-        if (nop_onvif_analytics_get_ai_caps(onvif_session_dev(s), cfg, &caps) == 0)
-            supported = is_line ? caps.line_present : caps.field_present;
-        if (supported) {
+        int ncreate = 0;
+        if (nop_onvif_analytics_get_ai_caps(onvif_session_dev(s), cfg, &caps) == 0) {
+            if (is_line && caps.line_present)
+                ncreate = caps.line_max_instances > 0 ? caps.line_max_instances : 1;
+            else if (!is_line && caps.field_present)
+                ncreate = caps.field_max_instances > 0 ? caps.field_max_instances : 1;
+        }
+        if (ncreate > AI_MAX_RULES) ncreate = AI_MAX_RULES;
+        for (i = 0; i < ncreate; i++) {
             nop_onvif_rule_t r;
             memset(&r, 0, sizeof(r));
-            snprintf(r.name, sizeof(r.name), "%s_1", is_line ? "LineCross" : "FieldIntrusion");
+            snprintf(r.name, sizeof(r.name), "%s_%d",
+                     is_line ? "LineCross" : "FieldIntrusion", i + 1);
             snprintf(r.type, sizeof(r.type), "%s", onvif_type);
-            if (is_line) {
+            r.enabled = 0;
+            if (is_line)
                 snprintf(r.direction, sizeof(r.direction), "%s", "Any");
-                r.x[0] = -1.0f; r.y[0] =  1.0f; r.x[1] = 1.0f; r.y[1] = -1.0f;
-                r.point_count = 2;
-            } else {
-                r.x[0] = -1.0f; r.y[0] =  1.0f; r.x[1] = 1.0f; r.y[1] =  1.0f;
-                r.x[2] =  1.0f; r.y[2] = -1.0f; r.x[3] = -1.0f; r.y[3] = -1.0f;
-                r.point_count = 4;
-            }
-            if (nop_onvif_analytics_create_rule(onvif_session_dev(s), cfg, &r) == 0)
-                n = nop_onvif_analytics_get_rules(onvif_session_dev(s), cfg, onvif_type,
-                                                  rules, AI_MAX_RULES);   /* 重取,含新建的 */
+            default_fullframe_geom(&r, is_line);
+            nop_onvif_analytics_create_rule(onvif_session_dev(s), cfg, &r);
         }
+        if (ncreate > 0)
+            n = nop_onvif_analytics_get_rules(onvif_session_dev(s), cfg, onvif_type,
+                                              rules, AI_MAX_RULES);
     }
     onvif_session_end(be);
     if (n < 0) return NOP_ERR_IO;
@@ -178,7 +205,7 @@ static nop_status_t ai_get_rules(nop_onvif_map_backend_t *be, int ch,
     for (i = 0; i < n; i++) {
         nop_json_t *e = nop_json_obj();
         nop_json_t *pts = nop_json_arr();
-        nop_json_add_bool(e, "enable", true);   /* present rule == enabled */
+        nop_json_add_bool(e, "enable", rules[i].enabled != 0);
         nop_json_add_str(e, "name", rules[i].name);
         for (k = 0; k < rules[i].point_count; k++) {
             nop_json_t *pt = nop_json_obj();
@@ -202,6 +229,39 @@ static nop_status_t ai_get_rules(nop_onvif_map_backend_t *be, int ch,
     return NOP_OK;
 }
 
+static void fill_rule_from_json(nop_onvif_rule_t *rule, const nop_json_t *ri,
+                                const char *onvif_type, const char *points_key,
+                                int is_line)
+{
+    const nop_json_t *pts;
+    int np, k;
+
+    memset(rule, 0, sizeof(*rule));
+    snprintf(rule->name, sizeof(rule->name), "%s", nop_json_str(ri, "name", "rule"));
+    snprintf(rule->type, sizeof(rule->type), "%s", onvif_type);
+    rule->enabled = nop_json_bool(ri, "enable", true) ? 1 : 0;
+    if (is_line)
+        snprintf(rule->direction, sizeof(rule->direction), "%s",
+                 nop_dir_to_onvif(nop_json_str(ri, "direction", "BOTH")));
+    triggers_to_csv(nop_json_get(ri, "triggers"), rule->class_filter,
+                    sizeof(rule->class_filter));
+
+    pts = nop_json_get(ri, points_key);
+    np  = (pts && nop_json_is_arr(pts)) ? nop_json_arr_size(pts) : 0;
+    if (np == 0) {
+        default_fullframe_geom(rule, is_line);
+    } else {
+        if (np > NOP_ONVIF_RULE_MAX_PTS) np = NOP_ONVIF_RULE_MAX_PTS;
+        for (k = 0; k < np; k++) {
+            const nop_json_t *pt = nop_json_arr_at(pts, k);
+            int nx = (int)nop_json_num(pt, "x", 0);
+            int ny = (int)nop_json_num(pt, "y", 0);
+            nop_coord_thousandths_to_norm(nx, ny, &rule->x[k], &rule->y[k]);
+        }
+        rule->point_count = np;
+    }
+}
+
 static nop_status_t ai_set_rules(nop_onvif_map_backend_t *be, int ch,
                                  const char *onvif_type, const char *points_key,
                                  int is_line, const nop_request_t *req,
@@ -209,6 +269,7 @@ static nop_status_t ai_set_rules(nop_onvif_map_backend_t *be, int ch,
 {
     onvif_session_t  *s;
     nop_onvif_rule_t  existing[AI_MAX_RULES];
+    char              touched[AI_MAX_RULES];
     const nop_json_t *rules;
     char              cfg[100];
     int               n, i, nr;
@@ -224,59 +285,39 @@ static nop_status_t ai_set_rules(nop_onvif_map_backend_t *be, int ch,
         onvif_session_end(be); return NOP_ERR_IO;
     }
 
-    /* Replace-all: delete every existing rule of this type first. */
     n = nop_onvif_analytics_get_rules(onvif_session_dev(s), cfg, onvif_type,
                                       existing, AI_MAX_RULES);
-    for (i = 0; i < n; i++)
-        nop_onvif_analytics_delete_rule(onvif_session_dev(s), cfg, existing[i].name);
+    if (n < 0) n = 0;
+    memset(touched, 0, sizeof(touched));
 
+    /* 按 Name 匹配：已有 → ModifyRules（含 Enabled）；没有 → CreateRules。
+     * 不 DeleteRules：NightOwl @fixed 与预创建实例靠 Enabled 开关。 */
     nr = nop_json_arr_size(rules);
     for (i = 0; i < nr; i++) {
         const nop_json_t *ri = nop_json_arr_at(rules, i);
-        const nop_json_t *pts;
         nop_onvif_rule_t  rule;
-        int               np, k;
-        if (!ri || !nop_json_bool(ri, "enable", true))
-            continue;                       /* disabled -> not created */
-        pts = nop_json_get(ri, points_key);
-        np  = (pts && nop_json_is_arr(pts)) ? nop_json_arr_size(pts) : 0;
-
-        memset(&rule, 0, sizeof(rule));
-        snprintf(rule.name, sizeof(rule.name), "%s", nop_json_str(ri, "name", "rule"));
-        snprintf(rule.type, sizeof(rule.type), "%s", onvif_type);
-        if (is_line)
-            snprintf(rule.direction, sizeof(rule.direction), "%s",
-                     nop_dir_to_onvif(nop_json_str(ri, "direction", "BOTH")));
-        triggers_to_csv(nop_json_get(ri, "triggers"), rule.class_filter,
-                        sizeof(rule.class_filter));
-
-        if (np == 0) {
-            /* NOPMappingONVIF.md §9 ps: empty line/area -> default the geometry
-             * to the full-frame [-1,1] extents so a valid ONVIF rule is created
-             * (line = TL->BR diagonal; field = the four frame corners). */
-            if (is_line) {
-                rule.x[0] = -1.0f; rule.y[0] =  1.0f;
-                rule.x[1] =  1.0f; rule.y[1] = -1.0f;
-                rule.point_count = 2;
-            } else {
-                rule.x[0] = -1.0f; rule.y[0] =  1.0f;
-                rule.x[1] =  1.0f; rule.y[1] =  1.0f;
-                rule.x[2] =  1.0f; rule.y[2] = -1.0f;
-                rule.x[3] = -1.0f; rule.y[3] = -1.0f;
-                rule.point_count = 4;
-            }
-        } else {
-            if (np > NOP_ONVIF_RULE_MAX_PTS) np = NOP_ONVIF_RULE_MAX_PTS;
-            for (k = 0; k < np; k++) {
-                const nop_json_t *pt = nop_json_arr_at(pts, k);
-                int nx = (int)nop_json_num(pt, "x", 0);
-                int ny = (int)nop_json_num(pt, "y", 0);
-                nop_coord_thousandths_to_norm(nx, ny, &rule.x[k], &rule.y[k]);
-            }
-            rule.point_count = np;
+        int               found;
+        if (!ri) continue;
+        fill_rule_from_json(&rule, ri, onvif_type, points_key, is_line);
+        found = find_rule_by_name(existing, n, rule.name);
+        if (found < 0 && i < n && (!rule.name[0] || !strcmp(rule.name, "rule"))) {
+            found = i;
+            snprintf(rule.name, sizeof(rule.name), "%s", existing[i].name);
         }
-
-        if (nop_onvif_analytics_create_rule(onvif_session_dev(s), cfg, &rule) != 0)
+        if (found >= 0) {
+            touched[found] = 1;
+            if (nop_onvif_analytics_modify_rule(onvif_session_dev(s), cfg, &rule) != 0)
+                rc = NOP_ERR_IO;
+        } else {
+            if (nop_onvif_analytics_create_rule(onvif_session_dev(s), cfg, &rule) != 0)
+                rc = NOP_ERR_IO;
+        }
+    }
+    /* 请求未点名的已有规则：只关 Enabled，不删。 */
+    for (i = 0; i < n; i++) {
+        if (touched[i]) continue;
+        existing[i].enabled = 0;
+        if (nop_onvif_analytics_modify_rule(onvif_session_dev(s), cfg, &existing[i]) != 0)
             rc = NOP_ERR_IO;
     }
     onvif_session_end(be);
@@ -316,13 +357,13 @@ nop_status_t onvif_map_AI_setChannelFieldIntrusionDetect(nop_onvif_map_backend_t
 /* ---- §8 Object detection: sensor config <-> ObjectDetection rules ------- */
 /* One ObjectDetection rule per class (ClassFilter). enable => rule present. */
 
-/* Is class @p onvif_class present in any fetched ObjectDetection rule? */
+/* Is class @p onvif_class present AND Enabled? 无 Enabled 栏位时 adapter 已默认 1。 */
 static int class_enabled(const nop_onvif_rule_t *rules, int n, const char *onvif_class)
 {
     int i;
     for (i = 0; i < n; i++)
         if (strstr(rules[i].class_filter, onvif_class))
-            return 1;
+            return rules[i].enabled ? 1 : 0;
     return 0;
 }
 
@@ -357,11 +398,14 @@ nop_status_t onvif_map_getChannelSensorConfig(nop_onvif_map_backend_t *be, int c
 
     arr = nop_json_arr();
 
-    /* motion(pixelChange):按 CellMotion 判断(文档:sensor=motion ← CellMotion)。 */
+    /* CellMotion → NOP getChannelSensorConfig.sensors[].sensor=pixelChange。 */
     if (have_supp && supp.motion) {
         nop_json_t *e = nop_json_obj();
+        int mot_on = 0;
+        for (i = 0; i < nmot; i++)
+            if (mot_rules[i].enabled) { mot_on = 1; break; }
         nop_json_add_str(e, "sensor", "pixelChange");
-        nop_json_add_bool(e, "enable", nmot > 0);
+        nop_json_add_bool(e, "enable", mot_on);
         nop_json_add_int(e, "eventInterval", 30);
         nop_json_arr_push(arr, e);
     }
@@ -420,7 +464,7 @@ nop_status_t onvif_map_setChannelSensorConfig(nop_onvif_map_backend_t *be, int c
         const char       *sensor = si ? nop_json_str(si, "sensor", NULL) : NULL;
         const char       *cls;
         int               enable, present, k, found = -1;
-        if (!sensor || !strcmp(sensor, "pixelChange"))
+        if (!sensor || !strcmp(sensor, "pixelChange") || !strcmp(sensor, "motion"))
             continue;                 /* motion handled by activity-zone path */
         cls = nop_trigger_to_class(sensor);
         if (!cls)
@@ -430,17 +474,19 @@ nop_status_t onvif_map_setChannelSensorConfig(nop_onvif_map_backend_t *be, int c
             if (strstr(existing[k].class_filter, cls)) { found = k; break; }
         present = found >= 0;
 
-        if (enable && !present) {
+        if (present) {
+            existing[found].enabled = enable;
+            if (nop_onvif_analytics_modify_rule(onvif_session_dev(s), cfg,
+                                                &existing[found]) != 0)
+                rc = NOP_ERR_IO;
+        } else if (enable) {
             nop_onvif_rule_t r;
             memset(&r, 0, sizeof(r));
             snprintf(r.name, sizeof(r.name), "ObjectDetect_%s", cls);
             snprintf(r.type, sizeof(r.type), "ObjectDetection");
             snprintf(r.class_filter, sizeof(r.class_filter), "%s", cls);
+            r.enabled = 1;
             if (nop_onvif_analytics_create_rule(onvif_session_dev(s), cfg, &r) != 0)
-                rc = NOP_ERR_IO;
-        } else if (!enable && present) {
-            if (nop_onvif_analytics_delete_rule(onvif_session_dev(s), cfg,
-                                                existing[found].name) != 0)
                 rc = NOP_ERR_IO;
         }
     }

@@ -45,6 +45,10 @@ typedef struct {
     void *meta_user;
     void (*on_meta_enable)(void *meta_user, int chn);
     void (*on_meta_pull)(void *meta_user, int chn, uint64_t event_id, uint32_t start_ts);
+    /* 推送：事件线程只入队；worker 读事件图再上传。可空=不推。 */
+    void *push_user;
+    void (*on_push)(void *push_user, int chn, uint64_t event_id, uint32_t ts,
+                    nop_detect_type_t type);
 } nvr_evt_cfg_t;
 
 int  nvr_evt_init  (const nvr_evt_cfg_t *cfg, nvr_evt_hub_t **out);
@@ -58,6 +62,10 @@ void nvr_evt_set_meta(nvr_evt_hub_t *h,
                       void (*on_enable)(void *user, int chn),
                       void (*on_pull)(void *user, int chn, uint64_t event_id, uint32_t start_ts),
                       void *meta_user);
+void nvr_evt_set_push(nvr_evt_hub_t *h,
+                      void (*on_push)(void *user, int chn, uint64_t event_id, uint32_t ts,
+                                      nop_detect_type_t type),
+                      void *push_user);
 /* 上线后打开相机 EventExtInfo 缓存；后录结束取该事件 metaData。满队列丢弃。 */
 void nvr_evt_queue_meta_enable(nvr_evt_hub_t *h, int chn);
 void nvr_evt_queue_meta_pull(nvr_evt_hub_t *h, int chn, uint64_t event_id, uint32_t start_ts);

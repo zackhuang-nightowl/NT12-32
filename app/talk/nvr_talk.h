@@ -3,6 +3,7 @@
  *  外网由 TUTK agent 映射 iotc-tunnel:7000。相机侧按设备分流：
  *    backend==0 (NOP)  → TCP 相机:7000 送裸音频
  *    backend!=0        → ONVIF RTSP backchannel
+ *  startSpeaker 回 tcp://iotc-tunnel:7000/speaker（talk 2.4；口与 profile 7000）。
  ***************************************************************************************/
 #ifndef NVR_TALK_H
 #define NVR_TALK_H
@@ -18,7 +19,7 @@ typedef struct nvr_talk nvr_talk_t;
 int  nvr_talk_init(int listen_port, nvr_talk_t **out);
 void nvr_talk_deinit(nvr_talk_t *t);
 
-/* chn0 内部 0-based。codec: pcm/g711u/g711a。url_out 填 https://iotc-tunnel:port/speaker/chN */
+/* chn0 内部 0-based。codec: pcm/g711u/g711a。url_out 填 tcp://iotc-tunnel:port/speaker */
 int  nvr_talk_start(nvr_talk_t *t, int chn0, int backend,
                     const char *ip, int onvif_port,
                     const char *user, const char *pass, const char *vsrc,

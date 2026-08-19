@@ -127,6 +127,7 @@ struct nvr_chan_mgr {
     nvr_chan_mgr_cfg_t cfg;
     slot_t slots[NVR_MAX_CH];
     unsigned notify_mask;   /* 状态变化位图(bit=chn)：上线/掉线置位,GUI_longPolling drain→ChannelStatusNotify */
+    int      lp_poke;       /* 非通道状态唤醒(向导 APPNotifySetupStatus 等) */
     int      poe_scan_cursor; /* PoE 发现轮询游标(公平轮扫所有未出图 PoE 口,避免只扫前几口) */
     /* 保护 slots[]/poe_scan_cursor:写线程(主循环 nvr_chan_tick + 其内发现回调)
      * 与 8089 派发线程池(≤5)的读/增删并发。递归锁——因公有函数彼此嵌套(add→remove、
@@ -172,20 +173,30 @@ unsigned nvr_chan_wait_notify(nvr_chan_mgr_t *m, int timeout_ms)
     unsigned v;
     if (!m) return 0;
     pthread_mutex_lock(&m->notify_mu);
-    if (m->notify_mask == 0 && timeout_ms > 0) {
+    if (m->notify_mask == 0 && !m->lp_poke && timeout_ms > 0) {
         struct timespec abs;
         clock_gettime(CLOCK_MONOTONIC, &abs);
         abs.tv_sec += timeout_ms / 1000;
         abs.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
         if (abs.tv_nsec >= 1000000000L) { abs.tv_sec++; abs.tv_nsec -= 1000000000L; }
-        while (m->notify_mask == 0) {
+        while (m->notify_mask == 0 && !m->lp_poke) {
             if (pthread_cond_timedwait(&m->notify_cv, &m->notify_mu, &abs) != 0) break;
         }
     }
     v = m->notify_mask;
     m->notify_mask = 0;
+    m->lp_poke = 0;
     pthread_mutex_unlock(&m->notify_mu);
     return v;
+}
+
+void nvr_chan_poke_longpoll(nvr_chan_mgr_t *m)
+{
+    if (!m) return;
+    pthread_mutex_lock(&m->notify_mu);
+    m->lp_poke = 1;
+    pthread_cond_broadcast(&m->notify_cv);
+    pthread_mutex_unlock(&m->notify_mu);
 }
 
 const char *nvr_chan_status_name(nvr_chan_status_t s)
@@ -228,6 +239,19 @@ void nvr_chan_set_substate(nvr_chan_mgr_t *m, int chn, const nvr_chan_substate_t
     slot_t *s = slot_of(m, chn);
     if (s && memcmp(&s->sub, sub, sizeof(*sub)) != 0) {
         s->sub = *sub;        /* 7未激活/6升级/2休眠/5超解码 → 立刻推 GUI */
+        chan_notify(m, chn);
+    }
+    CM_UNLOCK(m);
+}
+
+void nvr_chan_set_fw_updating(nvr_chan_mgr_t *m, int chn, int on)
+{
+    if (!m) return;
+    CM_LOCK(m);
+    slot_t *s = slot_of(m, chn);
+    int want = on ? 1 : 0;
+    if (s && s->sub.fw_updating != want) {
+        s->sub.fw_updating = want;
         chan_notify(m, chn);
     }
     CM_UNLOCK(m);
@@ -635,6 +659,7 @@ static void persist_camera(nvr_chan_mgr_t *m, nvr_channel_t *d)
     snprintf(r.service_url, sizeof(r.service_url), "%s", d->service_url);
     snprintf(r.serial, sizeof(r.serial), "%s", d->serial);
     snprintf(r.model, sizeof(r.model), "%s", d->model);   /* 型号(hardware) 持久化,重启后清单可回显 */
+    snprintf(r.firmware, sizeof(r.firmware), "%s", d->firmware);
     snprintf(r.url, sizeof(r.url), "%s", d->url);
     r.onvif_auto = d->onvif_auto; r.poe_port = d->poe_port;
     r.codec = d->codec; r.stream = d->stream; r.record = d->record;
@@ -1269,7 +1294,7 @@ static void tick_slot(nvr_chan_mgr_t *m, slot_t *s, time_t now, int *resolve_bud
         snprintf(ip, sizeof(ip), "%s", s->d.onvif_ip);
         snprintf(user, sizeof(user), "%s", s->d.user);
         snprintf(pass, sizeof(pass), "%s", s->d.pass);
-        char devmodel[64] = "", devserial[64] = "";   /* getDeviceInfo 取回的型号/序列号,重锁后回写+落库 */
+        char devmodel[64] = "", devserial[64] = "", devfw[64] = "";   /* getDeviceInfo 型号/序列号/固件 */
         CM_UNLOCK(m);
 
         if (backend == 0) {
@@ -1311,10 +1336,13 @@ static void tick_slot(nvr_chan_mgr_t *m, slot_t *s, time_t now, int *resolve_bud
                     if (ic) {
                         const char *mdl = cJSON_GetStringValue(cJSON_GetObjectItem(ic, "model"));
                         const char *ser = cJSON_GetStringValue(cJSON_GetObjectItem(ic, "serialNumber"));
+                        const char *fwv = cJSON_GetStringValue(cJSON_GetObjectItem(ic, "firmwareVersion"));
                         if (mdl && mdl[0]) snprintf(devmodel, sizeof(devmodel), "%s", mdl);
                         if (ser && ser[0]) snprintf(devserial, sizeof(devserial), "%s", ser);
-                        NVR_LOGI("chan", "ch%d getDeviceInfo: model=%s serial=%s", chn,
-                                 devmodel[0] ? devmodel : "?", devserial[0] ? devserial : "?");
+                        if (fwv && fwv[0]) snprintf(devfw, sizeof(devfw), "%s", fwv);
+                        NVR_LOGI("chan", "ch%d getDeviceInfo: model=%s serial=%s fw=%s", chn,
+                                 devmodel[0] ? devmodel : "?", devserial[0] ? devserial : "?",
+                                 devfw[0] ? devfw : "?");
                     } else NVR_LOGW("chan", "ch%d getDeviceInfo 无 content,下次重试", chn);
                     if (iroot) cJSON_Delete(iroot);
                     free(info);
@@ -1417,13 +1445,16 @@ static void tick_slot(nvr_chan_mgr_t *m, slot_t *s, time_t now, int *resolve_bud
         }
 
         CM_LOCK(m);   /* 重锁:仅当 slot 仍是同一在场设备时才封口(解锁窗口内可能被增删/换机) */
-        if ((devmodel[0] || devserial[0]) && s->in_use && s->d.chn == chn) {
+        if ((devmodel[0] || devserial[0] || devfw[0]) && s->in_use && s->d.chn == chn) {
             int changed = 0;
             if (devmodel[0] && strcmp(s->d.model, devmodel) != 0) {
                 snprintf(s->d.model, sizeof(s->d.model), "%s", devmodel); changed = 1;
             }
             if (devserial[0] && strcmp(s->d.serial, devserial) != 0) {
                 snprintf(s->d.serial, sizeof(s->d.serial), "%s", devserial); changed = 1;
+            }
+            if (devfw[0] && strcmp(s->d.firmware, devfw) != 0) {
+                snprintf(s->d.firmware, sizeof(s->d.firmware), "%s", devfw); changed = 1;
             }
             if (changed) { persist_camera(m, &s->d); sync_nop_registry(m, &s->d); }
         }

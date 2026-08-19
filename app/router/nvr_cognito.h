@@ -1,12 +1,11 @@
 /***************************************************************************************
  *  nvr_cognito.h — AWS Cognito USER_PASSWORD_AUTH（NOP 账户鉴权）。
  *
- *  对齐 NOP_DOC Server_NOP_Account / GUI_login(aws)：
- *    POST https://cognito-idp.us-east-1.amazonaws.com/
+ *  对齐 NOP_DOC ServeDomainV2 / Server_NOP_Account / GUI_login(aws)：
+ *    hosted UI = NVR_URL_COGNITO；InitiateAuth POST NVR_URL_COGNITO_IDP
  *    X-Amz-Target: AWSCognitoIdentityProviderService.InitiateAuth
+ *    ClientId / pool 随 -DNVR_STAGE 编译期选择（见 app/config/nvr_urls.h）。
  *    从 AuthenticationResult.IdToken(JWT) payload.sub 取 owner_id。
- *
- *  环境由编译开关 NVR_BUILD_STAGE 选择 client_id（与 cloud.stage 一致）。
  ***************************************************************************************/
 #ifndef NVR_COGNITO_H
 #define NVR_COGNITO_H

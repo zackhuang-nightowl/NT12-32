@@ -28,6 +28,12 @@ nvr_cloud_uploader, nvr_app_core`。
 > `platform/media_hal` 与整机 `nvr_app` 仅目标机（需 na51090 hdal/BSP）。
 > `components/nop` 的 demo 在聚合构建里默认关闭。
 
+## 云环境（ServeDomainV2）
+默认 **production** 域名。编 stage 固件加 `-DNVR_STAGE=ON`（两套独立固件，地址表在 `app/config/nvr_urls.h`）。
+```
+cmake -S . -B build_stage -DNVR_STAGE=ON
+```
+
 ## 目标机交叉构建（aarch64，出整机固件 nvr_app）✅ 已跑通
 工具链：`aarch64-ca53-linux-gnueabihf-8.4.01`（gcc 8.4，Novatek/Buildroot）。
 BSP：na51090_linux_sdk（约 1.6G，含 aarch64 `libhdal.so`）。

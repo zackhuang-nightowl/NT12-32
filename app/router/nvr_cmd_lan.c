@@ -13,6 +13,8 @@
 #include "nop_sdk/nop_onvif_ext.h"  /* nop_onvif_list_sources(设备的 VideoSourceToken 列表) */
 #include "nvr_chan_bind.h"          /* NOP digest 开/关 */
 #include "nvr_crypto.h"
+#include "nvr_identity.h"
+#include "nvr_netime.h"
 
 /* 前置声明:多源枚举(定义在 setLanDevice 之前) */
 static int lan_list_sources(const char *ip, int port, const char *usr, const char *pw,
@@ -20,6 +22,9 @@ static int lan_list_sources(const char *ip, int port, const char *usr, const cha
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <ctype.h>
+#include <pthread.h>
+#include <curl/curl.h>
 
 #define LAN_DISC_SECS 5
 
@@ -571,5 +576,306 @@ char *cmd_GUI_LanDelDevice(cJSON *a, const nvr_cmd_ctx_t *c){
     if (!nvr_jhas(a, "channel")) return nvr_resp_err("invalid_param");
     int ch = nvr_jint(a, "channel", 0);
     if (c->cm && ch > 0) lan_remove_device(c->cm, ch - 1);
+    return nvr_resp_ok();
+}
+
+/* ------------------------- App LAN attach (无线相机:App 告知 IP/MAC,NVR 占 LAN 槽) ------------------------- */
+#define ATTACH_JOB_MAX 16
+typedef struct {
+    char mac[24];
+    char status[16];
+    char message[80];
+} attach_job_t;
+
+static pthread_mutex_t g_att_mu = PTHREAD_MUTEX_INITIALIZER;
+static attach_job_t g_att[ATTACH_JOB_MAX];
+static int g_att_n;
+static int g_att_nofree;
+
+static void mac_norm(const char *in, char *out, int cap)
+{
+    int n = 0, i;
+    if (!out || cap < 2) return;
+    out[0] = 0;
+    if (!in) return;
+    for (i = 0; in[i] && n < cap - 1; i++) {
+        unsigned char c = (unsigned char)in[i];
+        if (c == ':' || c == '-' || c == ' ') continue;
+        out[n++] = (char)tolower(c);
+    }
+    out[n] = 0;
+    if (n == 12 && cap >= 18) {
+        char tmp[18];
+        snprintf(tmp, sizeof(tmp), "%c%c:%c%c:%c%c:%c%c:%c%c:%c%c",
+                 out[0], out[1], out[2], out[3], out[4], out[5],
+                 out[6], out[7], out[8], out[9], out[10], out[11]);
+        snprintf(out, (size_t)cap, "%s", tmp);
+    }
+}
+
+static int mac_eq(const char *a, const char *b)
+{
+    char na[24], nb[24];
+    mac_norm(a, na, (int)sizeof(na));
+    mac_norm(b, nb, (int)sizeof(nb));
+    return na[0] && strcmp(na, nb) == 0;
+}
+
+static void att_upsert(const char *mac, const char *st, const char *msg)
+{
+    char nm[24];
+    int i;
+    mac_norm(mac, nm, (int)sizeof(nm));
+    pthread_mutex_lock(&g_att_mu);
+    for (i = 0; i < g_att_n; i++) {
+        if (!mac_eq(g_att[i].mac, nm)) continue;
+        snprintf(g_att[i].status, sizeof(g_att[i].status), "%s", st ? st : "");
+        snprintf(g_att[i].message, sizeof(g_att[i].message), "%s", msg ? msg : "");
+        pthread_mutex_unlock(&g_att_mu);
+        return;
+    }
+    if (g_att_n >= ATTACH_JOB_MAX) {
+        memmove(&g_att[0], &g_att[1], sizeof(g_att[0]) * (ATTACH_JOB_MAX - 1));
+        g_att_n = ATTACH_JOB_MAX - 1;
+    }
+    snprintf(g_att[g_att_n].mac, sizeof(g_att[g_att_n].mac), "%s", nm);
+    snprintf(g_att[g_att_n].status, sizeof(g_att[g_att_n].status), "%s", st ? st : "");
+    snprintf(g_att[g_att_n].message, sizeof(g_att[g_att_n].message), "%s", msg ? msg : "");
+    g_att_n++;
+    pthread_mutex_unlock(&g_att_mu);
+}
+
+static size_t attach_curl_nop(void *p, size_t sz, size_t n, void *u)
+{
+    (void)p; (void)u;
+    return sz * n;
+}
+
+/* POST /AttachToMaster。返 HTTP 状态码;失败 0。 */
+static long attach_to_master(const char *ip, int port, const char *body)
+{
+    CURL *c;
+    char url[160];
+    struct curl_slist *hdr;
+    long code = 0;
+    if (!ip || !ip[0] || port <= 0 || !body) return 0;
+    c = curl_easy_init();
+    if (!c) return 0;
+    snprintf(url, sizeof(url), "http://%s:%d/AttachToMaster", ip, port);
+    hdr = curl_slist_append(NULL, "Content-Type: application/json");
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_POSTFIELDS, body);
+    curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdr);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, attach_curl_nop);
+    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 5L);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 8L);
+    curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(c, CURLOPT_FORBID_REUSE, 1L);
+    if (curl_easy_perform(c) == CURLE_OK)
+        curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+    curl_slist_free_all(hdr);
+    curl_easy_cleanup(c);
+    return code;
+}
+
+static int attach_merge(const char *ip, int *port_io, nvr_settings_t *st)
+{
+    nvr_owner_row_t ow;
+    nvr_local_link_t lk;
+    char mac[32] = "", body[512];
+    int ports[2];
+    int np = 0, i;
+    long code;
+    memset(&ow, 0, sizeof(ow));
+    memset(&lk, 0, sizeof(lk));
+    if (st) (void)nvr_settings_owner_get(st, &ow);
+    nvr_identity_get_mac("eth0", mac, sizeof(mac));
+    if (st) (void)nvr_net_local_link_fill(st, &lk);
+    if (!lk.ip[0]) snprintf(lk.ip, sizeof(lk.ip), "%s", "0.0.0.0");
+    ports[np++] = 8089;
+    if (port_io && *port_io > 0 && *port_io != 8089) ports[np++] = *port_io;
+    else ports[np++] = 80;
+
+    snprintf(body, sizeof(body),
+             "{\"action\":\"precheck\",\"ownerId\":\"%s\",\"masterType\":\"videoRecorder\"}",
+             ow.owner_id);
+    for (i = 0; i < np; i++) {
+        code = attach_to_master(ip, ports[i], body);
+        if (code == 200) break;
+    }
+    if (i >= np) return -1;   /* 相机不支持 / 不可达:调用方仍走 LAN Add */
+    if (port_io) *port_io = ports[i];
+
+    snprintf(body, sizeof(body),
+             "{\"action\":\"startMerge\",\"ownerId\":\"%s\",\"masterType\":\"videoRecorder\","
+             "\"masterIP\":\"%s\",\"masterMac\":\"%s\"}",
+             ow.owner_id, lk.ip, mac);
+    code = attach_to_master(ip, ports[i], body);
+    if (code == 200 || code == 403) return 0;   /* 403=已是从机 */
+    if (code == 401) return -2;                 /* owner 不一致 */
+    return -1;
+}
+
+typedef struct {
+    const nvr_cmd_ctx_t *c;
+    char ip[64];
+    char mac[24];
+    int  chn;
+    int  port;
+    int  has_battery;
+} attach_work_t;
+
+static void *attach_worker(void *arg)
+{
+    attach_work_t *w = (attach_work_t *)arg;
+    int merge;
+    nvr_channel_t d;
+    if (!w || !w->c || !w->c->cm) { free(w); return NULL; }
+    att_upsert(w->mac, "attaching", "");
+    merge = attach_merge(w->ip, &w->port, w->c->settings);
+    if (merge == -2) {
+        lan_remove_device(w->c->cm, w->chn);
+        att_upsert(w->mac, "error", "ownerId not the same");
+        free(w); return NULL;
+    }
+    if (w->has_battery)
+        NVR_LOGI("lan", "attach %s hasBattery:按 LAN 加机(无 KIT2 保活)", w->ip);
+    if (w->port > 0 && nvr_chan_get(w->c->cm, w->chn, &d) == 0 && d.onvif_port != w->port) {
+        d.onvif_port = w->port;
+        d.url[0] = 0;
+        nvr_chan_add(w->c->cm, &d);
+    }
+    lan_wait_same_ip(w->c, w->ip);
+    if (nvr_chan_status_code_of(w->c->cm, w->chn) == 1)
+        att_upsert(w->mac, "attached", "");
+    else
+        att_upsert(w->mac, "attaching", "");
+    free(w);
+    return NULL;
+}
+
+char *cmd_X_NightOwl_attachIPDevices(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    cJSON *devs = a ? cJSON_GetObjectItem(a, "devices") : NULL;
+    cJSON *it;
+    int started = 0;
+    if (!cJSON_IsArray(devs) || cJSON_GetArraySize(devs) <= 0)
+        return nvr_resp_err("invalid_param");
+    pthread_mutex_lock(&g_att_mu); g_att_nofree = 0; pthread_mutex_unlock(&g_att_mu);
+
+    cJSON_ArrayForEach(it, devs) {
+        attach_work_t *w;
+        pthread_t th;
+        nvr_channel_t d;
+        const char *ip, *mac, *model, *acct, *pw;
+        int poe = 0, chn;
+        char nmac[24];
+        if (!cJSON_IsObject(it)) continue;
+        ip = nvr_jstr(it, "ip", NULL);
+        mac = nvr_jstr(it, "mac", NULL);
+        if (!ip || !ip[0] || !mac || !mac[0]) continue;
+        mac_norm(mac, nmac, (int)sizeof(nmac));
+        chn = assign_channel(c, NULL, ip, &poe);
+        if (chn < 0) {
+            att_upsert(nmac, "error", "NoFreeChannel");
+            pthread_mutex_lock(&g_att_mu); g_att_nofree = 1; pthread_mutex_unlock(&g_att_mu);
+            continue;
+        }
+        model = nvr_jstr(it, "model", "");
+        acct = nvr_jstr(it, "account", "admin");
+        pw = nvr_jstr(it, "password", "");
+        memset(&d, 0, sizeof(d));
+        d.chn = chn; d.enabled = 1; d.record = 1; d.dev_chn = 1;
+        snprintf(d.type, sizeof(d.type), "single");
+        d.poe_port = poe;
+        d.onvif_auto = 1;
+        d.onvif_port = 80;
+        d.stream = NVR_STREAM_MAIN; d.codec = NVR_CODEC_AUTO; d.vout_win = chn;
+        d.kind = NVR_DEV_KIND_ONVIF;
+        d.backend = (int)nvr_dev_backend_of(NVR_DEV_KIND_ONVIF);
+        snprintf(d.onvif_ip, sizeof(d.onvif_ip), "%s", ip);
+        snprintf(d.mac, sizeof(d.mac), "%s", nmac);
+        snprintf(d.model, sizeof(d.model), "%s", model ? model : "");
+        snprintf(d.user, sizeof(d.user), "%s", acct && acct[0] ? acct : "admin");
+        if (pw && pw[0] && strcmp(pw, "123456") != 0)
+            snprintf(d.pass, sizeof(d.pass), "%s", pw);
+        snprintf(d.name, sizeof(d.name), "Camera %d", chn + 1);
+        if (nvr_chan_add(c->cm, &d) < 0) {
+            att_upsert(nmac, "error", "can't find the device");
+            continue;
+        }
+        w = (attach_work_t *)calloc(1, sizeof(*w));
+        if (!w) continue;
+        w->c = c;
+        snprintf(w->ip, sizeof(w->ip), "%s", ip);
+        snprintf(w->mac, sizeof(w->mac), "%s", nmac);
+        w->chn = chn;
+        w->port = 0;
+        w->has_battery = nvr_jbool(it, "hasBattery", 0);
+        att_upsert(nmac, "attaching", "");
+        if (pthread_create(&th, NULL, attach_worker, w) != 0) {
+            att_upsert(nmac, "error", "can't find the device");
+            free(w);
+            continue;
+        }
+        pthread_detach(th);
+        started++;
+    }
+    if (!started) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "error", "NoFreeChannel");
+        return nvr_resp_content(o);
+    }
+    return nvr_resp_ok();
+}
+
+char *cmd_X_NightOwl_getAttachStatus(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    (void)a; (void)c;
+    cJSON *o = cJSON_CreateObject();
+    cJSON *arr;
+    int i, nofree;
+    pthread_mutex_lock(&g_att_mu);
+    nofree = g_att_nofree;
+    if (nofree && g_att_n == 0) {
+        pthread_mutex_unlock(&g_att_mu);
+        cJSON_AddStringToObject(o, "error", "NoFreeChannel");
+        return nvr_resp_content(o);
+    }
+    arr = cJSON_AddArrayToObject(o, "devices");
+    for (i = 0; i < g_att_n; i++) {
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddStringToObject(e, "mac", g_att[i].mac);
+        cJSON_AddStringToObject(e, "status", g_att[i].status);
+        if (g_att[i].message[0])
+            cJSON_AddStringToObject(e, "message", g_att[i].message);
+        cJSON_AddItemToArray(arr, e);
+    }
+    pthread_mutex_unlock(&g_att_mu);
+    return nvr_resp_content(o);
+}
+
+char *cmd_X_NightOwl_detachIPDevice(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    cJSON *dev = a ? cJSON_GetObjectItem(a, "device") : NULL;
+    const char *mac, *ip;
+    nvr_channel_t list[NVR_MAX_CH];
+    int n, i, chn = -1;
+    if (!cJSON_IsObject(dev) || !c->cm) return nvr_resp_err("invalid_param");
+    mac = nvr_jstr(dev, "mac", "");
+    ip = nvr_jstr(dev, "ip", "");
+    if (mac && mac[0]) att_upsert(mac, "detaching", "");
+    n = nvr_chan_list(c->cm, list, NVR_MAX_CH);
+    for (i = 0; i < n; i++) {
+        if (mac && mac[0] && mac_eq(list[i].mac, mac)) { chn = list[i].chn; break; }
+    }
+    if (chn < 0 && ip && ip[0]) {
+        for (i = 0; i < n; i++)
+            if (list[i].onvif_ip[0] && strcmp(list[i].onvif_ip, ip) == 0) {
+                chn = list[i].chn; break;
+            }
+    }
+    if (chn >= 0) lan_remove_device(c->cm, chn);
+    if (mac && mac[0]) att_upsert(mac, "detached", "");
     return nvr_resp_ok();
 }

@@ -13,8 +13,9 @@ build_*/
 # ---- 编译期生成 ----
 rsdk_config.h
 
-# ---- 部署包里由 build_arm 复制来的可执行（可再生，避免提交陈旧二进制）----
+# ---- 部署包里由 build 复制来的可执行（可再生，避免提交陈旧二进制）----
 deploy/rootfs/dvr/bin/nvr_app
+deploy/rootfs/dvr/tutk_cloud_agent/nvr_tutk_cgi
 
 # ---- vendored 源码压缩包（构建不需要，用系统/预编译库）----
 *.tar.gz

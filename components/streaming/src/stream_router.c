@@ -15,10 +15,14 @@
 #include <time.h>
 
 /* 远程 RTSP(P2PTunnel 映射);强符号在 cloud_tutk/nvr_rtsp_live.c */
-__attribute__((weak)) void nvr_rtsp_live_feed(int chn, const uint8_t *data, int len,
+__attribute__((weak)) void nvr_rtsp_live_feed(int chn, int stream, const uint8_t *data, int len,
                                                int codec, int is_key, uint32_t ts_ms)
 {
-    (void)chn; (void)data; (void)len; (void)codec; (void)is_key; (void)ts_ms;
+    (void)chn; (void)stream; (void)data; (void)len; (void)codec; (void)is_key; (void)ts_ms;
+}
+__attribute__((weak)) void nvr_rtsp_live_feed_audio(int chn, const uint8_t *data, int len, uint32_t ts_ms)
+{
+    (void)chn; (void)data; (void)len; (void)ts_ms;
 }
 
 static stream_pull_t *pull_of(stream_chan_t *c, int stream)
@@ -443,16 +447,17 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
         stream_pre_free_chan(c);   /* 退出待命:释放双路预录环 */
     }
 
-    /* P2PTunnel 映射 RTSP:旁路子码流推给远程 App */
-    if (p->stream == NVR_STREAM_SUB)
-        nvr_rtsp_live_feed(c->cfg.chn, data, len, p->codec, nc.is_key, ts);
+    /* P2PTunnel 映射 RTSP:主/子都旁路,会话按 URL 选码流 */
+    nvr_rtsp_live_feed(c->cfg.chn, p->stream, data, len, p->codec, nc.is_key, ts);
 }
 
 void stream_route_audio(stream_pull_t *p, const uint8_t *data, int len, uint32_t ts)
 {
-    /* 音频录像:挂主流 writer,stream=2/codec=AAC。仅主路带音频。 */
     if (!p || !p->owner || p->stream != NVR_STREAM_MAIN) return;
     stream_chan_t *c = p->owner;
+    if (data && len > 0)
+        nvr_rtsp_live_feed_audio(c->cfg.chn, data, len, ts);
+    /* 音频录像:挂主流 writer,stream=2/codec=AAC。仅主路带音频。 */
     int writing = c->cfg.record || c->event_clip;
     if (!writing || !c->writer_main || !c->rec_gated_main || !data || len <= 0) return;
     rsdk_frame_t f;

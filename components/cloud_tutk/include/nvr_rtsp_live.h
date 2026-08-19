@@ -1,5 +1,9 @@
 /***************************************************************************************
- *  nvr_rtsp_live.h — 本地 RTSP 服务(供 P2PTunnel 映射 remote→554 推 live 子码流)
+ *  nvr_rtsp_live.h — 本机 RTSP(TUTK 隧道 iotc-tunnel:8554)
+ *
+ *  直播 + 远程回放共用一口。App 经 P2PTunnel 映射后走标准 RTSP
+ *  (OPTIONS/DESCRIBE/SETUP/PLAY/PAUSE/TEARDOWN/SET_PARAMETER)。
+ *  每个 RTP 带 AVTECH 拓展头:playbackStatus + playbackTimestamp。
  ***************************************************************************************/
 #ifndef NVR_RTSP_LIVE_H
 #define NVR_RTSP_LIVE_H
@@ -10,15 +14,32 @@
 extern "C" {
 #endif
 
+struct rsdk_group;
+
 int  nvr_rtsp_live_start(int port);
 void nvr_rtsp_live_stop(void);
+/* 实际监听端口;未启动返回 0。URL 必须用此值,禁止写死。 */
+int  nvr_rtsp_live_port(void);
 
-/* 选择要经 RTSP 输出的通道(0-based);-1=任意。startLiveStream 预置;
- * RTSP 客户端 URL(/live/chN)亦会覆盖。 */
+/* 热插拔后盘组指针变化时重绑;NULL=无盘(回放只推空白帧)。 */
+void nvr_rtsp_live_set_group(struct rsdk_group *group);
+
+/* startLiveStream 预置通道/码流(0主/1子)及是否推视频/音频。chn=-1 取消。 */
 void nvr_rtsp_live_select(int chn);
+void nvr_rtsp_live_select_ex(int chn, int stream);
+void nvr_rtsp_live_select_media(int chn, int stream, int want_video, int want_audio);
 
-/* streaming 旁路:子码流 Annex-B 帧 → RTP(有客户端 PLAY 时才发)。codec:0=H264 1=H265 */
-void nvr_rtsp_live_feed(int chn, const uint8_t *data, int len, int codec, int is_key, uint32_t ts_ms);
+/* streaming 旁路:Annex-B 视频。stream:0主/1子。codec:0=H264 1=H265。 */
+void nvr_rtsp_live_feed(int chn, int stream, const uint8_t *data, int len,
+                        int codec, int is_key, uint32_t ts_ms);
+/* 主流音频(AAC,可带 ADTS)→ 正在看该路 live 且 streamType 含 audio 的会话。 */
+void nvr_rtsp_live_feed_audio(int chn, const uint8_t *data, int len, uint32_t ts_ms);
+
+/* startPlayback:登记通道/码流/是否音频/起点。duration=重叠段剩余秒(无段=0)。
+ * 无论有无录像都返回 0,App 随后 DESCRIBE /playback/<startTime>。 */
+int  nvr_rtsp_pb_prepare(int chn, uint32_t start_utc, int stream, int want_audio, int want_video,
+                         uint32_t *duration_out);
+void nvr_rtsp_pb_stop(void);
 
 #ifdef __cplusplus
 }

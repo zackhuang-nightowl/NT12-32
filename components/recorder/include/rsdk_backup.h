@@ -42,6 +42,10 @@ RSDK_API rsdk_err_t rsdk_backup_register(const rsdk_muxer_t *mux);  /* 注册新
 /* 导出一个时间范围+通道(跨盘归并, 自动解密)为文件 */
 RSDK_API rsdk_err_t rsdk_backup_export(rsdk_group_t *g, uint32_t t0, uint32_t t1, int chn,
                                        const rsdk_export_opt_t *opt, const char *out_path);
+/* 同 export,stream=0主/1子;stream<0 不限。无该码流段则 RSDK_E_NOTFOUND。 */
+RSDK_API rsdk_err_t rsdk_backup_export_stream(rsdk_group_t *g, uint32_t t0, uint32_t t1, int chn,
+                                              int stream, const rsdk_export_opt_t *opt,
+                                              const char *out_path);
 /* 导出单个已命中段(单盘) */
 RSDK_API rsdk_err_t rsdk_backup_export_seg(rsdk_dev_t *d, const rsdk_index_slot_t *seg,
                                            const rsdk_export_opt_t *opt, const char *out_path);

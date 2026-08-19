@@ -29,7 +29,7 @@ typedef struct nvr_settings nvr_settings_t;
  * json_defaults_dir 可为 NULL(不播种)。成功返回 0。 */
 int  nvr_settings_open(const char *db_path, const char *json_defaults_dir, nvr_settings_t **out);
 void nvr_settings_close(nvr_settings_t *s);
-int  nvr_settings_factory_reset(nvr_settings_t *s);  /* 恢复出厂:清数据表行,保留 meta_kv */
+int  nvr_settings_factory_reset(nvr_settings_t *s);  /* 清用户数据后重播种 32 通道默认行,保留 meta_kv */
 
 /* ---------- typed KV(点分命名空间,如 "system.device_name" / "cloud.switch") ---------- */
 int  nvr_settings_get_int (nvr_settings_t *s, const char *key, int def);
@@ -75,8 +75,10 @@ typedef struct {
     char enh_random[32];          /* NOP EnhancedSecurity random；空=普通模式 */
 } nvr_camera_row_t;
 
+/* 通道 PK 表(camera / camera_capability / record_* / push_config / cloud_channel)
+ * 开库即预置 0..31 行;接口只 UPDATE 已有行,不 INSERT/DELETE 通道行。 */
 int  nvr_settings_camera_upsert(nvr_settings_t *s, const nvr_camera_row_t *row);
-int  nvr_settings_camera_delete(nvr_settings_t *s, int chn);
+int  nvr_settings_camera_delete(nvr_settings_t *s, int chn); /* 只清本 chn 的 camera 字段+能力,不删行 */
 int  nvr_settings_camera_get   (nvr_settings_t *s, int chn, nvr_camera_row_t *out);       /* 无返回 <0 */
 int  nvr_settings_camera_find_by_mac(nvr_settings_t *s, const char *mac, nvr_camera_row_t *out); /* 无返回 <0 */
 int  nvr_settings_camera_list  (nvr_settings_t *s, nvr_camera_row_t *out, int cap);        /* 返回条数 */
@@ -106,17 +108,19 @@ int  nvr_settings_rec_sched_get(nvr_settings_t *s, int chn, nvr_rec_schedule_t *
 
 /* ---------- 结构化:推送配置(开关 + 免打扰单日时段 + 日期) ---------- */
 typedef struct {
-    int  chn, switch_on, dnd_enable;
+    int  chn, switch_on, dnd_enable, photo_on;
+    int  snooze_end;                  /* UTC unix；0=关 */
     char dnd_start[8], dnd_end[8];    /* "HHMM" */
     char dnd_weekdays[16];            /* CSV "1..7",默认全周 */
     char time_unit[8];                /* "hour" | "minute" */
+    char triggers[128];               /* CSV；空=未设置,GET 回 [] */
 } nvr_push_cfg_t;
 int  nvr_settings_push_set(nvr_settings_t *s, const nvr_push_cfg_t *row);
 int  nvr_settings_push_get(nvr_settings_t *s, int chn, nvr_push_cfg_t *out);       /* 无返回 <0 */
 
 /* ---------- 结构化:每通道云存配置(streamType/triggers/enable) ---------- */
 typedef struct { int chn; char stream_type[8]; char triggers[128]; int enable; } nvr_cloud_ch_row_t;
-int  nvr_settings_cloud_ch_upsert(nvr_settings_t *s, const nvr_cloud_ch_row_t *row);
+int  nvr_settings_cloud_ch_upsert(nvr_settings_t *s, const nvr_cloud_ch_row_t *row); /* UPDATE 已有 chn 行 */
 int  nvr_settings_cloud_ch_get   (nvr_settings_t *s, int chn, nvr_cloud_ch_row_t *out); /* 无返回 <0 */
 int  nvr_settings_cloud_ch_list  (nvr_settings_t *s, nvr_cloud_ch_row_t *out, int cap);
 
@@ -129,7 +133,7 @@ typedef struct {
     char weekdays[16];            /* CSV "1..7" */
     char start_hms[8], end_hms[8];/* "HHMMSS" */
 } nvr_schedule_row_t;
-/* 覆盖一个 (chn,domain[,sensor]) 的全部规则:先删旧再插新(单事务)。rows 可为 0 条=清空。 */
+/* 覆盖一个 (chn,domain[,sensor]) 的规则列表(复合主键,非整通道删行)。rows 可为 0 条=该组清空。 */
 int  nvr_settings_schedule_replace(nvr_settings_t *s, int chn, const char *domain, const char *sensor,
                                    const nvr_schedule_row_t *rows, int n);
 int  nvr_settings_schedule_list(nvr_settings_t *s, int chn, const char *domain, const char *sensor,

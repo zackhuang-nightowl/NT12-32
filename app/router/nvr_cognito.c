@@ -2,6 +2,7 @@
  *  nvr_cognito.c — Cognito InitiateAuth + JWT sub 解码。见 nvr_cognito.h。
  ***************************************************************************************/
 #include "nvr_cognito.h"
+#include "nvr_defaults.h"
 #include "nvr_log.h"
 #include "cJSON.h"
 
@@ -9,16 +10,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#if defined(NVR_BUILD_STAGE)
-/* Stage：Server_NOP_Account.md */
-#  define NVR_COG_CLIENT_ID "5vmvkt4bh9ravj4kf0hnuqiq2t"
-#else
-/* Production embedded client（与 Tester InitiateAuth / README 一致） */
-#  define NVR_COG_CLIENT_ID "7a7t4ds667njvemo0e6aobotce"
-#endif
-
-#define NVR_COG_URL "https://cognito-idp.us-east-1.amazonaws.com/"
 
 typedef struct { char *buf; size_t len; } mem_t;
 
@@ -99,7 +90,7 @@ nvr_cognito_rc_t nvr_cognito_login(const char *username, const char *password,
     cJSON *root = cJSON_CreateObject();
     cJSON *params = cJSON_CreateObject();
     if (!root || !params) { cJSON_Delete(root); cJSON_Delete(params); return NVR_COGNITO_ERR_OTHER; }
-    cJSON_AddStringToObject(root, "ClientId", NVR_COG_CLIENT_ID);
+    cJSON_AddStringToObject(root, "ClientId", NVR_URL_COGNITO_CLIENT_ID);
     cJSON_AddStringToObject(root, "AuthFlow", "USER_PASSWORD_AUTH");
     cJSON_AddStringToObject(params, "USERNAME", username);
     cJSON_AddStringToObject(params, "PASSWORD", password);
@@ -116,7 +107,7 @@ nvr_cognito_rc_t nvr_cognito_login(const char *username, const char *password,
     hdr = curl_slist_append(hdr, "Content-Type: application/x-amz-json-1.1");
     hdr = curl_slist_append(hdr, "X-Amz-Target: AWSCognitoIdentityProviderService.InitiateAuth");
 
-    curl_easy_setopt(c, CURLOPT_URL, NVR_COG_URL);
+    curl_easy_setopt(c, CURLOPT_URL, NVR_URL_COGNITO_IDP);
     curl_easy_setopt(c, CURLOPT_POSTFIELDS, body);
     curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdr);
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, on_write);

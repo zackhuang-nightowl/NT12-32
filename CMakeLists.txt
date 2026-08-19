@@ -14,10 +14,9 @@ set(CMAKE_CXX_STANDARD 14)
 # 目标机(aarch64)构建 media_hal/app 另需 -DNVR_WITH_ONBOARD=ON -DBSP_ROOT=<na51090_linux_sdk>。
 
 option(NVR_WITH_ONVIF   "启用 ONVIF（Happytime, 需 C++/openssl）" OFF)
-option(NVR_WITH_TUTK    "启用 TUTK P2P"                          OFF)
 option(NVR_WITH_ONBOARD "在目标机上构建（链接 hdal/platform）"   OFF)
 
-# 云环境:默认生产(prod);-DNVR_STAGE=ON 切预发(stage)域名。全局传给 app+components。
+# 云环境:默认 production；-DNVR_STAGE=ON 切 stage。域名表 app/config/nvr_urls.h（ServeDomainV2）。
 option(NVR_STAGE        "使用预发(stage)云环境域名,默认生产(prod)" OFF)
 if(NVR_STAGE)
     add_compile_definitions(NVR_BUILD_STAGE=1)

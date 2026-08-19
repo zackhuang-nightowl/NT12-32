@@ -1,0 +1,27 @@
+---
+description: 实现 NOP/ONVIF 功能前必读外部文档；不明确先提问再动手
+alwaysApply: true
+---
+
+# NOP / ONVIF 文档先行（实现前必读）
+
+外部文档在仓库**隔壁**（`NT12-32/` 下，不在本 git 内）。实现功能、补接口、改字段前**先读对应文档**；文档没有、互相矛盾、或拿不准 NVR 是否复用相机逻辑时：**先提问，得到确认后再写代码**。不要凭猜测补行为。
+
+## 三处文档
+
+| 用途 | 路径 |
+|------|------|
+| **功能行为**（做什么、流程、约束） | `C:\Users\Administrator\Desktop\NightOwl-project\NT12-32\nop_doc` |
+| **NOP 接口**（命令名、字段、类型、取值） | `C:\Users\Administrator\Desktop\NightOwl-project\NT12-32\nop_api_doc\GUI_Ext` |
+| **ONVIF / nopOnvif**（映射 + IPC 实做） | `C:\Users\Administrator\Desktop\NightOwl-project\NT12-32\onvif` |
+
+- `nop_doc`：按功能主题（`camera/`、`videoRecorder/` 等）找对应 md。文档只写了 **standaloneCamera** 时，NVR **经常复用同一套逻辑**，差异主要是 **channel**：指向 NVR 里该通道绑定的设备（`dev_chn` / 通道号），不是再发明一套 NVR 专用语义。若文档完全没有该功能、或无法判断能否复用：**先问**。
+- `nop_api_doc/GUI_Ext`：接口实现、请求/响应字段以这里为准（`.link` / `.txt` / `.html`）。**sample 有意义，必须参考**（类型、取值范围、默认、嵌套），不要只抄字段名后自填样例。
+- `onvif/`：ONVIF 映射与 nopOnvif IPC 实做（尤其 `NOPMappingONVIF.md`、`nightowl_protocol.md`）。mapping / 白名单 / SOAP vs `/APPJsonCmd` 以这里 + 架构规则为准。
+
+## 工作顺序
+
+1. 读 `nop_doc` 对应功能说明（含 standaloneCamera 是否可复用）。
+2. 读 `GUI_Ext` 对应命令的字段与 sample。
+3. 若涉及 ONVIF / nopOnvif，读 `onvif/` 映射与协议。
+4. 缺文档、sample 对不上、channel 语义不清 → **提问，等确认再实现**。
