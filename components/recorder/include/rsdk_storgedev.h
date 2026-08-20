@@ -3,11 +3,26 @@
 #define RSDK_STORGEDEV_H
 #include "rsdk_types.h"
 #include "rsdk_rawdev.h"
+#include <pthread.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef struct rsdk_dev rsdk_dev_t;
+
+/* ★ 元数据递归锁(冻结格式外新增): 保护本盘 sb/st/index/badmap 内存态与其落盘。
+ * rec/index 层跨多个原语的复合操作(如段翻转)用它把整段变更做成原子。数据区 pread/pwrite 不走此锁。
+ * 入盘组后 rsdk_group_open 用 rsdk_dev_bind_lock 让整组共享一把锁(避免多盘 writer 迁移的锁序问题)。 */
+RSDK_API void rsdk_dev_lock(rsdk_dev_t *d);
+RSDK_API void rsdk_dev_unlock(rsdk_dev_t *d);
+RSDK_API void rsdk_dev_bind_lock(rsdk_dev_t *d, pthread_mutex_t *shared);
+
+/* ---- chunk→slot 内存加速表(纯内存, 覆盖回收 O(1) / upsert O(1) / 真实容量; 调用方须持 dev 锁) ---- */
+#define RSDK_MAP_NONE 0xFFFFFFFFu
+RSDK_API uint32_t rsdk_dev_map_get(rsdk_dev_t *d, uint64_t chunk);       /* 空/越界/无表→RSDK_MAP_NONE */
+RSDK_API void     rsdk_dev_map_set(rsdk_dev_t *d, uint64_t chunk, uint32_t slot); /* 维护 used_chunks */
+RSDK_API int      rsdk_dev_map_ready(rsdk_dev_t *d);                     /* 1=有表 0=回退全扫描 */
+RSDK_API int      rsdk_dev_map_alloc(rsdk_dev_t *d);                     /* 供 index 层开盘建表 */
 
 typedef struct {
     const char *sn;          /* 设备SN(派生KEK; NULL=用默认) */

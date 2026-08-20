@@ -5,6 +5,7 @@
 #include "rsdk_play.h"
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 /* ==================== 盘组结构 ==================== */
 
@@ -16,6 +17,11 @@ struct rsdk_group {
     int         *health_ok;  /* 每盘健康标志: 1=健康/未知放行, 0=病盘 */
     double      *bw;         /* 每盘 EWMA 写带宽(字节/段, 近似) */
     int          chn_last[32]; /* 每通道上次落盘下标, -1=未分配 */
+
+    /* ★ 盘组共享递归锁: 组内所有盘的元数据(sb/st/index/badmap)与 balance 字段(health/bw/chn_last/rr)
+     * 都串行在这一把锁上。rsdk_group_open 后令每盘 dev->lk 指向它 → 多盘写者迁移/跨盘选盘时只有一把锁,
+     * 无锁序/死锁。数据区 pread/pwrite 不走此锁, 多盘并行写不受影响。 */
+    pthread_mutex_t lock;
 };
 
 /* 盘负载(0..1): 已写 chunk / 数据 chunk 总量 */
@@ -41,13 +47,21 @@ rsdk_err_t rsdk_group_open(const char *const *paths, int n, rsdk_group_t **out) 
         return RSDK_E_IO;
     }
 
+    pthread_mutexattr_t mattr;
+    pthread_mutexattr_init(&mattr);
+    pthread_mutexattr_settype(&mattr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&g->lock, &mattr);
+    pthread_mutexattr_destroy(&mattr);
+
     for (int i = 0; i < n; i++) {
         rsdk_err_t rc = rsdk_dev_open(paths[i], &g->devs[i]);
         if (rc) {
             for (int k = 0; k < i; k++) { rsdk_dev_close(g->devs[k]); free(g->paths[k]); }
+            pthread_mutex_destroy(&g->lock);
             free(g->devs); free(g->paths); free(g->health_ok); free(g->bw); free(g);
             return rc;
         }
+        rsdk_dev_bind_lock(g->devs[i], &g->lock);   /* 整组元数据共享一把锁 */
         g->paths[i]     = strdup(paths[i]);
         g->health_ok[i] = 1;   /* 初始: 健康/未知均放行 */
         g->bw[i]        = 0.0;
@@ -58,6 +72,10 @@ rsdk_err_t rsdk_group_open(const char *const *paths, int n, rsdk_group_t **out) 
     return RSDK_OK;
 }
 
+/* 盘组元数据锁(= 组内各盘共享锁): 供 rec 层跨原语的复合操作(段翻转/开关 writer)加锁。 */
+void rsdk_group_lock(rsdk_group_t *g)   { if (g) pthread_mutex_lock(&g->lock); }
+void rsdk_group_unlock(rsdk_group_t *g) { if (g) pthread_mutex_unlock(&g->lock); }
+
 int         rsdk_group_count(rsdk_group_t *g)      { return g ? g->n : 0; }
 rsdk_dev_t *rsdk_group_dev(rsdk_group_t *g, int i) { return (g && i>=0 && i<g->n) ? g->devs[i] : NULL; }
 
@@ -67,6 +85,7 @@ void rsdk_group_close(rsdk_group_t *g) {
         rsdk_dev_close(g->devs[i]);
         free(g->paths[i]);
     }
+    pthread_mutex_destroy(&g->lock);   /* 各盘已关(不再持共享锁) */
     free(g->devs); free(g->paths); free(g->health_ok); free(g->bw);
     free(g);
 }
@@ -79,9 +98,13 @@ rsdk_err_t rsdk_group_smart_refresh(rsdk_group_t *g) {
     if (!g) return RSDK_E_PARAM;
     for (int i = 0; i < g->n; i++) {
         rsdk_smart_t s;
+        /* SG_IO 离热路径, 不持锁读盘; 只在写 health_ok[] 时短暂持锁(与 balance_pick 读一致)。 */
         rsdk_err_t rc = rsdk_smart_read(g->paths[i], &s);
-        if (rc == RSDK_OK)
+        if (rc == RSDK_OK) {
+            pthread_mutex_lock(&g->lock);
             g->health_ok[i] = rsdk_smart_ok(&s);
+            pthread_mutex_unlock(&g->lock);
+        }
         /* rc != OK: 取不到 SMART → 保留现有状态 */
     }
     return RSDK_OK;
@@ -91,18 +114,22 @@ rsdk_err_t rsdk_group_smart_refresh(rsdk_group_t *g) {
  * EWMA: bw[i] = bw[i]*0.7 + bytes*0.3 */
 void rsdk_balance_report(rsdk_group_t *g, rsdk_dev_t *dev, uint64_t bytes) {
     if (!g || !dev) return;
+    pthread_mutex_lock(&g->lock);
     for (int i = 0; i < g->n; i++) {
         if (g->devs[i] == dev) {
             g->bw[i] = g->bw[i] * 0.7 + (double)bytes * 0.3;
-            return;
+            break;
         }
     }
+    pthread_mutex_unlock(&g->lock);
 }
 
 /* 测试钩子: 强制设置健康状态(绕过 SMART, 用于 image 文件上的测试) */
 void rsdk_group_set_health(rsdk_group_t *g, int disk, int ok) {
     if (!g || disk < 0 || disk >= g->n) return;
+    pthread_mutex_lock(&g->lock);
     g->health_ok[disk] = ok;
+    pthread_mutex_unlock(&g->lock);
 }
 
 /* ==================== 选盘(设计 §4.2) ==================== */
@@ -120,6 +147,9 @@ static int dev_wrapped(rsdk_dev_t *d) {
  */
 rsdk_err_t rsdk_balance_pick(rsdk_group_t *g, int chn, rsdk_dev_t **picked) {
     if (!g || !picked) return RSDK_E_PARAM;
+    /* 持组锁: 读各盘 sb(write_ptr/seq_epoch)、health_ok、bw, 写 chn_last/rr。递归锁 → 可被
+     * 已持锁的 start_seg 复合调用。 */
+    pthread_mutex_lock(&g->lock);
 
     /* 1. 最大带宽(归一化分母) */
     double max_bw = 0.0;
@@ -170,6 +200,7 @@ rsdk_err_t rsdk_balance_pick(rsdk_group_t *g, int chn, rsdk_dev_t **picked) {
 
     g->chn_last[slot] = pick;
     *picked = g->devs[pick];
+    pthread_mutex_unlock(&g->lock);
     return RSDK_OK;
 }
 

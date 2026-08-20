@@ -33,21 +33,30 @@ void rsdk_rec_set_event(rsdk_writer_t *w, uint64_t event_id) {
 }
 
 static uint32_t next_seg_id(rsdk_dev_t *d, int chn) {
+    /* st->chn[].seg_seq 的 RMW; 调用方(start_seg)已持锁, 此处不再取。 */
     rsdk_systab_t *st = rsdk_dev_systab(d);
     uint32_t seq = ++st->chn[chn & 31].seg_seq;
     return ((uint32_t)(chn & 0xFF) << 24) | (seq & 0x00FFFFFF);
 }
 
+/* writer 元数据锁: 盘组用组共享锁(与选盘/迁移一致), 单盘用该盘自锁。递归 → 内部原语自锁可嵌套。 */
+static void wlock(rsdk_writer_t *w)   { if (w->group) rsdk_group_lock(w->group); else rsdk_dev_lock(w->d); }
+static void wunlock(rsdk_writer_t *w) { if (w->group) rsdk_group_unlock(w->group); else rsdk_dev_unlock(w->d); }
+
 static rsdk_err_t start_seg(rsdk_writer_t *w) {
+    /* ★ 整段"选盘+分配chunk+回收+定 seg_id"在锁内原子完成: 杜绝与并发 open/写的 chunk 双分配(R1)
+     * 与 index_next/seg_seq 竞争。数据区尚未写, 锁只覆盖元数据, 不含数据 pwrite。 */
+    wlock(w);
+    rsdk_err_t rc = RSDK_OK;
     if (w->group) {                        /* 多盘: 每段按负载均衡选盘 */
         rsdk_dev_t *picked;
-        rsdk_err_t prc = rsdk_balance_pick(w->group, w->chn, &picked);
-        if (prc) return prc;
+        rc = rsdk_balance_pick(w->group, w->chn, &picked);
+        if (rc) { wunlock(w); return rc; }
         w->d = picked;
     }
     uint64_t chunk, off;
-    rsdk_err_t rc = rsdk_dev_alloc_chunk(w->d, &chunk, &off);
-    if (rc) return rc;                          /* stop 策略盘满 → NOSPACE */
+    rc = rsdk_dev_alloc_chunk(w->d, &chunk, &off);
+    if (rc) { wunlock(w); return rc; }          /* stop 策略盘满 → NOSPACE */
     if (rsdk_dev_is_wrapped(w->d)) {            /* 覆盖模式: 回收该 chunk 上旧段索引 + 元数据 */
         rsdk_index_invalidate_chunk(w->d, chunk);
         if (w->reclaim) w->reclaim(w->reclaim_user, rsdk_dev_index(w->d), chunk);
@@ -56,6 +65,7 @@ static rsdk_err_t start_seg(rsdk_writer_t *w) {
     w->seg_id = next_seg_id(w->d, w->chn);
     w->frame_seq = 0; w->frame_count = 0; w->total_bytes = 0;
     w->start_time = 0; w->last_time = 0; w->end_off = 0; w->open_written = 0;
+    wunlock(w);
     return RSDK_OK;
 }
 
@@ -76,10 +86,13 @@ static void fill_slot(rsdk_writer_t *w, rsdk_index_slot_t *s, int closed) {
 
 static rsdk_err_t finalize_seg(rsdk_writer_t *w) {
     if (w->frame_count == 0) return RSDK_OK;
+    /* 段封口: 写 VALID 槽 + 报告带宽, 与并发 index_write/balance 串行(递归锁内嵌各原语自锁)。 */
+    wlock(w);
     rsdk_index_slot_t s; fill_slot(w, &s, 1);
     rsdk_err_t rc = rsdk_index_write(w->d, &s);
     /* 多盘: 段结束后向均衡层报告本段字节数, 更新 EWMA 写带宽 */
     if (w->group) rsdk_balance_report(w->group, w->d, w->total_bytes);
+    wunlock(w);
     return rc;
 }
 

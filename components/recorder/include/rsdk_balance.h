@@ -24,6 +24,11 @@ RSDK_API void       rsdk_balance_report(rsdk_group_t *g, rsdk_dev_t *dev, uint64
 RSDK_API void       rsdk_group_set_health(rsdk_group_t *g, int disk, int ok);
 RSDK_API void       rsdk_group_close(rsdk_group_t *g);
 
+/* 盘组元数据锁(= 组内各盘共享的递归锁): 供 rec 层把"跨多个原语的复合操作"(段翻转、开/关 writer)
+ * 做成原子。递归 → 可与内部各原语的自锁嵌套。数据区读写不走此锁。 */
+RSDK_API void       rsdk_group_lock(rsdk_group_t *g);
+RSDK_API void       rsdk_group_unlock(rsdk_group_t *g);
+
 /* ---- 多盘回放(设计 §4/§7.4) ---- */
 /* 跨盘检索: 归并盘组内所有盘的索引, 按 start_time 升序。
  * 返回的 slot.start_disk 被重写为「盘组内数组下标」, 供 group_play 定位到具体盘。 */

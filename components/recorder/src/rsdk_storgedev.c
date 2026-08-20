@@ -3,11 +3,13 @@
 #include "rsdk_storgedev.h"
 #include "rsdk_crypto.h"
 #include "rsdk_feature.h"
+#include "rsdk_index.h"        /* rsdk_index_load_map: 开盘建 chunk→slot 加速表 */
 #include "rsdk_util.h"
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <pthread.h>
 
 struct rsdk_dev {
     rsdk_rawdev_t     *raw;
@@ -20,7 +22,57 @@ struct rsdk_dev {
     uint8_t *badmap;         /* 坏 chunk 位图: 1 bit/数据 chunk; NULL 若 data_chunks==0 */
     uint64_t badmap_bytes;   /* = (data_chunks+7)/8 */
     uint64_t bad_bak_off;    /* 备份副本盘上绝对字节偏移; 0=无备份 */
+
+    /* ★ 内存加速表(纯内存, 不落盘, 冻结格式外): chunk → 当前拥有它的索引槽下标。
+     * 用途: 覆盖回收 O(1) 定位待作废槽(替代全索引线性扫描 → 消除满盘周期性卡顿→丢帧);
+     *       index_write upsert O(1) 定位(替代 8192 回溯); free_chunks 真实容量。
+     * 开盘时由 rsdk_index_load_map 顺序扫一次索引建立; 分配失败(NULL)→ 各处回退旧全扫描, 仍正确。 */
+    uint32_t *chunk_slot;    /* [data_chunks]; RSDK_MAP_NONE=空闲; NULL=未建(回退) */
+    uint64_t  used_chunks;   /* chunk_slot 中非空条目数(真实占用 chunk 数) */
+
+    /* ★ 元数据递归锁(冻结格式外新增, 纯内存): 保护 sb/st/index/badmap/balance 的内存态与其落盘。
+     * 单盘 open → lk=&self_lock; 入盘组 → 由 rsdk_group_open 调 rsdk_dev_bind_lock() 指向盘组共享锁,
+     * 使整组元数据串行在一把锁上(避免多盘 writer 迁移的锁序/死锁)。数据区 pread/pwrite(写者独占
+     * 偏移)不走此锁 → 录像/回放数据热路径保持无锁, 多盘并行写不受影响。 */
+    pthread_mutex_t    self_lock;
+    pthread_mutex_t   *lk;
 };
+
+static void mtx_init_recursive(pthread_mutex_t *m) {
+    pthread_mutexattr_t a;
+    pthread_mutexattr_init(&a);
+    pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(m, &a);
+    pthread_mutexattr_destroy(&a);
+}
+
+void rsdk_dev_lock(rsdk_dev_t *d)   { if (d && d->lk) pthread_mutex_lock(d->lk); }
+void rsdk_dev_unlock(rsdk_dev_t *d) { if (d && d->lk) pthread_mutex_unlock(d->lk); }
+void rsdk_dev_bind_lock(rsdk_dev_t *d, pthread_mutex_t *shared) { if (d && shared) d->lk = shared; }
+
+/* ---- chunk→slot 内存加速表访问(调用方须持 dev 锁) ---- */
+uint32_t rsdk_dev_map_get(rsdk_dev_t *d, uint64_t chunk) {
+    if (!d || !d->chunk_slot || chunk >= d->data_chunks) return RSDK_MAP_NONE;
+    return d->chunk_slot[chunk];
+}
+void rsdk_dev_map_set(rsdk_dev_t *d, uint64_t chunk, uint32_t slot) {
+    if (!d || !d->chunk_slot || chunk >= d->data_chunks) return;
+    uint32_t old = d->chunk_slot[chunk];
+    if (slot == RSDK_MAP_NONE && old != RSDK_MAP_NONE) d->used_chunks--;
+    else if (slot != RSDK_MAP_NONE && old == RSDK_MAP_NONE) d->used_chunks++;
+    d->chunk_slot[chunk] = slot;
+}
+int rsdk_dev_map_ready(rsdk_dev_t *d) { return d && d->chunk_slot ? 1 : 0; }
+/* 供 rsdk_index_load_map 在开盘扫描时分配并清空表(data_chunks 已知)。返回 0=成功/建表, -1=无表(回退)。 */
+int rsdk_dev_map_alloc(rsdk_dev_t *d) {
+    if (!d || d->data_chunks == 0) return -1;
+    if (d->chunk_slot) return 0;
+    d->chunk_slot = malloc(d->data_chunks * sizeof(uint32_t));
+    if (!d->chunk_slot) return -1;
+    for (uint64_t i = 0; i < d->data_chunks; i++) d->chunk_slot[i] = RSDK_MAP_NONE;
+    d->used_chunks = 0;
+    return 0;
+}
 
 #define SB_MAIN_SEC   1u
 #define SB_BAK_SEC    2u
@@ -215,6 +267,8 @@ rsdk_err_t rsdk_dev_open(const char *path, rsdk_dev_t **out)
     rsdk_dev_t *d = calloc(1, sizeof *d);
     if (!d) { rsdk_rawdev_close(raw); return RSDK_E_IO; }
     d->raw = raw;
+    mtx_init_recursive(&d->self_lock);   /* 默认自锁; 入盘组后由 bind_lock 改指共享锁 */
+    d->lk = &d->self_lock;
     rsdk_rawdev_pread(raw, SB_MAIN_SEC*RSDK_SEC, &d->sb, sizeof d->sb);
     if (memcmp(d->sb.magic, RSDK_SB_MAGIC, 8) != 0) {  /* 主坏取备 */
         rsdk_rawdev_pread(raw, SB_BAK_SEC*RSDK_SEC, &d->sb, sizeof d->sb);
@@ -255,6 +309,11 @@ rsdk_err_t rsdk_dev_open(const char *path, rsdk_dev_t **out)
             rsdk_crypto_open(dek, RSDK_CFG_ENCRYPTION, &d->crypto);
         memset(dek, 0, 32);
     }
+
+    /* ★ 建 chunk→slot 内存加速表(顺序扫一次索引; 分配/扫描失败则 chunk_slot=NULL, 各处回退全扫描)。
+     * 一次性开盘成本, 换掉覆盖回收每翻段的全索引线性扫描。 */
+    rsdk_index_load_map(d);
+
     *out = d;
     return RSDK_OK;
 }
@@ -267,7 +326,16 @@ rsdk_err_t rsdk_dev_info(rsdk_dev_t *d, rsdk_dev_info_t *info)
     info->chunk_sectors = d->sb.chunk_sectors;
     info->data_start_sec = d->sb.data_start_sec;
     info->meta_chunk_count = d->sb.meta_chunk_count;
-    info->free_chunks = d->data_chunks; /* 简化: 环形, 视为始终可写 */
+    /* 真实空闲: 数据 chunk 总数 - 已被有效段占用 - 坏块。map 未建时回退旧近似(全部可写)。 */
+    if (d->chunk_slot) {
+        rsdk_dev_lock(d);
+        uint64_t bad = rsdk_dev_bad_chunk_count(d);
+        uint64_t occupied = d->used_chunks + bad;
+        info->free_chunks = (d->data_chunks > occupied) ? (d->data_chunks - occupied) : 0;
+        rsdk_dev_unlock(d);
+    } else {
+        info->free_chunks = d->data_chunks;
+    }
     info->feature_mask = d->sb.feature_mask;
     info->enc_algo = d->sb.enc_algo;
     info->hdd_full = d->sb.hdd_full;
@@ -281,6 +349,10 @@ struct rsdk_crypto *rsdk_dev_crypto(rsdk_dev_t *d){ return d->crypto; }
 
 rsdk_err_t rsdk_dev_flush(rsdk_dev_t *d)
 {
+    /* ★ 全程持锁: 算 CRC + 主备双写 + fsync 作为一个原子单元, 杜绝"算 CRC 与写盘之间被并发改"
+     * 及"两次并发 flush 让主/备落成不一致快照" → 盘上 SB/SysTab CRC 撕裂(R3)。先备后主、各带 fsync,
+     * 保证任一时刻主/备至少一份自洽可开机。数据区读写不走此锁, 故此处持锁不阻塞录像/回放数据热路径。 */
+    rsdk_dev_lock(d);
     d->sb.sb_crc32 = 0; d->sb.sb_crc32 = rsdk_crc32(&d->sb, sizeof d->sb);
     d->st.crc32 = 0; d->st.crc32 = rsdk_crc32(&d->st, sizeof d->st);
     rsdk_rawdev_pwrite(d->raw, SB_BAK_SEC*RSDK_SEC, &d->sb, sizeof d->sb); /* 先备后主 */
@@ -288,16 +360,20 @@ rsdk_err_t rsdk_dev_flush(rsdk_dev_t *d)
     rsdk_rawdev_sync(d->raw);
     rsdk_rawdev_pwrite(d->raw, SB_MAIN_SEC*RSDK_SEC, &d->sb, sizeof d->sb);
     rsdk_rawdev_pwrite(d->raw, ST_MAIN_SEC*RSDK_SEC, &d->st, sizeof d->st);
-    return rsdk_rawdev_sync(d->raw);
+    rsdk_err_t rc = rsdk_rawdev_sync(d->raw);
+    rsdk_dev_unlock(d);
+    return rc;
 }
 
 rsdk_err_t rsdk_dev_mark_bad_chunk(rsdk_dev_t *d, uint64_t chunk) {
     if (!d || chunk >= d->data_chunks) return RSDK_E_PARAM;
     if (!d->badmap) return RSDK_E_NOSPACE;
+    rsdk_dev_lock(d);
     if (!((d->badmap[chunk >> 3] >> (chunk & 7)) & 1)) {
         d->badmap[chunk >> 3] |= (uint8_t)(1u << (chunk & 7));
         badmap_save(d);
     }
+    rsdk_dev_unlock(d);
     return RSDK_OK;
 }
 int rsdk_dev_is_bad_chunk(rsdk_dev_t *d, uint64_t chunk) {
@@ -314,10 +390,14 @@ uint64_t rsdk_dev_bad_chunk_count(rsdk_dev_t *d) {
 rsdk_err_t rsdk_dev_alloc_chunk(rsdk_dev_t *d, uint64_t *chunk, uint64_t *byte_off)
 {
     if (d->data_chunks == 0) return RSDK_E_NOSPACE;
+    /* ★ write_ptr_chunk 的 RMW 必须原子: 否则 worker 翻段与 puller 开 writer 并发会分到同一 chunk
+     * → 两段写同盘区互相覆盖(R1)。持锁完成"取值+自增+回绕+跳坏"。 */
+    rsdk_dev_lock(d);
+    rsdk_err_t rc = RSDK_E_NOSPACE;   /* 一整圈都坏 */
     for (uint64_t tried = 0; tried < d->data_chunks; tried++) {
         /* stop 策略: 写满即停 */
         if (d->sb.hdd_full == RSDK_HDDFULL_STOP && d->sb.write_ptr_chunk >= d->data_chunks)
-            return RSDK_E_NOSPACE;
+            break;
         uint64_t c = d->sb.write_ptr_chunk;
         d->sb.write_ptr_chunk++;
         if (d->sb.write_ptr_chunk >= d->data_chunks) {
@@ -327,9 +407,11 @@ rsdk_err_t rsdk_dev_alloc_chunk(rsdk_dev_t *d, uint64_t *chunk, uint64_t *byte_o
         if (rsdk_dev_is_bad_chunk(d, c)) continue;            /* 跳坏 chunk */
         if (chunk) *chunk = c;
         if (byte_off) *byte_off = d->sb.data_start_sec * RSDK_SEC + c * d->chunk_bytes;
-        return RSDK_OK;
+        rc = RSDK_OK;
+        break;
     }
-    return RSDK_E_NOSPACE;   /* 一整圈都坏 */
+    rsdk_dev_unlock(d);
+    return rc;
 }
 
 int rsdk_dev_is_wrapped(rsdk_dev_t *d) { return d && d->sb.seq_epoch > 1; }
@@ -340,9 +422,11 @@ rsdk_err_t rsdk_dev_meta_alloc(rsdk_dev_t *d, uint64_t size, uint64_t *abs_off)
     if (d->st.meta_bytes == 0) return RSDK_E_NOSPACE;      /* metadata=off, 无 MetaRegion */
     size = rsdk_align_up(size, 16);                        /* 16 对齐(CTR 友好) */
     if (size > d->st.meta_bytes) return RSDK_E_NOSPACE;
+    rsdk_dev_lock(d);                                      /* meta_next_off RMW 原子 */
     if (d->st.meta_next_off + size > d->st.meta_bytes) d->st.meta_next_off = 0; /* 环形回绕 */
     *abs_off = d->meta_base + d->st.meta_next_off;
     d->st.meta_next_off += size;
+    rsdk_dev_unlock(d);
     rsdk_dev_flush(d);
     return RSDK_OK;
 }
@@ -370,6 +454,8 @@ void rsdk_dev_close(rsdk_dev_t *d)
     if (!d) return;
     if (d->crypto) rsdk_crypto_close(d->crypto);
     if (d->raw) rsdk_rawdev_close(d->raw);
+    pthread_mutex_destroy(&d->self_lock);   /* 共享锁属盘组, 由 group_close 销毁; self_lock 恒可销 */
     free(d->badmap);
+    free(d->chunk_slot);
     free(d);
 }
