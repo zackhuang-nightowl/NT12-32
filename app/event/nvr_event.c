@@ -173,12 +173,13 @@ static void evt_sink(void *sink_ctx, const nop_event_t *ev)
         }
         if (allow_rec) {
         uint32_t ts = (uint32_t)(ev->timestamp_ms / 1000);
-        int post_s = NVR_EVT_POST_RECORD_S;
-        int pre_s  = 5;
-        if (h->cfg.settings) {
-            post_s = nvr_settings_record_post_s_get(h->cfg.settings, chn);
-            pre_s  = nvr_settings_record_pre_s_get(h->cfg.settings, chn);
-        }
+        int post_s = h->cfg.settings
+            ? nvr_settings_record_post_s_get(h->cfg.settings, chn) : -1;
+        int pre_s  = h->cfg.settings
+            ? nvr_settings_record_pre_s_get(h->cfg.settings, chn) : -1;
+        if (post_s < 0 || pre_s < 0) {
+            NVR_LOGW("event", "ch%d post/pre_s missing in DB, skip event record", chn);
+        } else {
         uint32_t start = (pre_s > 0 && ts > (uint32_t)pre_s) ? (ts - (uint32_t)pre_s) : ts;
         eid = nvr_rec_trigger_event(h->cfg.rs, chn, rectype, start, post_s);
         /* ★ 事件录像落盘:连续轨打标,或仅事件待命时开片段(预录 flush + 后录)。
@@ -186,6 +187,7 @@ static void evt_sink(void *sink_ctx, const nop_event_t *ev)
         if (eid && h->cfg.sm)
             nvr_stream_set_event(h->cfg.sm, chn, eid, rectype, start,
                                  ts + (uint32_t)post_s);
+        }
         }
     }
     if (h->cfg.on_push) {

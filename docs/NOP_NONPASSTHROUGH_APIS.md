@@ -18,7 +18,7 @@
 
 状态图例：
 - `✔` — LOCAL 表已登记 **且** NVR 真实实现
-- `待做` — LOCAL 表已登记，当前仅 **cap 回落/空桩**（见 `nvr_cmd_table.c` 行尾 `/* 待做:... */` 注释）
+- `—` — LOCAL 表已登记，**501**（产品不需要 / 暂不实现）
 - `?` — 分类待确认(TBD)
 
 ---
@@ -35,13 +35,12 @@
 | `getName` / `GUI_getSysDisplay` / `GUI_getFeatureList` | ✔ | 设置库 / 静态列表 | |
 | `getIotcAuthKey` / `setIotcAuthKey` / `getAvPassword` / `setAvPassword` / `getIotcUID` / `GUI_getUID` | ✔ | `/User` 身份（`nvr_identity`） | 出厂 AuthKey=`00000000` AvPwd=`888888`；set 写回 tutkdata.json |
 | `GUI_getAutoRebootSetting` / `GUI_setAutoRebootSetting` | ✔ | 设置库 KV | 周维护 |
-| `GUI_getSystemLog` / `getLog` | 待做 | NVR 日志 | cap 空页 |
+| `GUI_getSystemLog` / `getLog` | — | 501 | 产品不需要 |
 
 ### A2. 账户 / 鉴权（本地 Admin + NOP owner）
 | 命令 | 状态 | 来源 | 备注 |
 |---|---|---|---|
 | `GUI_login` / `GUI_logout` / `GUI_getLoginStatus` / `GUI_LoginPage` / `GUI_createUser` / `GUI_deleteUser` / `GUI_setUser` / `GUI_getUsers` / `GUI_getUserGroupPermissions` / `GUI_forgetPassword` | ✔ | `local_user` + Cognito + GraphQL | `LoginPage`：GUI 进出登录窗 Area+Action → result OK |
-| `GUI_createUser` / `GUI_deleteUser` / `GUI_getUsers` / `GUI_getUserGroupPermissions` | 待做 | 设置库 | cap 内存桩 |
 | `GUI_forgetPassword` | ✔ | ResetCode + 可选清 `nop_owner` | 对齐 AdminPWD；aws 联网由 GUI 提示 |
 | `X_NightOwl_setOwner` / `X_NightOwl_getOwner` | ✔ | `nop_owner` + `ble.key` | 带 ownerId 时生成 16 位 hex **BLEKey**（下连 AES） |
 | `X_NightOwl_updateP2PCredential` | ✔ | `tutk.authkey` / `tutk.av_password` | 乱数 IotcPwd(8) + AvPwd(6 hex) |
@@ -59,7 +58,7 @@
 | `X_NightOwl_getDeviceActive` / `X_NightOwl_setDeviceActive` | ✔ LOCAL | NVR 代查/代激活 | nopOnvif：Discovery/GetScopes 认种后 GET→SET→再 GET；成功写 `admin/P_act`。忽略 GUI 下发 password |
 | `GUI_getChannelMapping` / `GUI_setChannelMapping` | ✔ | 通道表 | |
 | `getChannelsStatus` | ✔ | 通道状态机 | NVR 聚合 |
-| `getChannelStats` / `getChannelLoading` | 待做 | 通道/流统计 | cap 回落 |
+| `getChannelStats` / `getChannelLoading` | — | 501 | 产品不需要 |
 
 ### A4. 存储
 | 命令 | 状态 | 来源 | 备注 |
@@ -70,12 +69,14 @@
 | `getCurrentStorage` / `setCurrentStorage` | ✔ | storage | |
 | `getAllDisksHealth` | ✔ | storage health(SMART) | |
 
-### A5. 云存（NVR 本地，见 cap_cloud）
+### A5. 云存（NVR 本地，`nvr_cmd_cloud.c`）
 | 命令 | 状态 | 来源 | 备注 |
 |---|---|---|---|
 | `X_NightOwl_setCloudRecordSwitch` / `getCloudRecordSwitch` | ✔ | 设置库 `cloud.switch` | 门控上传器 |
 | `getCloudRecordConfigs` / `setCloudRecordConfigs` | ✔ | 设置库 `cloud_channel` | mode 只读 |
-| `getChannelCloudRecordStats*` / `getCloudStatusHistory` / `getCurrentClouds` | 待做 | rsdk_cloud / TUTK 状态 | cap 回落 |
+| `getCurrentClouds` | ✔ | `system.json` → KV | `cloudServer.current` / `cloudServer.available` |
+| `getChannelCloudRecordStats*` / `getCloudStatusHistory` | — | 501 | 产品不需要 |
+| `startCloudRecordTest` / `stopCloudRecordTest` / `getCloudRecordTestProgress` / `getCloudRecordLogConfig` / `setCloudRecordLogConfig` | — | 501 | 暂不实现 |
 
 ### A6. 录像 / 回放（来自 NVR 盘）
 | 命令 | 状态 | 来源 | 备注 |
@@ -86,7 +87,7 @@
 | `GUI_getPlaybackMode` / `GUI_playbackControl` | ✔ | nvr_playback(+Notify/倍速/倒放) | |
 | `GUI_get/setPlaybackAudio` | ✔ | 宫格 enable[] 多路按接口 | |
 | `GUI_ChannelBackupFiles` / `GetChannelBackupStatus` / `StopChannelBackup` | ✔ | rsdk_backup_export → USB | |
-| `GUI_getFileList` | 待做 | System 文件列表(非回放) | cap 回落 |
+| `GUI_getFileList` | ✔ | USB/SD 根目录列文件 | `nvr_cmd_playback.c` |
 | 事件/日历查询（queryEventList/Calendar 等） | ✔ | meta DOC_CLOUD + EVENT 标记 + 抓拍 URL | `thumbnailUrl` 仅隧道 GET |
 | `AI_getEventExtInfo` / `AI_getEventExtInfoBatchByReverseTime` | ✔ | meta `DOC_AI_EVENT` | 套包：后录结束从 NOP 相机取回后入库；App 查 NVR |
 | `AI_getEventExtInfoConfig` / `AI_setEventExtInfoConfig` | ✔ | KV `ai.event_ext_info.*` + 代 SET 相机 | 默认 enable；上线代开 NOP 缓存 |
@@ -108,8 +109,9 @@
 | `GUI_getPoE` / `GUI_setPoE` | ✔ | eth1 VLAN operstate | set 启停 VLAN；**PowerUsed 待实现**（无 PoE MCU/功耗数据源）；**PoE 供电控制待实现** |
 | `GUI_getRemoteAccessState` / `GUI_setRemoteAccessState` | ✔ | KV `service.remote_access` + 账户门控 | 启停 TUTK P2PTunnel + BLE |
 | `GUI_getDeviceDisplayMode` / `GUI_setDeviceDisplayMode` / `GUI_getSysDisplay` | ✔ | preview/vout | |
+| `getCableConnectStatus` | ✔ | DRM `/sys/class/drm/.../status` | `mhal_vout_get_cable_connect`（HDMI/VGA） |
 | `GUI_longPolling` | ✔ | 事件/状态推送 | 长轮询 |
-| `getReportServer` / `getEnvironment` | 待做 | 配置 | cap 回落 |
+| `getReportServer` / `getEnvironment` | — | 501 | 产品不需要 |
 
 ---
 
@@ -143,3 +145,4 @@
 - 2026-08-12：**WAN/LAN 带宽** — `GUI_getWanInterface`/`getWanInterface` 读 `/sys/class/net` 实时链路；`GUI_getLanInterface` 读 eth0 `speed` 返回 `totalPhysicalBandwidth`/`maxRxBandwidth`；其余网络子项（allocated 带宽、DDNS 客户端、FTP 服务、Email SSL/自动发信、UPnP 映射、PoE PowerUsed、RemoteAccess↔TUTK 等）登记为**待实现**。
 - 2026-08-18：**nopOnvif 私有 NOP** — 白灯/警笛/Panic/激活走发现口 `/APPJsonCmd`；上线 GET 探测 `light`/`audioAlert`；`get/setDeviceActive` 移出 LOCAL 表。
 - 2026-08-19：**活动区域 SET** — `setChannelTriggerActivityZone` ModifyRules 已有 CellMotion（不删建）。NOP 先透传，失败再 mapping。
+- 2026-08-20：**cap 单机桩清理** — `cap_agent`/`cap_cloud` 空注册；`cap_misc_ext` 仅 ONVIF mapping；产品不需要命令 LOCAL **501**（不再 cap 200 假数据）。见 [修改日志.md](修改日志.md)「cap 单机桩 + LOCAL 501」。

@@ -1,6 +1,6 @@
 /***************************************************************************************
  *  nvr_cmd_misc.c — 通道聚合/安全/云存统计等 LOCAL handler。
- *  getChannelsStatus 走 NVR 通道状态机;其余回落 components/nop cap。
+ *  getChannelsStatus 走 NVR 通道状态机;标记为暂不实现的 LOCAL 命令直接 501。
  ***************************************************************************************/
 #include "nvr_cmd_internal.h"
 #include "nvr_cmd_util.h"
@@ -14,8 +14,8 @@
 #include <string.h>
 #include <stdio.h>
 
-#define NVR_NOP(name) \
-char *cmd_##name(cJSON *a, const nvr_cmd_ctx_t *c) { return nvr_cmd_nop_dispatch(a, c, #name); }
+#define NVR_NOT_IMPL(name) \
+char *cmd_##name(cJSON *a, const nvr_cmd_ctx_t *c) { (void)a; (void)c; return nvr_resp_not_support(); }
 
 char *cmd_getChannelsStatus(cJSON *a, const nvr_cmd_ctx_t *c)
 {
@@ -33,8 +33,8 @@ char *cmd_getChannelsStatus(cJSON *a, const nvr_cmd_ctx_t *c)
     return nvr_resp_content(o);
 }
 
-NVR_NOP(getChannelStats)
-NVR_NOP(getChannelLoading)
+NVR_NOT_IMPL(getChannelStats)
+NVR_NOT_IMPL(getChannelLoading)
 
 static void auth_all_same_ip(const nvr_cmd_ctx_t *c, const char *ip,
                              const char *random, const char *penh)
@@ -160,11 +160,24 @@ char *cmd_X_NightOwl_setDeviceActive(cJSON *a, const nvr_cmd_ctx_t *c)
 
 char *cmd_getCurrentClouds(cJSON *a, const nvr_cmd_ctx_t *c)
 {
-    (void)a; (void)c;
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "currentCloud", "tutk");
-    cJSON *arr = cJSON_AddArrayToObject(o, "availableClouds");
-    cJSON_AddItemToArray(arr, cJSON_CreateString("tutk"));
+    char cur[32], avail[256], tmp[256];
+    cJSON *o, *arr;
+    (void)a;
+    if (!c || !c->settings)
+        return nvr_resp_not_support();
+    nvr_settings_get_str(c->settings, "cloudServer.current", cur, sizeof(cur), "tutk");
+    nvr_settings_get_str(c->settings, "cloudServer.available", avail, sizeof(avail), "tutk");
+    o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "currentCloud", cur);
+    arr = cJSON_AddArrayToObject(o, "availableClouds");
+    snprintf(tmp, sizeof(tmp), "%s", avail);
+    for (char *p = strtok(tmp, ","); p; p = strtok(NULL, ",")) {
+        while (*p == ' ') p++;
+        if (*p)
+            cJSON_AddItemToArray(arr, cJSON_CreateString(p));
+    }
+    if (cJSON_GetArraySize(arr) == 0)
+        cJSON_AddItemToArray(arr, cJSON_CreateString("tutk"));
     return nvr_resp_content(o);
 }
 
@@ -237,13 +250,13 @@ char *cmd_X_NightOwl_getChannelInfo(cJSON *a, const nvr_cmd_ctx_t *c)
     }
 }
 
-NVR_NOP(getCloudStatusHistory)
-NVR_NOP(getChannelCloudRecordStats)
-NVR_NOP(getChannelCloudRecordStatsSwitch)
-NVR_NOP(setChannelCloudRecordStatsSwitch)
-NVR_NOP(getChannelRecordingContent)
-NVR_NOP(getReportServer)
-NVR_NOP(getEnvironment)
-NVR_NOP(getLog)
+NVR_NOT_IMPL(getCloudStatusHistory)
+NVR_NOT_IMPL(getChannelCloudRecordStats)
+NVR_NOT_IMPL(getChannelCloudRecordStatsSwitch)
+NVR_NOT_IMPL(setChannelCloudRecordStatsSwitch)
+NVR_NOT_IMPL(getChannelRecordingContent)
+NVR_NOT_IMPL(getReportServer)
+NVR_NOT_IMPL(getEnvironment)
+NVR_NOT_IMPL(getLog)
 
-#undef NVR_NOP
+#undef NVR_NOT_IMPL

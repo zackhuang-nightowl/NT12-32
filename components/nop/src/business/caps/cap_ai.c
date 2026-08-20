@@ -1,77 +1,14 @@
 /**
  * @file cap_ai.c
  * @brief CAP_AI smart-detect handlers (detect filter/threshold, PTZ track,
- *        per-sensor config, activity zones). In-memory state.
+ *        per-sensor config, activity zones).
  *
- * Handlers for the AI/smart-detect command family. State is held in
- * module-static per-channel arrays so get/set round-trips correctly today;
- * firmware will override these via the HAL layer later. Object/array-valued
- * fields (sensor filter, threshold, PTZ track modes, activity zone) are stored
- * as a serialized JSON snapshot on set and parsed back on get, falling back to
- * a spec-shaped default when nothing has been set yet.
+ * ONVIF 通道走 onvif mapping；NOP 相机不在此处理（NVR 8089 透传相机），
+ * 禁止本机内存桩/默认数据。
  */
 #include "business/business.h"
 #include "base/nop_json.h"
-#include "business/cap_helpers.h"
-#include "nop_sdk/nop_detect_types.h"
 #include "onvif/mapping/nop_onvif_map.h"
-#include <string.h>
-#include <stdlib.h>
-
-#define AI_MAX_CHANNELS 16
-static int clamp_channel(int channel)
-{
-    return (channel < 0 || channel >= AI_MAX_CHANNELS) ? 0 : channel;
-}
-
-/* ---- per-channel snapshot state (indexed by clamped channel) -------------- */
-static char *g_detect_filter_json[AI_MAX_CHANNELS];
-static char *g_detect_threshold_json[AI_MAX_CHANNELS];
-static char *g_ptz_track_json[AI_MAX_CHANNELS];
-
-/* ---- small helpers -------------------------------------------------------- */
-
-/* Store a serialized snapshot of a JSON value into @p slot, freeing the old. */
-static void store_json_snapshot(char **slot, const nop_json_t *value)
-{
-    char *text;
-    if (*slot) {
-        free(*slot);
-        *slot = NULL;
-    }
-    if (!value)
-        return;
-    text = nop_json_print(value);
-    *slot = text; /* may be NULL on failure; treated as "unset" */
-}
-
-/* Deep-copy a parsed snapshot of @p value (any type) by round-tripping it. */
-static nop_json_t *clone_json(const nop_json_t *value)
-{
-    char *text;
-    nop_json_t *copy;
-    if (!value)
-        return NULL;
-    text = nop_json_print(value);
-    if (!text)
-        return NULL;
-    copy = nop_json_parse(text, strlen(text));
-    free(text);
-    return copy;
-}
-
-/* Append a default sensor entry (sensor + empty min/max + movement) to @p arr. */
-static void add_default_filter_sensor(nop_json_t *arr, const char *sensor)
-{
-    nop_json_t *entry = nop_json_obj();
-    nop_json_t *min   = nop_json_arr();
-    nop_json_t *max   = nop_json_arr();
-    nop_json_add_str(entry, "sensor", sensor);
-    nop_json_add(entry, "min", min);
-    nop_json_add(entry, "max", max);
-    nop_json_add_bool(entry, "movement", false);
-    nop_json_arr_push(arr, entry);
-}
 
 /* ===========================================================================
  * AI detect filter (per-sensor min/max size + movement)
@@ -80,89 +17,43 @@ static nop_status_t handle_get_detect_filter(const nop_request_t *request,
                                              nop_response_t *response,
                                              void *handler_context)
 {
-    int channel = clamp_channel((int)nop_json_num(request->args, "channel", 1));
-    if (g_detect_filter_json[channel]) {
-        response->content = nop_json_parse(g_detect_filter_json[channel],
-                                           strlen(g_detect_filter_json[channel]));
-    }
-    if (!response->content) {
-        nop_json_t *sensors = nop_json_arr();
-        response->content = nop_json_obj();
-        cap_for_each_detection_type(handler_context, add_default_filter_sensor, sensors);
-        nop_json_add(response->content, "sensors", sensors);
-    }
-    return NOP_OK;
+    (void)request;
+    (void)response;
+    (void)handler_context;
+    return NOP_ERR_NOTIMPL;
 }
 
 static nop_status_t handle_set_detect_filter(const nop_request_t *request,
                                              nop_response_t *response,
                                              void *handler_context)
 {
-    int channel = clamp_channel((int)nop_json_num(request->args, "channel", 1));
-    nop_json_t *snapshot;
-    nop_json_t *sensors;
-    (void)response; (void)handler_context;
-    if (!nop_json_has(request->args, "sensors"))
-        return NOP_ERR_PARAM;
-    snapshot = nop_json_obj();
-    sensors = clone_json(nop_json_get(request->args, "sensors"));
-    if (sensors)
-        nop_json_add(snapshot, "sensors", sensors);
-    else
-        nop_json_add(snapshot, "sensors", nop_json_arr());
-    store_json_snapshot(&g_detect_filter_json[channel], snapshot);
-    nop_json_free(snapshot);
-    return NOP_OK;
+    (void)request;
+    (void)response;
+    (void)handler_context;
+    return NOP_ERR_NOTIMPL;
 }
 
 /* ===========================================================================
  * AI detect threshold (per-sensor confidence threshold)
  * =========================================================================== */
-static void add_default_threshold_sensor(nop_json_t *arr, const char *sensor)
-{
-    nop_json_t *entry = nop_json_obj();
-    nop_json_add_str(entry, "sensor", sensor);
-    nop_json_add_int(entry, "threshold", 80);
-    nop_json_arr_push(arr, entry);
-}
-
 static nop_status_t handle_get_detect_threshold(const nop_request_t *request,
                                                 nop_response_t *response,
                                                 void *handler_context)
 {
-    int channel = clamp_channel((int)nop_json_num(request->args, "channel", 1));
-    if (g_detect_threshold_json[channel]) {
-        response->content = nop_json_parse(g_detect_threshold_json[channel],
-                                           strlen(g_detect_threshold_json[channel]));
-    }
-    if (!response->content) {
-        nop_json_t *sensors = nop_json_arr();
-        response->content = nop_json_obj();
-        cap_for_each_detection_type(handler_context, add_default_threshold_sensor, sensors);
-        nop_json_add(response->content, "sensors", sensors);
-    }
-    return NOP_OK;
+    int channel = (int)nop_json_num(request->args, "channel", 0);
+    if (nop_onvif_map_is_onvif(handler_context, channel))
+        return nop_onvif_map_dispatch(handler_context, request, response);
+    return NOP_ERR_NOTIMPL;
 }
 
 static nop_status_t handle_set_detect_threshold(const nop_request_t *request,
                                                 nop_response_t *response,
                                                 void *handler_context)
 {
-    int channel = clamp_channel((int)nop_json_num(request->args, "channel", 1));
-    nop_json_t *snapshot;
-    nop_json_t *sensors;
-    (void)response; (void)handler_context;
-    if (!nop_json_has(request->args, "sensors"))
-        return NOP_ERR_PARAM;
-    snapshot = nop_json_obj();
-    sensors = clone_json(nop_json_get(request->args, "sensors"));
-    if (sensors)
-        nop_json_add(snapshot, "sensors", sensors);
-    else
-        nop_json_add(snapshot, "sensors", nop_json_arr());
-    store_json_snapshot(&g_detect_threshold_json[channel], snapshot);
-    nop_json_free(snapshot);
-    return NOP_OK;
+    int channel = (int)nop_json_num(request->args, "channel", 0);
+    if (nop_onvif_map_is_onvif(handler_context, channel))
+        return nop_onvif_map_dispatch(handler_context, request, response);
+    return NOP_ERR_NOTIMPL;
 }
 
 /* ===========================================================================
@@ -172,40 +63,20 @@ static nop_status_t handle_get_ptz_track(const nop_request_t *request,
                                          nop_response_t *response,
                                          void *handler_context)
 {
-    int channel = clamp_channel((int)nop_json_num(request->args, "channel", 1));
+    (void)request;
+    (void)response;
     (void)handler_context;
-    if (g_ptz_track_json[channel]) {
-        response->content = nop_json_parse(g_ptz_track_json[channel],
-                                           strlen(g_ptz_track_json[channel]));
-    }
-    if (!response->content) {
-        nop_json_t *modes = nop_json_arr();
-        response->content = nop_json_obj();
-        nop_json_arr_push_str(modes, "hd");
-        nop_json_add(response->content, "modes", modes);
-    }
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 static nop_status_t handle_set_ptz_track(const nop_request_t *request,
                                          nop_response_t *response,
                                          void *handler_context)
 {
-    int channel = clamp_channel((int)nop_json_num(request->args, "channel", 1));
-    nop_json_t *snapshot;
-    nop_json_t *modes;
-    (void)response; (void)handler_context;
-    if (!nop_json_has(request->args, "modes"))
-        return NOP_ERR_PARAM;
-    snapshot = nop_json_obj();
-    modes = clone_json(nop_json_get(request->args, "modes"));
-    if (modes)
-        nop_json_add(snapshot, "modes", modes);
-    else
-        nop_json_add(snapshot, "modes", nop_json_arr());
-    store_json_snapshot(&g_ptz_track_json[channel], snapshot);
-    nop_json_free(snapshot);
-    return NOP_OK;
+    (void)request;
+    (void)response;
+    (void)handler_context;
+    return NOP_ERR_NOTIMPL;
 }
 
 /* ===========================================================================
@@ -229,8 +100,7 @@ static nop_status_t handle_get_activity_zone_types(const nop_request_t *request,
                                                    nop_response_t *response,
                                                    void *handler_context)
 {
-    /* 只信 mapping：GetRules/SupportedRules 含 Motion 才报 pixelChange。
-     * 无 Motion / 无会话 → 501。本机桩会在「不支持」时误报 pixelChange，不用。 */
+    /* 只信 mapping：GetRules/SupportedRules 含 Motion 才报 pixelChange。 */
     return nop_onvif_map_dispatch(handler_context, request, response);
 }
 

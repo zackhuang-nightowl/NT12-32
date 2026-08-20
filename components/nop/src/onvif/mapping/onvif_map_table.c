@@ -56,9 +56,11 @@ const onvif_map_entry_t g_onvif_map_table[] = {
     { "AI_getChannelFieldIntrusionDetect", onvif_map_AI_getChannelFieldIntrusionDetect }, /* -> GetRules(FieldDetector) */
     { "AI_setChannelFieldIntrusionDetect", onvif_map_AI_setChannelFieldIntrusionDetect }, /* -> Create/DeleteRules      */
 
-    /* ---- §8 Object detection (ObjectDetection rules by ClassFilter) ----- */
+    /* ---- §8 Object detection (sensor config) ----- */
     { "getChannelSensorConfig", onvif_map_getChannelSensorConfig }, /* -> GetRules(ObjectDetection)      */
     { "setChannelSensorConfig", onvif_map_setChannelSensorConfig }, /* -> Create/DeleteRules per class   */
+    { "AI_getDetectThreshold",  onvif_map_AI_getDetectThreshold },  /* -> GetRules ConfidenceLevel       */
+    { "AI_setDetectThreshold",  onvif_map_AI_setDetectThreshold },  /* -> ModifyRules ConfidenceLevel    */
 
     /* ---- §6 Firmware upgrade ------------------------------------------- */
     { "GUI_upgradeChannelFirmware",        onvif_map_upgradeChannelFirmware }, /* -> StartFirmwareUpgrade */

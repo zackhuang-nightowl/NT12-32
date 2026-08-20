@@ -61,6 +61,8 @@ void       nvr_stream_stop_all   (nvr_stream_mgr_t *m);
 /* 运行期：切主/子码流（换 url 重连）、开/关某通道录像 */
 rsdk_err_t nvr_stream_switch_stream(nvr_stream_mgr_t *m, int chn, int stream, const char *url);
 rsdk_err_t nvr_stream_set_record   (nvr_stream_mgr_t *m, int chn, int on);
+/* 运行期更新主/子录像掩码(与 set_record 独立;排程/设置变更时下发)。 */
+rsdk_err_t nvr_stream_set_record_mask(nvr_stream_mgr_t *m, int chn, int main_on, int sub_on);
 /* 仅事件待命:arm=1 时主流进预录环,事件触发后 flush+写盘至 post 窗结束;与连续录像互斥写盘。
  * pre_s=预录秒数(0=无预录,仍可事件开录)。 */
 rsdk_err_t nvr_stream_set_event_arm(nvr_stream_mgr_t *m, int chn, int arm, int pre_s);

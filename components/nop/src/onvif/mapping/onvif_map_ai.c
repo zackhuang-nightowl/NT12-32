@@ -464,6 +464,148 @@ nop_status_t onvif_map_setChannelSensorConfig(nop_onvif_map_backend_t *be, int c
     return rc;
 }
 
+/* ---- §8 Detect threshold <-> ObjectDetection ConfidenceLevel ------------ */
+
+static int find_obj_rule_by_class(const nop_onvif_rule_t *rules, int n, const char *onvif_class)
+{
+    int i;
+    if (!onvif_class || !onvif_class[0])
+        return -1;
+    for (i = 0; i < n; i++)
+        if (strstr(rules[i].class_filter, onvif_class))
+            return i;
+    return -1;
+}
+
+/* 仅当 rule 含 ConfidenceLevel 时，按 ClassFilter 输出 sensors[] 项（无则跳过）。 */
+static void threshold_emit_from_rule(nop_json_t *arr, const nop_onvif_rule_t *rule)
+{
+    const char *p;
+    char        tok[32];
+    int         threshold;
+
+    if (!arr || !rule || !rule->has_confidence || !rule->class_filter[0])
+        return;
+    threshold = (int)(rule->confidence_level * 100.0f + 0.5f);
+    if (threshold < 0)   threshold = 0;
+    if (threshold > 100) threshold = 100;
+
+    p = rule->class_filter;
+    while (p && *p) {
+        const char *comma = strchr(p, ',');
+        const char *nopname;
+        nop_json_t *e;
+        int len = comma ? (int)(comma - p) : (int)strlen(p);
+        if (len > 0 && len < (int)sizeof(tok)) {
+            memcpy(tok, p, len);
+            tok[len] = '\0';
+            nopname = class_to_nop_trigger(tok);
+            if (nopname) {
+                e = nop_json_obj();
+                nop_json_add_str(e, "sensor", nopname);
+                nop_json_add_int(e, "threshold", threshold);
+                nop_json_arr_push(arr, e);
+            }
+        }
+        if (!comma)
+            break;
+        p = comma + 1;
+    }
+}
+
+nop_status_t onvif_map_AI_getDetectThreshold(nop_onvif_map_backend_t *be, int ch,
+                                             const nop_request_t *req, nop_response_t *resp)
+{
+    onvif_session_t  *s;
+    nop_onvif_rule_t  rules[AI_MAX_RULES];
+    char              cfg[100];
+    nop_json_t       *arr;
+    int               nrules, i;
+    (void)req;
+
+    s = onvif_session_begin(be, ch);
+    if (!s)
+        return ONVIF_MAP_FAIL;
+    if (onvif_session_analytics_cfg(s, cfg, sizeof(cfg)) != 0) {
+        onvif_session_end(be);
+        return ONVIF_MAP_FAIL;
+    }
+    nrules = nop_onvif_analytics_get_rules(onvif_session_dev(s), cfg, "ObjectDetection",
+                                           rules, AI_MAX_RULES);
+    onvif_session_end(be);
+    if (nrules < 0)
+        return ONVIF_MAP_FAIL;
+
+    arr = nop_json_arr();
+    for (i = 0; i < nrules; i++)
+        threshold_emit_from_rule(arr, &rules[i]);
+
+    resp->content = nop_json_obj();
+    if (!resp->content)
+        return NOP_ERR_NOMEM;
+    nop_json_add(resp->content, "sensors", arr);
+    return NOP_OK;
+}
+
+nop_status_t onvif_map_AI_setDetectThreshold(nop_onvif_map_backend_t *be, int ch,
+                                             const nop_request_t *req, nop_response_t *resp)
+{
+    onvif_session_t  *s;
+    nop_onvif_rule_t  existing[AI_MAX_RULES];
+    const nop_json_t *sensors;
+    char              cfg[100];
+    int               n, i, ns;
+    nop_status_t      rc = NOP_OK;
+    (void)resp;
+
+    sensors = nop_json_get(req->args, "sensors");
+    if (!sensors || !nop_json_is_arr(sensors))
+        return NOP_ERR_PARAM;
+
+    s = onvif_session_begin(be, ch);
+    if (!s)
+        return ONVIF_MAP_FAIL;
+    if (onvif_session_analytics_cfg(s, cfg, sizeof(cfg)) != 0) {
+        onvif_session_end(be);
+        return ONVIF_MAP_FAIL;
+    }
+    n = nop_onvif_analytics_get_rules(onvif_session_dev(s), cfg, "ObjectDetection",
+                                      existing, AI_MAX_RULES);
+    if (n < 0)
+        n = 0;
+
+    ns = nop_json_arr_size(sensors);
+    for (i = 0; i < ns; i++) {
+        const nop_json_t *si = nop_json_arr_at(sensors, i);
+        const char       *sensor = si ? nop_json_str(si, "sensor", NULL) : NULL;
+        const char       *cls;
+        int               threshold, found;
+
+        if (!sensor)
+            continue;
+        threshold = (int)nop_json_num(si, "threshold", 0);
+        if (threshold <= 0)   /* 0 = 不改（API） */
+            continue;
+        if (threshold > 100)
+            threshold = 100;
+        cls = nop_trigger_to_class(sensor);
+        if (!cls)
+            continue;
+
+        found = find_obj_rule_by_class(existing, n, cls);
+        if (found >= 0) {
+            existing[found].confidence_level = threshold / 100.0f;
+            existing[found].has_confidence = 1;
+            if (nop_onvif_analytics_modify_rule(onvif_session_dev(s), cfg,
+                                                &existing[found]) != 0)
+                rc = ONVIF_MAP_FAIL;
+        }
+        /* 无对应 ObjectDetection rule → 跳过，不 CreateRules */
+    }
+    onvif_session_end(be);
+    return rc;
+}
+
 /* ---- §9 capability query: AI_getChannelAICapabilities ------------------- */
 
 /* Product capability sub-shape for one object-detection class. These are NVR
@@ -473,12 +615,12 @@ static nop_json_t *make_obj_caps(void)
     nop_json_t *e = nop_json_obj();
     nop_json_t *draw_in = nop_json_arr();
     nop_json_t *meta = nop_json_obj();
-    nop_json_add_bool(e, "drawRegion", true);
-    nop_json_add_bool(e, "drawText", true);
-    nop_json_arr_push_str(draw_in, "main");
-    nop_json_arr_push_str(draw_in, "sub");
-    nop_json_add(e, "drawIn", draw_in);
-    nop_json_add(e, "minMaxFilter", nop_json_obj());
+    // nop_json_add_bool(e, "drawRegion", true);
+    // nop_json_add_bool(e, "drawText", true);
+    // nop_json_arr_push_str(draw_in, "main");
+    // nop_json_arr_push_str(draw_in, "sub");
+    // nop_json_add(e, "drawIn", draw_in);
+    // nop_json_add(e, "minMaxFilter", nop_json_obj());
     nop_json_add(e, "threshold", nop_json_obj());
     nop_json_add_bool(meta, "eventExtInfo", true);
     nop_json_add(e, "metaData", meta);

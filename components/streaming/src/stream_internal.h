@@ -120,6 +120,10 @@ typedef struct stream_chan {
     /* 录像:主/子各一 writer(独立段;slot.stream 区分)。音频写主流。 */
     rsdk_writer_t   *writer_main;
     rsdk_writer_t   *writer_sub;
+    int              rec_main_on;       /* 1=录主流(读 record_config.stream_type) */
+    int              rec_sub_on;        /* 1=录子流 */
+    volatile int     rec_main_close_pend;
+    volatile int     rec_sub_close_pend;
     int              rec_gated_main;/* 主路录像关键帧门控(从 IDR 起) */
     int              rec_gated_sub; /* 子路录像关键帧门控 */
 

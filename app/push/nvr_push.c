@@ -327,7 +327,7 @@ static void handle_job(nvr_push_t *p, push_job_t *j)
 {
     if (!p->opt.settings || j->chn < 0 || j->chn >= NVR_DEF_CAPACITY) return;
     nvr_push_cfg_t cfg;
-    nvr_settings_push_get(p->opt.settings, j->chn, &cfg);
+    if (nvr_settings_push_get(p->opt.settings, j->chn, &cfg) != 0) return;
 
     pthread_mutex_lock(&p->lock);
     int allow = policy_ok(p, j, &cfg);

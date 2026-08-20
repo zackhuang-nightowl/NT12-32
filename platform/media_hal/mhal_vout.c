@@ -479,6 +479,37 @@ void mhal_vout_get_resolution(int *w, int *h)
     if (h) *h = g_disp.disp_h;
 }
 
+static int drm_connector_connected(const char *suffix)
+{
+    char path[128], buf[32];
+    FILE *f;
+
+    if (!suffix || !suffix[0])
+        return 0;
+    snprintf(path, sizeof(path), "/sys/class/drm/card0-%s/status", suffix);
+    f = fopen(path, "r");
+    if (!f)
+        return 0;
+    if (!fgets(buf, sizeof(buf), f)) {
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    return strncmp(buf, "connected", 9) == 0;
+}
+
+void mhal_vout_get_cable_connect(int *hdmi, int *vga)
+{
+    int h = 0, v = 0;
+
+    if (drm_connector_connected("HDMI-A-1") || drm_connector_connected("HDMI-A-2"))
+        h = 1;
+    if (drm_connector_connected("VGA-1") || drm_connector_connected("VGA-2"))
+        v = 1;
+    if (hdmi) *hdmi = h;
+    if (vga)   *vga = v;
+}
+
 /* 运行期热切 HDMI 输出分辨率(setSysDisplay)。只改输出模式 + 画布尺寸 + 清屏;窗口重排由
  * 上层 preview(nvr_preview_set_hdmi)负责。屏幕不支持按阶梯降级,生效值经 get 读回。 */
 int mhal_vout_set_resolution(int w, int h)

@@ -12,6 +12,7 @@
 #define NVR_RECORD_SCHED_H
 
 #include "rsdk.h"             /* rsdk_group_t / rectype / rsdk_cloud */
+#include "nvr_settings.h"
 #include "nvr_storage.h"      /* nvr_stg_evt_t */
 
 #ifdef __cplusplus
@@ -23,11 +24,15 @@ typedef struct nvr_rec_sched nvr_rec_sched_t;
 typedef struct {
     rsdk_group_t *group;          /* borrowed：盘组（判断有无录像）；NULL=不录像 */
     void         *meta;           /* rsdk_meta ctx（云存事件登记）；可 NULL */
+    nvr_settings_t *settings;     /* borrowed：云存门控(cloud_channel/stream_type) */
     int           hdd_full_policy;/* RSDK_HDDFULL_OVERWRITE / _STOP */
     int           post_record_s;  /* 事件时窗后录秒（默认 10） */
     void         *end_user;       /* on_event_end 上下文（nvr_app）；可 NULL */
     /* 后录窗口结束：编排层去 NOP 相机取 EventExtInfo。不在本模块 HTTP。 */
     void        (*on_event_end)(void *user, int chn, uint64_t event_id, uint32_t start_epoch);
+    void         *cloud_user;     /* on_cloud_event 上下文；可 NULL */
+    /* 云存事件已登记(meta)：同步模式由 app 启实时上传会话。 */
+    void        (*on_cloud_event)(void *user, int chn, uint64_t event_id, uint32_t start_epoch, int rectype);
 } nvr_rec_sched_cfg_t;
 
 int  nvr_rec_sched_init  (const nvr_rec_sched_cfg_t *cfg, nvr_rec_sched_t **out);

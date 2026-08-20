@@ -3,6 +3,7 @@
  *  注意：连续录像由 ③streaming 负责；本模块只做事件/云存登记 + 满盘策略 + 状态。
  ***************************************************************************************/
 #include "nvr_record_sched.h"
+#include "nvr_record_policy.h"
 #include "rsdk_cloud.h"   /* 云存上传跟踪(当前 no-op 桩;新 rsdk.h 不再伞含它) */
 #include "nvr_log.h"
 
@@ -64,6 +65,17 @@ int nvr_rec_channel_down(nvr_rec_sched_t *r, int chn)
     return 0;
 }
 
+static const char *rectype_trigger(int rectype)
+{
+    switch (rectype) {
+        case RSDK_REC_DOORBELL: return "doorbellRing";
+        case RSDK_REC_FACE:     return "face";
+        case RSDK_REC_HUMAN:    return "human";
+        case RSDK_REC_VEHICLE:  return "vehicle";
+        default:                return "pixelChange";
+    }
+}
+
 uint64_t nvr_rec_trigger_event(nvr_rec_sched_t *r, int chn, int rectype, uint32_t start_epoch, int post_s)
 {
     rec_ch_t *c = ch_of(r, chn);
@@ -81,13 +93,29 @@ uint64_t nvr_rec_trigger_event(nvr_rec_sched_t *r, int chn, int rectype, uint32_
 
     uint64_t eid = 0;
 #if RSDK_CFG_METADATA
-    eid = rsdk_cloud_make_event_id(chn, start_epoch, rectype, (uint16_t)(now & 0xFFFF));
-    /* 登记云存事件（PENDING）——连续录像轨按时窗，start_chunk 未知置 0，上传器按时窗取片 */
-    if (r->cfg.meta && r->cfg.group && !r->stopped) {
-        rsdk_cloud_event_t ev; memset(&ev, 0, sizeof(ev));
-        ev.event_id = eid; ev.chn = chn; ev.rectype = (uint32_t)rectype;
-        ev.starttime = start_epoch; ev.state = RSDK_CLOUD_PENDING;
-        rsdk_cloud_event_begin(r->cfg.meta, &ev);
+    int cloud_stream = 1;
+    int cloud_ok = r->cfg.settings &&
+        nvr_cloud_ch_upload_stream(r->cfg.settings, chn, rectype_trigger(rectype), &cloud_stream);
+    if (cloud_ok) {
+        int async = (r->cfg.group != NULL);
+        int reg = 1;
+        if (async && r->cfg.settings &&
+            !nvr_cloud_async_upload_allowed(r->cfg.settings, start_epoch))
+            reg = 0;
+        if (reg) {
+            eid = rsdk_cloud_make_event_id(chn, start_epoch, rectype, (uint16_t)(now & 0xFFFF));
+            /* 登记云存事件（PENDING）——连续录像轨按时窗，start_chunk 未知置 0，上传器按时窗取片 */
+            if (r->cfg.meta && !r->stopped) {
+                rsdk_cloud_event_t ev; memset(&ev, 0, sizeof(ev));
+                ev.event_id = eid; ev.chn = chn; ev.rectype = (uint32_t)rectype;
+                ev.starttime = start_epoch; ev.state = RSDK_CLOUD_PENDING;
+                rsdk_cloud_event_begin(r->cfg.meta, &ev);
+                if (r->cfg.on_cloud_event)
+                    r->cfg.on_cloud_event(r->cfg.cloud_user, chn, eid, start_epoch, rectype);
+            }
+        }
+    } else {
+        (void)cloud_stream;
     }
 #else
     (void)start_epoch;

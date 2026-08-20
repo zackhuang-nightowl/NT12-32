@@ -144,8 +144,10 @@ char *cmd_formatStorage(cJSON *a, const nvr_cmd_ctx_t *c)
     if (c->sm && nvr_storage_assemble(c->stg, &g) == RSDK_OK && g) {
         nvr_stream_mgr_resume_recording(c->sm, g, was);
         nvr_rtsp_live_set_group(g);
+        if (c->settings) nvr_settings_set_int(c->settings, "storage.has_disk", 1);
         NVR_LOGW("router", "格式化后重组装盘组成功 → 录像已恢复(免重启)");
     } else {
+        if (c->settings) nvr_settings_set_int(c->settings, "storage.has_disk", 0);
         NVR_LOGW("router", "盘组重组装失败(可能格式化失败/多盘缺盘/SATA异常),录像待重启");
     }
     if (frc != RSDK_OK) return nvr_resp_err("format_failed");

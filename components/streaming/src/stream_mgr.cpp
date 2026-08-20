@@ -76,6 +76,8 @@ extern "C" rsdk_err_t nvr_stream_add_channel(nvr_stream_mgr_t *m, const nvr_stre
     s->pmain.conn_gen = 1; s->psub.conn_gen = 1;
     s->pmain.rec_last_gen = 1; s->psub.rec_last_gen = 1;
     s->pmain.rec_state = STREAM_REC_WAIT_IDR; s->psub.rec_state = STREAM_REC_WAIT_IDR;
+    s->rec_main_on = 1;
+    s->rec_sub_on  = 1;
     stream_record_q_init(&s->pmain.rec_q);
     stream_record_q_init(&s->psub.rec_q);
     s->cfg.over_tcp = 1;              /* 与 puller 强制 TCP 一致 */
@@ -200,6 +202,20 @@ extern "C" rsdk_err_t nvr_stream_set_event(nvr_stream_mgr_t *m, int chn, uint64_
     return RSDK_OK;
 }
 
+extern "C" rsdk_err_t nvr_stream_set_record_mask(nvr_stream_mgr_t *m, int chn, int main_on, int sub_on)
+{
+    stream_chan_t *c = slot(m, chn);
+    if (!c) return RSDK_E_NOTFOUND;
+    c->rec_main_on = main_on ? 1 : 0;
+    c->rec_sub_on  = sub_on ? 1 : 0;
+    if (!c->rec_main_on) c->rec_main_close_pend = 1;
+    if (!c->rec_sub_on)  c->rec_sub_close_pend  = 1;
+    if (c->cfg.record && m->cfg.group) {
+        stream_open_writer(c, m->cfg.group);
+    }
+    return RSDK_OK;
+}
+
 extern "C" rsdk_err_t nvr_stream_set_record(nvr_stream_mgr_t *m, int chn, int on)
 {
     stream_chan_t *c = slot(m, chn);
@@ -216,7 +232,9 @@ extern "C" rsdk_err_t nvr_stream_set_record(nvr_stream_mgr_t *m, int chn, int on
         c->event_clip = 0;
         c->pmain.pre_flushed = 0;
         c->psub.pre_flushed = 0;
-        if (!c->writer_main || !c->writer_sub) stream_open_writer(c, m->cfg.group);
+        if (m->cfg.group &&
+            ((c->rec_main_on && !c->writer_main) || (c->rec_sub_on && !c->writer_sub)))
+            stream_open_writer(c, m->cfg.group);
         c->rec_gated_main = 0; c->rec_gated_sub = 0;
     }
     stream_rec_mask_poke(c);
@@ -286,7 +304,10 @@ extern "C" rsdk_err_t nvr_stream_mgr_set_group(nvr_stream_mgr_t *m, rsdk_group_t
         if (!m->used[i]) continue;
         stream_chan_t *c = &m->ch[i];
         c->grp = group;
-        if (group && c->cfg.record && (!c->writer_main || !c->writer_sub)) { stream_open_writer(c, group); opened++; }
+        if (group && c->cfg.record &&
+            ((c->rec_main_on && !c->writer_main) || (c->rec_sub_on && !c->writer_sub))) {
+            stream_open_writer(c, group); opened++;
+        }
     }
     NVR_LOGI("stream", "set_group: 更新录像盘组, 补开 %d 路 writer", opened);
     if (m->lp_poke) {

@@ -1,5 +1,7 @@
 # 功能对照（依据 nop_doc 权威文档）— 供逐项判断
 
+> ⚠️ **历史快照（2026-08 初），大量 🟡 已过时。** 请以 [CODE_GAP_AUDIT.md](CODE_GAP_AUDIT.md) + [STATUS.md](STATUS.md) 为准。
+>
 > 依据 `NT12-SDK/nop_doc/`（camera + videoRecorder 公用）逐项梳理。camera 侧命令是 NVR 收界面 NOP 后
 > **透传/翻译给相机**的；videoRecorder 侧是 **NVR 本地**处理的。最后一列 **你判断** 留空给你定。
 >
@@ -44,7 +46,7 @@
 | 事件切片上传引擎(取段→TS→VSaaS→回写) | — | — | ✅ | `cloud_uploader`，按设置门控启动 | |
 | 录像云存状态内置 recorder | — | — | ✅ | `rsdk_cloud`(20 自测) | |
 | 多通道 starttime 埋通道 / Update Tags / -1002~4 强制关 | — | — | ✅ | `uploader.c` | |
-| 云存开关 查询/设置 | `X_NightOwl_get/setCloudRecordSwitch` | ✓ | 🟡 | 设置库 cloud.switch 在;cap_cloud→设置库+门控上传器 待接 | |
+| 云存开关 查询/设置 | `X_NightOwl_get/setCloudRecordSwitch` | ✓ | ✅ | `args.value` ↔ setting KV `cloud.switch`；订阅 `cloud.*` 刷新上传器 | |
 | 云存配置 查询/设置 | `getCloudRecordConfigs`/`setCloudRecordConfigs` | ✓ | 🟡 | 设置库 cloud_channel 表在;cap_cloud 待接 | |
 | 账主/stoken 查询/设置 | `X_NightOwl_setOwner`/`getOwner` | ✓ | 🟡 | 设置库 nop_owner 表在;cap_misc 仍静态量,待接 | |
 | 云存连接测试 | `getCloudRecordTestProgress`/`startCloudRecordTest` | ✓/✗ | 🟡 | 进度 handler在;start 无 handler | |

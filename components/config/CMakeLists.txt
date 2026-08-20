@@ -13,7 +13,7 @@ if(NOT TARGET sqlite3)
   add_subdirectory(${NVR_TP}/sqlite3 ${CMAKE_CURRENT_BINARY_DIR}/sqlite3_build)
 endif()
 
-add_library(nvr_settings STATIC src/nvr_settings.c src/nvr_identity.c)
+add_library(nvr_settings STATIC src/nvr_settings.c src/nvr_identity.c src/nvr_record_policy.c)
 target_include_directories(nvr_settings PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # nvr_log.h(header-only)供 nvr_identity 排障日志用;仅头,不引入链接依赖,保持叶子性质。
 target_include_directories(nvr_settings PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../common/include)

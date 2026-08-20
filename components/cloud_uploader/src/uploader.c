@@ -3,6 +3,9 @@
  *  轮询 rsdk_cloud 待传 → 取事件段 → 读帧 → TS 分片 → GET url → POST → 回写状态。
  ***************************************************************************************/
 #include "nvr_cloud_uploader.h"
+#include "nvr_record_policy.h"
+#include "cloud_sync.h"
+#include "uploader_internal.h"
 #include "http_vsaas.h"
 #include "ts_mux.h"
 #include "rsdk_cloud.h"   /* 云存上传跟踪(当前 no-op 桩;新 rsdk.h 不再伞含它) */
@@ -16,15 +19,6 @@
 #include <unistd.h>
 
 #define MAX_PENDING 32
-
-struct nvr_cloud_uploader {
-    nvr_cloud_uploader_cfg_t cfg;
-    char      stoken[256];
-    int       sw_on;
-    volatile int running;
-    pthread_t thr;
-    pthread_mutex_t lk;
-};
 
 /* rectype → 云存 event_id 数字码（优先级见文档） */
 static int event_id_code(uint32_t rectype)
@@ -54,11 +48,26 @@ static int process_event(nvr_cloud_uploader_t *up, const rsdk_cloud_event_t *ev,
 #if RSDK_CFG_METADATA
     rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_UPLOADING, 0);
 
-    /* 1) 定位事件段（连续轨按时窗；后录窗口纳入） */
+    int rec_stream = 1;
+    if (!up->cfg.settings ||
+        !nvr_cloud_ch_upload_stream(up->cfg.settings, ev->chn, rectype_tag(ev->rectype), &rec_stream)) {
+        NVR_LOGI("cloud", "ch%d 事件跳过上传(云存未开/未启用/trigger/stream)", ev->chn);
+        rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_FAILED, -10);
+        return -1;
+    }
+
+    if (up->cfg.group && !nvr_cloud_async_upload_allowed(up->cfg.settings, ev->starttime)) {
+        NVR_LOGI("cloud", "ch%d 事件跳过(早于 async_upload_since) start=%u", ev->chn, ev->starttime);
+        rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_NONE, 0);
+        return -1;
+    }
+
+    /* 1) 定位事件段（连续轨按时窗；按 cloud_channel.stream_type 取主/子轨） */
     uint32_t t0 = ev->starttime;
     uint32_t t1 = ev->starttime + 300;            /* 上限一个合约窗口 */
     rsdk_index_slot_t segs[64];
-    int nseg = rsdk_group_query(up->cfg.group, t0, t1, ev->chn, RSDK_REC_CONTINUOUS, segs, 64);
+    int nseg = rsdk_group_query_stream(up->cfg.group, t0, t1, ev->chn,
+                                       RSDK_REC_CONTINUOUS, rec_stream, segs, 64);
     if (nseg <= 0) { rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_FAILED, -1); return -1; }
 
     rsdk_group_player_t *pl = NULL;
@@ -154,29 +163,34 @@ static void *worker_main(void *arg)
         pthread_mutex_unlock(&up->lk);
 
         if (on && stoken[0]) {
+            if (cloud_sync_mode(up))
+                cloud_sync_drain(up, stoken);
 #if RSDK_CFG_METADATA
-            rsdk_cloud_event_t pend[MAX_PENDING];
-            rsdk_cloud_poll_opt_t opt = { .include_failed = 1, .stale_uploading_s = 300, .chn = -1 };
-            int n = rsdk_cloud_enumerate_pending(up->cfg.meta, &opt, pend, MAX_PENDING);
-            if (n > 0) NVR_LOGI("cloud", "待上传队列 %d 条", n);
-            for (int i = 0; i < n && up->running; i++) {
-                int rc = process_event(up, &pend[i], stoken);
-                if (rc == -1000) {                       /* 服务器拒绝 → 强制关 */
-                    nvr_cloud_uploader_force_off(up, pend[i].last_err);
-                    break;
+            else if (up->cfg.group) {
+                rsdk_cloud_event_t pend[MAX_PENDING];
+                rsdk_cloud_poll_opt_t opt = { .include_failed = 1, .stale_uploading_s = 300, .chn = -1 };
+                int n = rsdk_cloud_enumerate_pending(up->cfg.meta, &opt, pend, MAX_PENDING);
+                if (n > 0) NVR_LOGI("cloud", "待上传队列 %d 条", n);
+                for (int i = 0; i < n && up->running; i++) {
+                    int rc = process_event(up, &pend[i], stoken);
+                    if (rc == -1000) {                       /* 服务器拒绝 → 强制关 */
+                        nvr_cloud_uploader_force_off(up, pend[i].last_err);
+                        break;
+                    }
                 }
             }
 #endif
         }
 
-        for (int s = 0; s < up->cfg.poll_interval_s && up->running; s++) sleep(1);
+        int wait_s = cloud_sync_mode(up) ? 1 : up->cfg.poll_interval_s;
+        for (int s = 0; s < wait_s && up->running; s++) sleep(1);
     }
     return NULL;
 }
 
 int nvr_cloud_uploader_start(const nvr_cloud_uploader_cfg_t *cfg, nvr_cloud_uploader_t **out)
 {
-    if (!cfg || !cfg->group || !cfg->meta || !cfg->udid || !out) return -1;
+    if (!cfg || !cfg->meta || !cfg->udid || !out) return -1;
     nvr_cloud_uploader_t *up = calloc(1, sizeof(*up));
     if (!up) return -1;
     up->cfg = *cfg;
@@ -190,6 +204,7 @@ int nvr_cloud_uploader_start(const nvr_cloud_uploader_cfg_t *cfg, nvr_cloud_uplo
     if (pthread_create(&up->thr, NULL, worker_main, up) != 0) {
         up->running = 0; pthread_mutex_destroy(&up->lk); vsaas_http_cleanup(); free(up); return -1;
     }
+    cloud_sync_attach(up);
     *out = up;
     return 0;
 }
@@ -199,9 +214,44 @@ void nvr_cloud_uploader_stop(nvr_cloud_uploader_t *up)
     if (!up) return;
     up->running = 0;
     pthread_join(up->thr, NULL);
+    cloud_sync_detach();
     pthread_mutex_destroy(&up->lk);
     vsaas_http_cleanup();
     free(up);
+}
+
+void nvr_cloud_uploader_set_group(nvr_cloud_uploader_t *up, rsdk_group_t *group)
+{
+    if (!up) return;
+    pthread_mutex_lock(&up->lk);
+    up->cfg.group = group;
+    pthread_mutex_unlock(&up->lk);
+}
+
+int nvr_cloud_uploader_sync_mode(const nvr_cloud_uploader_t *up)
+{
+    return cloud_sync_mode(up);
+}
+
+int nvr_cloud_sync_event_begin(nvr_cloud_uploader_t *up, int chn, uint64_t eid,
+                               uint32_t starttime, uint32_t rectype, int rec_stream)
+{
+    if (!up) return -1;
+    char stoken[256];
+    pthread_mutex_lock(&up->lk);
+    snprintf(stoken, sizeof(stoken), "%s", up->stoken);
+    pthread_mutex_unlock(&up->lk);
+    return cloud_sync_event_begin(up, chn, eid, starttime, rectype, rec_stream, stoken);
+}
+
+int nvr_cloud_sync_event_end(nvr_cloud_uploader_t *up, uint64_t eid, uint32_t end_epoch)
+{
+    if (!up) return -1;
+    char stoken[256];
+    pthread_mutex_lock(&up->lk);
+    snprintf(stoken, sizeof(stoken), "%s", up->stoken);
+    pthread_mutex_unlock(&up->lk);
+    return cloud_sync_event_end(up, eid, end_epoch, stoken);
 }
 
 void nvr_cloud_uploader_set_switch(nvr_cloud_uploader_t *up, int on)

@@ -1,7 +1,7 @@
 # 文档索引 — NT12-32 NVR Firmware
 
 > 按主题分类，便于快速定位。
-> **活文档**（对照当前代码）：[ARCHITECTURE.md](ARCHITECTURE.md) · [STATUS.md](STATUS.md)
+> 活文档（对照当前代码）：[ARCHITECTURE.md](ARCHITECTURE.md) · [STATUS.md](STATUS.md) · [CODE_GAP_AUDIT.md](CODE_GAP_AUDIT.md)
 > 带日期的审计/实现记录是当时快照，以活文档为准。记忆同步：2026-08-18。
 
 ---
@@ -11,7 +11,11 @@
 | 文档 | 说明 |
 |------|------|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | **分层架构、数据流、模块契约、启动时序**（2026-08-18 对照实码） |
-| [STATUS.md](STATUS.md) | **当前实现状态**（✅/🟡/❌，2026-08-18 更新） |
+| [STATUS.md](STATUS.md) | **当前实现状态**（✅/🟡/❌，2026-08-20 更新） |
+| [CODE_GAP_AUDIT.md](CODE_GAP_AUDIT.md) | **代码级缺口审计**（501 / 桩 / 仅配置 / 部分 / 真机待核） |
+| [API_HARDCODED_DEFAULTS.md](API_HARDCODED_DEFAULTS.md) | **接口硬编码默认值**（应仅来自 DB 或 IPC） |
+| [DB_SEED_DEFAULTS.md](DB_SEED_DEFAULTS.md) | **数据库出厂默认值**（16 表 seed · schema v9 · stream_type 策略） |
+| [NVR_DATA_MAP.html](NVR_DATA_MAP.html) | **数据与配置可视化**（DB · 裸盘 · 录像码流策略 · JSON · 路径树） |
 | [待完成功能.md](待完成功能.md) | **待办填写表**（做/缓/不做 + 优先级 + 备注） |
 | [SOURCE_MAP.md](SOURCE_MAP.md) | 代码来源追溯（NT12-SDK → 本工程） |
 | [固件系统分布.md](固件系统分布.md) | Flash 分区、Linux 挂载、库依赖、进程端口 |

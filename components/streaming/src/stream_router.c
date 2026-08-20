@@ -26,6 +26,11 @@ __attribute__((weak)) void nvr_rtsp_live_feed_audio(int chn, const uint8_t *data
 {
     (void)chn; (void)data; (void)len; (void)ts_ms;
 }
+__attribute__((weak)) void nvr_cloud_sync_feed(int chn, int stream, const uint8_t *data, int len,
+                                              int codec, int is_key, uint32_t ts_ms)
+{
+    (void)chn; (void)stream; (void)data; (void)len; (void)codec; (void)is_key; (void)ts_ms;
+}
 
 static stream_pull_t *pull_of(stream_chan_t *c, int stream)
 {
@@ -35,6 +40,49 @@ static stream_pull_t *pull_of(stream_chan_t *c, int stream)
 static rsdk_writer_t *writer_of(stream_chan_t *c, int stream)
 {
     return (stream == NVR_STREAM_SUB) ? c->writer_sub : c->writer_main;
+}
+
+static int stream_rec_stream_on(const stream_chan_t *c, int stream)
+{
+    if (!c) return 0;
+    return (stream == NVR_STREAM_SUB) ? c->rec_sub_on : c->rec_main_on;
+}
+
+static void stream_close_writer_one(stream_chan_t *c, int stream)
+{
+    if (!c) return;
+    if (stream == NVR_STREAM_SUB) {
+        if (!c->writer_sub) return;
+        rsdk_rec_close(c->writer_sub);
+        c->writer_sub = NULL;
+        c->rec_gated_sub = 0;
+        stream_record_q_flush(&c->psub.rec_q);
+        c->psub.rec_state = STREAM_REC_WAIT_IDR;
+        c->psub.rec_drop_until_key = 0;
+        c->psub.rec_seg_start_wall = 0;
+    } else {
+        if (!c->writer_main) return;
+        rsdk_rec_close(c->writer_main);
+        c->writer_main = NULL;
+        c->rec_gated_main = 0;
+        stream_record_q_flush(&c->pmain.rec_q);
+        c->pmain.rec_state = STREAM_REC_WAIT_IDR;
+        c->pmain.rec_drop_until_key = 0;
+        c->pmain.rec_seg_start_wall = 0;
+    }
+    stream_rec_mask_poke(c);
+}
+
+static void stream_apply_rec_close_pend(stream_chan_t *c, stream_pull_t *p)
+{
+    if (!c || !p) return;
+    if (p->stream == NVR_STREAM_MAIN && c->rec_main_close_pend) {
+        c->rec_main_close_pend = 0;
+        stream_close_writer_one(c, NVR_STREAM_MAIN);
+    } else if (p->stream == NVR_STREAM_SUB && c->rec_sub_close_pend) {
+        c->rec_sub_close_pend = 0;
+        stream_close_writer_one(c, NVR_STREAM_SUB);
+    }
 }
 
 /* ---- 事件预录环(主/子各一,挂在 stream_pull_t) -------------------------- */
@@ -168,13 +216,13 @@ static void stream_event_writers_open(stream_chan_t *c)
     grp = c->grp;
     if (!grp) return;
     rectype = c->pend_event_rectype ? (int)c->pend_event_rectype : RSDK_REC_MOTION;
-    if (!c->writer_main) {
+    if (c->rec_main_on && !c->writer_main) {
         if (rsdk_rec_open_group_stream(grp, c->cfg.chn, rectype,
                                        NVR_STREAM_MAIN, &c->writer_main) != RSDK_OK)
             c->writer_main = NULL;
         else { c->rec_gated_main = 0; c->pmain.rec_state = STREAM_REC_WAIT_IDR; c->pmain.rec_last_gen = c->pmain.conn_gen; }
     }
-    if (!c->writer_sub) {
+    if (c->rec_sub_on && !c->writer_sub) {
         if (rsdk_rec_open_group_stream(grp, c->cfg.chn, rectype,
                                        NVR_STREAM_SUB, &c->writer_sub) != RSDK_OK)
             c->writer_sub = NULL;
@@ -406,17 +454,17 @@ void stream_live_signal_resync(stream_chan_t *c, stream_pull_t *p, const char *w
     stream_live_enter_resync(c, why);
 }
 
-/* 只开录像 writer(主+子各一)。供运行时"格式化后重组装盘组"时对已连通道补开。幂等。 */
+/* 按 rec_main_on/rec_sub_on 开 writer(连续录像)。幂等。 */
 void stream_open_writer(stream_chan_t *c, rsdk_group_t *grp)
 {
     if (!c || !c->cfg.record || !grp) return;
-    if (!c->writer_main) {
+    if (c->rec_main_on && !c->writer_main) {
         rsdk_err_t rc = rsdk_rec_open_group_stream(grp, c->cfg.chn, RSDK_REC_CONTINUOUS,
                                                    NVR_STREAM_MAIN, &c->writer_main);
         if (rc != RSDK_OK) { c->writer_main = NULL; NVR_LOGE("stream", "chn%d 补开主流 writer 失败 %d", c->cfg.chn, rc); }
         else { c->rec_gated_main = 0; c->pmain.rec_state = STREAM_REC_WAIT_IDR; c->pmain.rec_last_gen = c->pmain.conn_gen; }
     }
-    if (!c->writer_sub) {
+    if (c->rec_sub_on && !c->writer_sub) {
         rsdk_err_t rc = rsdk_rec_open_group_stream(grp, c->cfg.chn, RSDK_REC_CONTINUOUS,
                                                    NVR_STREAM_SUB, &c->writer_sub);
         if (rc != RSDK_OK) { c->writer_sub = NULL; NVR_LOGE("stream", "chn%d 补开子流 writer 失败 %d", c->cfg.chn, rc); }
@@ -577,20 +625,19 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
         stream_rec_notify_disc(c, p);
 
     /* --- Record 路径: 只入队 + poke worker; rsdk 写盘不在 puller 内 --- */
+    stream_apply_rec_close_pend(c, p);
     if (c->cfg.record) {
         stream_apply_event_tags_puller(c);
-        if (!nc.is_param)
+        if (stream_rec_stream_on(c, p->stream) && !nc.is_param)
             (void)stream_record_enqueue(c, p, data, len, ts, wall, &nc);
     } else if (c->event_arm) {
-        if (!c->event_clip && p->stream == NVR_STREAM_MAIN &&
-            (c->writer_main || c->writer_sub))
+        if (!c->event_clip && (c->writer_main || c->writer_sub))
             stream_close_writer(c);
         if (c->event_clip) {
-            if (p->stream == NVR_STREAM_MAIN) {
-                if (!c->writer_main && !c->writer_sub) stream_event_writers_open(c);
-                stream_apply_event_tags_puller(c);
-            }
-            if (writer_of(c, p->stream)) {
+            if (stream_rec_stream_on(c, p->stream) && !writer_of(c, p->stream))
+                stream_event_writers_open(c);
+            stream_apply_event_tags_puller(c);
+            if (stream_rec_stream_on(c, p->stream) && writer_of(c, p->stream)) {
                 if (!p->pre_flushed) {
                     stream_pre_flush(c, p);
                     p->pre_flushed = 1;
@@ -598,7 +645,7 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
                 if (!nc.is_param)
                     (void)stream_record_enqueue(c, p, data, len, ts, wall, &nc);
             }
-        } else if (!nc.is_param && c->pre_record_s > 0) {
+        } else if (!nc.is_param && c->pre_record_s > 0 && stream_rec_stream_on(c, p->stream)) {
             if (stream_pre_ensure(p, c->pre_record_s) == 0)
                 stream_pre_push(p, data, len, ts, wall, nc.is_key, p->codec, nc.frame_type);
         }
@@ -609,6 +656,8 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
     if (tmp) free(tmp);
 
     nvr_rtsp_live_feed(c->cfg.chn, p->stream, data, len, p->codec, nc.is_key, ts);
+    if (!nc.is_param)
+        nvr_cloud_sync_feed(c->cfg.chn, p->stream, data, len, p->codec, nc.is_key, ts);
 }
 
 void stream_route_audio(stream_pull_t *p, const uint8_t *data, int len, uint32_t ts)
@@ -618,7 +667,7 @@ void stream_route_audio(stream_pull_t *p, const uint8_t *data, int len, uint32_t
     if (data && len > 0)
         nvr_rtsp_live_feed_audio(c->cfg.chn, data, len, ts);
     /* 音频录像:挂主流 writer,stream=2/codec=AAC。仅主路带音频。 */
-    int writing = c->cfg.record || c->event_clip;
+    int writing = (c->cfg.record || c->event_clip) && c->rec_main_on;
     if (writing && c->writer_main && c->rec_gated_main && data && len > 0)
         (void)stream_record_enqueue_audio(&c->pmain, data, len, ts, (uint32_t)time(NULL));
 }

@@ -42,5 +42,18 @@
       "vlan_base": 2001,
       "dhcp_server": { "enable": true, "server_ip": "198.18.%d.1", "pool": "198.18.%d.100-199", "mask": "255.255.255.0" }
     }
+  },
+
+  "cloud": {
+    "_note": "云存总开关 → SQLite KV cloud.switch；async_upload_since → cloud.async_upload_since；运行期 SET 云存开关仍写 SQLite。",
+    "switch": false,
+    "_async_upload_since": "异步(有盘)云存起始 UTC 秒：空字符串=上传 HDD 已有录像；非空=仅上传该时刻及之后的事件",
+    "async_upload_since": ""
+  },
+
+  "cloudServer": {
+    "_note": "当前/可用云服务 → KV cloudServer.current / cloudServer.available；getCurrentClouds 只读。",
+    "current": "tutk",
+    "available": ["tutk"]
   }
 }

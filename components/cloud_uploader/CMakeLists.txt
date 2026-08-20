@@ -12,12 +12,14 @@ endif()
 
 add_library(nvr_cloud_uploader STATIC
   src/uploader.c
+  src/cloud_sync.c
   src/http_vsaas.c
   src/ts_mux.c
 )
 target_include_directories(nvr_cloud_uploader PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${NVR_ROOT}/components/recorder/include      # rsdk.h / rsdk_cloud.h
+  ${NVR_ROOT}/components/config/include        # nvr_record_policy.h / nvr_settings.h
   ${NVR_ROOT}/common/include                   # nvr_log.h
 )
 target_include_directories(nvr_cloud_uploader PRIVATE
@@ -29,6 +31,9 @@ target_link_libraries(nvr_cloud_uploader PUBLIC cjson)
 if(TARGET rsdk)
   add_dependencies(nvr_cloud_uploader rsdk)
   target_link_libraries(nvr_cloud_uploader PUBLIC rsdk)
+endif()
+if(TARGET nvr_settings)
+  target_link_libraries(nvr_cloud_uploader PUBLIC nvr_settings)
 endif()
 
 # libcurl：主机用系统；交叉用工程内 vendored 头(8.5.0) + TUTK aarch64 libcurl.so

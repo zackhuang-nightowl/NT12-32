@@ -6,7 +6,8 @@
  *   Types: GetRules Type 含 Motion（或 GetSupportedRules CellMotion）→ triggers=["pixelChange"].
  *   activityZonePoints [[col,row]] <-> ActiveCells bitmask (PackBits+base64).
  *   SET: ModifyRules 已有 CellMotion（保留 Name / Enabled / delays）；无规则才 Create。
- *   sensitivity level string <-> MinCount. Grid = width x height (default 22x18).
+ *   sensitivity level string <-> ModifyAnalyticsModules tt:CellMotionEngine
+ *   Sensitivity (low=33, middle=66, high=99). Grid = width x height (default 22x18).
  */
 #include "onvif/mapping/nop_onvif_map.h"
 
@@ -26,23 +27,18 @@
 static int bit_get(const unsigned char *b, int idx) { return (b[idx >> 3] >> (7 - (idx & 7))) & 1; }
 static void bit_set(unsigned char *b, int idx) { b[idx >> 3] |= (unsigned char)(0x80 >> (idx & 7)); }
 
-/* NOP sensitivity level <-> ONVIF CellMotion MinCount (spec §8: sensitivity ↔
- * MinCount). MinCount is the minimum number of adjacent active cells needed to
- * fire, so it is INVERSE to sensitivity: high sensitivity == few cells needed.
- * (The exact curve is "待补充" in the spec; this monotone mapping is the
- * agreed placeholder.) The camera's separate Sensitivity(0..100) is left at its
- * current value. */
-static int level_to_mincount(const char *lvl)
+/* NOP sensitivity level <-> tt:CellMotionEngine Sensitivity (0..100). */
+static int level_to_engine_sensitivity(const char *lvl)
 {
-    if (lvl && !strcmp(lvl, "high")) return 1;   /* most sensitive */
-    if (lvl && !strcmp(lvl, "low"))  return 3;   /* least sensitive */
-    return 2;                                     /* "middle" / default */
+    if (lvl && (!strcmp(lvl, "low") || !strcmp(lvl, "lowest")))  return 33;
+    if (lvl && (!strcmp(lvl, "high") || !strcmp(lvl, "highest"))) return 99;
+    return 66;
 }
-static const char *mincount_to_level(int mc)
+static const char *engine_sensitivity_to_level(int s)
 {
-    if (mc <= 1) return "high";
-    if (mc >= 3) return "low";
-    return "middle";
+    if (s <= 33) return "low";
+    if (s <= 66) return "middle";
+    return "high";
 }
 
 /* GetRules Type 含 Motion/CellMotion，或 GetSupportedRules 宣称 CellMotionDetector。 */
@@ -102,7 +98,7 @@ nop_status_t onvif_map_X_NightOwl_getChannelTriggerActivityZone(nop_onvif_map_ba
     nop_onvif_cellmotion_t cm;
     nop_coord_cell_t       cells[MOT_MAX_CELLS];
     char                   cfg[100];
-    int                    r, c, ncell = 0, rc;
+    int                    r, c, ncell = 0, rc, eng_sens = 66;
     (void)req;
 
     s = onvif_session_begin(be, ch);
@@ -114,6 +110,10 @@ nop_status_t onvif_map_X_NightOwl_getChannelTriggerActivityZone(nop_onvif_map_ba
     cm.columns = NOP_COORD_DEFAULT_W;
     cm.rows    = NOP_COORD_DEFAULT_H;
     rc = nop_onvif_analytics_get_cellmotion(onvif_session_dev(s), cfg, &cm);
+    if (rc >= 0 &&
+        nop_onvif_analytics_get_cellmotion_engine_sensitivity(onvif_session_dev(s), cfg,
+                                                              &eng_sens) != 0)
+        eng_sens = 66;
     onvif_session_end(be);
     if (rc < 0) return ONVIF_MAP_FAIL;
 
@@ -130,7 +130,7 @@ nop_status_t onvif_map_X_NightOwl_getChannelTriggerActivityZone(nop_onvif_map_ba
     nop_json_add_int(resp->content, "channel", ch);
     nop_json_add_int(resp->content, "width", cm.columns);
     nop_json_add_int(resp->content, "height", cm.rows);
-    nop_json_add_str(resp->content, "sensitivity", mincount_to_level(cm.min_count));
+    nop_json_add_str(resp->content, "sensitivity", engine_sensitivity_to_level(eng_sens));
     nop_json_add(resp->content, "activityZonePoints", onvif_map_cells_to_json(cells, ncell));
     return NOP_OK;
 }
@@ -144,7 +144,8 @@ nop_status_t onvif_map_X_NightOwl_setChannelTriggerActivityZone(nop_onvif_map_ba
     nop_onvif_cellmotion_t cm;
     nop_coord_cell_t       cells[MOT_MAX_CELLS];
     char                   cfg[100];
-    int                    ncell, i, w, h;
+    const char            *sens_lvl;
+    int                    ncell, i, w, h, eng_sens = 0;
     nop_status_t           rc = NOP_OK;
 
     if (!nop_json_has(req->args, "activityZonePoints"))
@@ -154,10 +155,13 @@ nop_status_t onvif_map_X_NightOwl_setChannelTriggerActivityZone(nop_onvif_map_ba
     if (w <= 0 || h <= 0 || w * h > NOP_ONVIF_CELLS_MAX_BITS)
         return NOP_ERR_PARAM;
 
+    sens_lvl = nop_json_str(req->args, "sensitivity", NULL);
+    if (sens_lvl && sens_lvl[0])
+        eng_sens = level_to_engine_sensitivity(sens_lvl);
+
     memset(&cm, 0, sizeof(cm));
     cm.columns     = w;
     cm.rows        = h;
-    cm.min_count   = level_to_mincount(nop_json_str(req->args, "sensitivity", "middle"));
     ncell = onvif_map_json_to_cells(nop_json_get(req->args, "activityZonePoints"),
                                     cells, MOT_MAX_CELLS);
     for (i = 0; i < ncell; i++) {
@@ -171,17 +175,20 @@ nop_status_t onvif_map_X_NightOwl_setChannelTriggerActivityZone(nop_onvif_map_ba
     if (onvif_session_analytics_cfg(s, cfg, sizeof(cfg)) != 0) {
         onvif_session_end(be); return ONVIF_MAP_FAIL;
     }
-    /* Preserve the camera's current Sensitivity(0..100): NOP sensitivity
-     * string maps to MinCount; ActiveCells is the grid. Adapter ModifyRules
-     * keeps the existing CellMotion Name / Enabled / delays. */
+    /* ActiveCells via ModifyRules; MinCount left unchanged. Sensitivity via
+     * ModifyAnalyticsModules tt:CellMotionEngine. */
     {
         nop_onvif_cellmotion_t cur;
         memset(&cur, 0, sizeof(cur));
         cur.columns = w; cur.rows = h;
         if (nop_onvif_analytics_get_cellmotion(onvif_session_dev(s), cfg, &cur) >= 0)
-            cm.sensitivity = cur.sensitivity;
+            cm.min_count = cur.min_count;
     }
     if (nop_onvif_analytics_set_cellmotion(onvif_session_dev(s), cfg, &cm) != 0)
+        rc = ONVIF_MAP_FAIL;
+    if (eng_sens > 0 &&
+        nop_onvif_analytics_set_cellmotion_engine_sensitivity(onvif_session_dev(s), cfg,
+                                                              eng_sens) != 0)
         rc = ONVIF_MAP_FAIL;
     onvif_session_end(be);
 

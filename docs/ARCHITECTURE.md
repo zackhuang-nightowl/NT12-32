@@ -2,7 +2,7 @@
 
 > SoC：Novatek **NT98633 / NA51090** · 32 通道（16 PoE + 16 LAN）· aarch64 Linux 4.19
 > 状态快照见 [STATUS.md](STATUS.md) · 文档索引见 [INDEX.md](INDEX.md)
-> 记忆同步：2026-08-19（对照 ODC TUTK agent cgi / 出厂 AuthKey 00000000 / 6061+8554+7000）
+> 记忆同步：2026-08-20（RSDK v2 P0–P3 已落地；streaming Frame Hub + Record Worker；ONVIF PackBits 活动区域）
 
 ---
 
@@ -73,7 +73,7 @@ nvr_firmware/
 ├── components/
 │   ├── nop/          ① NOP 协议核 + cap handler + ONVIF 映射
 │   ├── onvif/        ② ONVIF 客户端 glue + 设备三分类 + UDP 34569
-│   ├── streaming/    ③ 主+子常拉 → 硬解 / 双 writer / live 旁路
+│   ├── streaming/    ③ 主+子常拉 → Frame Hub → 硬解 / Record Worker / live 旁路
 │   ├── cloud_tutk/   ④ nvr_rtsp_live（:8554）；P2P 走 ODC agent
 │   ├── recorder/     ⑤ librsdk
 │   ├── storage/      ⑥ 盘管理
@@ -104,12 +104,14 @@ ONVIF GetStreamUri → 主 URL + 子 URL
          │
          ▼
 streaming 每通道两路常拉 (pmain / psub)
-         │  Annex-B
-         ├──────────────────┬──────────────────┐
-         ▼                  ▼                  ▼
-  可见窗: mhal_vdec     writer_main/sub    nvr_rtsp_live_feed
-  → mhal_vout HDMI     slot.stream=0/1     (主/子 → 8554 RTP)
-         ▲             音频挂主流
+         │  Annex-B AU
+         ▼
+  stream_route_video() → stream_hub (LiveQueue + RecordQueue)
+         │
+         ├─ LiveQueue ──► 可见窗 mhal_vdec → mhal_vout HDMI
+         ├─ RecordQueue ──► stream_record_worker ──► rsdk_rec_write_frame
+         │                  (主/子各 writer；音频挂主流 stream=2)
+         └─ BS 旁路 ──► nvr_rtsp_live_feed → 8554 RTP
 app/preview 宫格/全屏只改 decode_stream（不重连）
 ```
 
@@ -294,15 +296,26 @@ CMake 选项：`NVR_WITH_ONVIF` · `NVR_WITH_ONBOARD` · `NVR_STAGE`（stage 云
 
 ---
 
-## 9. 待接线 / 上真机调优
+## 9. 待接线 / 上真机调优 / 在研
 
-结构已就位，细节见 [STATUS.md](STATUS.md)：
+结构已就位，细节见 [STATUS.md](STATUS.md) 与 [待完成功能.md](待完成功能.md)：
 
-- media_hal 4K 时序 / YUV 抓拍 / 回放音频真机出声
+**板级 / 真机**
+- media_hal 4K 时序 / CVBS、YUV 硬解抓拍拷贝、回放 HDMI 音频出声
 - BLE 板级 BlueZ GATT 0xFFF0
 - 32 路并录 + ≤16 窗预览的 VPU/DDR 上限验证
-- 云存 TS PCR 连续性；推送外发
-- TUTK 远程回放真机对 App（Timeline Seek / 空白帧）回归
+
+**可靠性（已落地 / 遗留见 [CODE_GAP_AUDIT.md](CODE_GAP_AUDIT.md) §4.6）**
+- RSDK v2 P0–P3 ✅（spec §13）
+- 遗留：per-disk worker · writer 归属 worker · `pread` 短读报错 · soak 真机
+
+**接口 / 产品（代码级未做）**
+- **501**：`GUI_setNetPort` · `startEventDownloadwithURL`
+- **NOP 桩（200 假数据）**：通道 stats/loading、云存历史/统计、系统日志、云存连接测试
+- **仅配置**：DDNS · FTP · SMTP 465
+- **未接线 URL**：`NVR_URL_SMART_HOME`
+- **推送部分**：animal/package/lineCross 无 E_DVR payload
+- Wizard · LVGL · 产测 · 无盘 BaseStation · 电池机（本期不做）
 
 ---
 

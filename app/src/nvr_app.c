@@ -23,6 +23,7 @@
 #include "nvr_push.h"
 #include "nvr_nop8012.h"
 #include "nvr_settings.h"
+#include "nvr_record_policy.h"
 #include "nvr_identity.h"
 #include "nvr_cloud_uploader.h"
 #include "nvr_rtsp_live.h"   /* tunnel 内直播 RTSP 服务(:8554),供 ODC agent P2PTunnel 映射 */
@@ -84,11 +85,13 @@ struct nvr_app {
     nvr_push_t       *push;         /* 事件→图床/TPNS */
     nvr_chan_mgr_t   *cm;
     nvr_talk_t       *talk;
-    nvr_cloud_uploader_t *up;       /* 云存上传器（有盘+meta+udid 时启动） */
+    nvr_cloud_uploader_t *up;       /* 云存上传器（meta+udid；有盘 async / 无盘 sync） */
     nvr_ble_t        *ble;          /* BLE 配网通路（复用命令路由；板级链路真机接入） */
     int               tutk_on;      /* TUTK P2P 已启动 */
     int               manual_only;  /* 仅连手动添加的相机（NVR_MANUAL_ONLY）：不自动发现/加载配置通道 */
     signed char       rec_applied[32]; /* 连续录像排程:每通道上次已下发的 record 状态(-1=未知),仅变化时才 set_record */
+    signed char       rec_main_applied[32];
+    signed char       rec_sub_applied[32];
     signed char       evt_arm_applied[32]; /* 仅事件待命上次下发(-1=未知) */
     int               pre_s_applied[32];   /* 上次下发的预录秒数 */
     volatile int      running;
@@ -335,7 +338,37 @@ static void app_on_event_end(void *user, int chn, uint64_t eid, uint32_t start_e
 {
     nvr_app_t *a = user;
     if (!a || !a->eh || !eid) return;
+    if (a->up && nvr_cloud_uploader_sync_mode(a->up))
+        nvr_cloud_sync_event_end(a->up, eid, (uint32_t)time(NULL));
     nvr_evt_queue_meta_pull(a->eh, chn, eid, start_epoch);
+}
+
+static const char *cloud_trigger_of(int rectype)
+{
+    switch (rectype) {
+        case RSDK_REC_DOORBELL: return "doorbellRing";
+        case RSDK_REC_FACE:     return "face";
+        case RSDK_REC_HUMAN:    return "human";
+        case RSDK_REC_VEHICLE:  return "vehicle";
+        default:                return "pixelChange";
+    }
+}
+
+static void app_on_cloud_event(void *user, int chn, uint64_t eid, uint32_t start_epoch, int rectype)
+{
+    nvr_app_t *a = user;
+    if (!a || !a->up || !nvr_cloud_uploader_sync_mode(a->up) || !eid) return;
+    int rec_stream = 1;
+    if (!a->settings ||
+        !nvr_cloud_ch_upload_stream(a->settings, chn, cloud_trigger_of(rectype), &rec_stream))
+        return;
+    nvr_cloud_sync_event_begin(a->up, chn, eid, start_epoch, (uint32_t)rectype, rec_stream);
+}
+
+static void app_set_has_disk(nvr_app_t *a, int has)
+{
+    if (a && a->settings)
+        nvr_settings_set_int(a->settings, "storage.has_disk", has ? 1 : 0);
 }
 
 /* GET /eventSnap?eid= /snapshot/chN.jpg /download/*.mp4 — 隧道映射本机 nop 口取图/录像。
@@ -491,11 +524,11 @@ static void on_settings_change(void *user, const char *key)
         rec_schedule_apply(a);   /* 保存后立刻按库评估，不等 5s tick */
 }
 
-/* 有盘 + meta + udid 就绪 → 启动云存上传器，初值取自设置库 */
+/* meta + udid 就绪 → 启动云存上传器（有盘=async，无盘=sync），初值取自设置库 */
 static void maybe_start_uploader(nvr_app_t *a, const char *config_dir)
 {
     (void)config_dir;
-    if (!a->group || !a->meta) return;
+    if (!a->meta) return;
     char udid[64]; nvr_identity_get_uid(udid, sizeof(udid));  /* UID ← /User/tutk_agent_udid(统一来源) */
     if (!udid[0]) { printf("[app] 云存: 未配置 UID, 上传器未启动\n"); return; }
 
@@ -503,15 +536,15 @@ static void maybe_start_uploader(nvr_app_t *a, const char *config_dir)
     if (a->settings) nvr_settings_owner_get(a->settings, &ow);
 
     nvr_cloud_uploader_cfg_t uc = {
-        .group = a->group, .meta = a->meta, .udid = udid, .stoken = ow.stoken,
+        .group = a->group, .meta = a->meta, .settings = a->settings, .udid = udid, .stoken = ow.stoken,
         .stage = nvr_settings_get_int(a->settings, "cloud.stage", 0),
         .worker_count = 2, .poll_interval_s = 5, .slice_ms = 15000,
     };
     if (nvr_cloud_uploader_start(&uc, &a->up) == 0) {
         nvr_cloud_uploader_set_switch(a->up, nvr_settings_get_int(a->settings, "cloud.switch", 0));
         nvr_settings_subscribe(a->settings, "cloud.", on_settings_change, a);
-        /* nop_owner 由 nvr_app_start 统一订阅（同时驱动 stoken 与远程访问门控） */
-        printf("[app] 云存上传器已启动(UID=%s)\n", udid);
+        printf("[app] 云存上传器已启动(UID=%s mode=%s)\n", udid,
+               a->group ? "async" : "sync");
     }
 }
 
@@ -816,6 +849,7 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
     if (nvr_storage_assemble(a->stg, &a->group) != RSDK_OK) {
         printf("[app] 警告: 盘组装配失败, 录像禁用, 仅预览\n"); a->group = NULL;
     }
+    app_set_has_disk(a, a->group != NULL);
 
     /* 4) 元数据库（云存状态/事件/抓拍）：<config_dir>/meta.db */
 #if RSDK_CFG_METADATA
@@ -866,9 +900,10 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
         /* 8089 命令路由在通道管理器就绪后启动（见 §8 后）——它需要 cm 做 channel→设备 解析 */
     }
 
-    nvr_rec_sched_cfg_t rc = { .group = a->group, .meta = a->meta,
+    nvr_rec_sched_cfg_t rc = { .group = a->group, .meta = a->meta, .settings = a->settings,
                                .hdd_full_policy = a->cfg.storage.hdd_full, .post_record_s = 10,
-                               .end_user = a, .on_event_end = app_on_event_end };
+                               .end_user = a, .on_event_end = app_on_event_end,
+                               .cloud_user = a, .on_cloud_event = app_on_cloud_event };
     nvr_rec_sched_init(&rc, &a->rs);
 
     nvr_preview_cfg_t pc = { .sm = a->sm, .hdmi_w = disp_w, .hdmi_h = disp_h };
@@ -1088,9 +1123,9 @@ static int rules_match_now(const char *rules_json, int wday, int sod)
     return match;
 }
 /* 连续/仅事件排程评估:
- *   GET 无库配置仍回「开 + 7×24」给 GUI；真正录像只在对应行已保存后才开。
- *   continuous = 已保存连续排程 && 手动开 && sched_on && 落在时段
- *   event_arm  = 已保存事件排程 && 手动开 && !continuous
+ *   总开关/排程/预录秒数均只读 DB(出厂 seed 保证有行)。
+ *   continuous = record_on && 连续排程 sched_on && 落在时段
+ *   event_arm  = record_on && 有事件排程 && !continuous
  * 仅变化时下发,避免反复重置关键帧门控。 */
 static void rec_schedule_apply(nvr_app_t *app)
 {
@@ -1100,15 +1135,23 @@ static void rec_schedule_apply(nvr_app_t *app)
     int sod  = tmv.tm_hour*3600 + tmv.tm_min*60 + tmv.tm_sec;
     for (int chn0 = 0; chn0 < 32; chn0++) {
         nvr_record_cfg_t rc;
-        int rec_saved = (nvr_settings_record_get(app->settings, chn0, &rc) == 0);
+        if (nvr_settings_record_get(app->settings, chn0, &rc) != 0) continue;
         nvr_rec_schedule_t s;
         int cont_saved = (nvr_settings_rec_sched_get(app->settings, chn0, &s) == 0);
         int evt_saved  = nvr_settings_schedule_count(app->settings, chn0, "record_event") > 0;
-        /* 总开关：有 record_config 行用其值；否则仅当已保存某种排程时视为开(GET 默认开)。 */
-        int manual_on = rec_saved ? rc.record_on : ((cont_saved || evt_saved) ? 1 : 0);
+        int manual_on = rc.record_on;
         int continuous = manual_on && cont_saved && s.sched_on && rules_match_now(s.rules, wday, sod);
         int event_arm  = manual_on && evt_saved && !continuous;
         int pre_s = nvr_settings_record_pre_s_get(app->settings, chn0);
+        if (pre_s < 0) pre_s = 0;
+        int main_on = 1, sub_on = 1;
+        nvr_record_stream_mask(rc.stream_type, &main_on, &sub_on);
+        if (app->rec_main_applied[chn0] != (signed char)main_on ||
+            app->rec_sub_applied[chn0] != (signed char)sub_on) {
+            nvr_stream_set_record_mask(app->sm, chn0, main_on, sub_on);
+            app->rec_main_applied[chn0] = (signed char)main_on;
+            app->rec_sub_applied[chn0]  = (signed char)sub_on;
+        }
         if (app->rec_applied[chn0] != (signed char)continuous) {
             nvr_stream_set_record(app->sm, chn0, continuous);
             app->rec_applied[chn0] = (signed char)continuous;
@@ -1159,6 +1202,8 @@ void nvr_app_run(nvr_app_t *app)
     unsigned tick = 0;
     int ble_bound_last = -1, ble_unlock_last = -1;
     memset(app->rec_applied, -1, sizeof(app->rec_applied));       /* 强制首轮下发 */
+    memset(app->rec_main_applied, -1, sizeof(app->rec_main_applied));
+    memset(app->rec_sub_applied, -1, sizeof(app->rec_sub_applied));
     memset(app->evt_arm_applied, -1, sizeof(app->evt_arm_applied));
     memset(app->pre_s_applied, -1, sizeof(app->pre_s_applied));
     while (app->running) {

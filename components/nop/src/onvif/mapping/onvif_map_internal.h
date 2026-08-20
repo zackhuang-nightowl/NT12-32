@@ -190,6 +190,12 @@ nop_status_t onvif_map_getChannelSensorConfig(nop_onvif_map_backend_t *be, int c
 nop_status_t onvif_map_setChannelSensorConfig(nop_onvif_map_backend_t *be, int ch,
                                               const nop_request_t *req, nop_response_t *resp);
 
+/* §8 Object detection threshold — onvif_map_ai.c */
+nop_status_t onvif_map_AI_getDetectThreshold(nop_onvif_map_backend_t *be, int ch,
+                                             const nop_request_t *req, nop_response_t *resp);
+nop_status_t onvif_map_AI_setDetectThreshold(nop_onvif_map_backend_t *be, int ch,
+                                             const nop_request_t *req, nop_response_t *resp);
+
 /* §6 Firmware — onvif_map_firmware.c */
 nop_status_t onvif_map_upgradeChannelFirmware(nop_onvif_map_backend_t *be, int ch,
                                               const nop_request_t *req, nop_response_t *resp);

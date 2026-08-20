@@ -30,6 +30,8 @@ int  mhal_layout_cell_count_of(mhal_layout_t layout);   /* 某布局的格数(1/
 
 int  mhal_vout_init(mhal_out_t out, int width, int height);   /* 如 HDMI 3840x2160 */
 void mhal_vout_get_resolution(int *w, int *h);
+/** DRM connector status: true if cable plugged (reads /sys/class/drm/.../status). */
+void mhal_vout_get_cable_connect(int *hdmi, int *vga);
 int  mhal_vout_set_resolution(int w, int h);
 int  mhal_vout_set_layout(mhal_layout_t layout);              /* 切分屏 */
 int  mhal_vout_commit(void);                                 /* 立即重建显示合成图(整屏 stop_list→start_list) */

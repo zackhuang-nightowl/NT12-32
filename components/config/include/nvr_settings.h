@@ -93,10 +93,10 @@ int  nvr_settings_caps_get(nvr_settings_t *s, int chn, char *caps_json_out, int 
 typedef struct { int chn, record_on; char triggers[128], stream_type[8]; } nvr_record_cfg_t;
 int  nvr_settings_record_set(nvr_settings_t *s, const nvr_record_cfg_t *row);
 int  nvr_settings_record_get(nvr_settings_t *s, int chn, nvr_record_cfg_t *out);   /* 无返回 <0 */
-/* 事件后录秒数(get/setChannelRecordingTime)；缺省 10；合法范围 1..600 */
+/* 事件后录秒数(get/setChannelRecordingTime)；无 KV 返回 -1；合法范围 1..600 */
 int  nvr_settings_record_post_s_get(nvr_settings_t *s, int chn);
 int  nvr_settings_record_post_s_set(nvr_settings_t *s, int chn, int sec);
-/* 事件预录秒数(仅事件/待命模式)；缺省 5；合法范围 0..30（0=关预录） */
+/* 事件预录秒数(仅事件/待命模式)；无 KV 返回 -1；合法范围 0..30（0=关预录） */
 int  nvr_settings_record_pre_s_get(nvr_settings_t *s, int chn);
 int  nvr_settings_record_pre_s_set(nvr_settings_t *s, int chn, int sec);
 

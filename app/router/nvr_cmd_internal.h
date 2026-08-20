@@ -78,6 +78,7 @@ char *cmd_X_NightOwl_getDeviceCapabilities(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_AI_getChannelAICapabilities(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_X_NightOwl_setChannelZoomPan(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_X_NightOwl_getChannelZoomPan(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getCableConnectStatus(cJSON *a, const nvr_cmd_ctx_t *c);
 
 /* --- lan 子设备(nvr_cmd_lan.c) --- */
 char *cmd_GUI_LanSearch(cJSON *a, const nvr_cmd_ctx_t *c);
@@ -198,6 +199,11 @@ char *cmd_X_NightOwl_getCloudRecordSwitch(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_getCloudRecordSwitch(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_setCloudRecordConfigs(cJSON *a, const nvr_cmd_ctx_t *c);
 char *cmd_getCloudRecordConfigs(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getCloudRecordLogConfig(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_setCloudRecordLogConfig(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_startCloudRecordTest(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_stopCloudRecordTest(cJSON *a, const nvr_cmd_ctx_t *c);
+char *cmd_getCloudRecordTestProgress(cJSON *a, const nvr_cmd_ctx_t *c);
 
 /* --- record 录像/推送(nvr_cmd_record.c) --- */
 char *cmd_X_NightOwl_setChannelRecordingTriggers(cJSON *a, const nvr_cmd_ctx_t *c);

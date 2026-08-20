@@ -1,0 +1,610 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>NVR 数据与配置地图 — NT12-32</title>
+<style>
+:root{
+  --ground:#15181E;--ground-2:#1B1F27;--ground-3:#222732;
+  --side:#11141A;--line:#2E343F;--line-soft:#242a33;
+  --text:#E6E8EC;--text-dim:#9AA1AC;--text-faint:#6B727D;
+  --accent:#F0A33C;--accent-soft:#3a2f1c;
+  --cool:#5FB0C4;--cool-soft:#1d2c30;
+  --grn:#86b46a;--vio:#c98bd9;--rose:#d98b8b;
+  --ok:#76C08A;--warn:#E0A23C;--hold:#7E8794;
+  --mono:"Cascadia Code","JetBrains Mono",Consolas,ui-monospace,monospace;
+  --sans:"Segoe UI Variable","Segoe UI",system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+}
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--ground);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.55}
+body{display:grid;grid-template-columns:256px 1fr;height:100vh;overflow:hidden}
+.side{background:var(--side);border-right:1px solid var(--line);display:flex;flex-direction:column;overflow-y:auto}
+.head{padding:20px 18px 14px;border-bottom:1px solid var(--line-soft)}
+.head b{color:var(--accent)}
+.head .meta{font-family:var(--mono);font-size:11px;color:var(--text-dim);margin-top:8px;line-height:1.6}
+nav{padding:10px 0 24px;flex:1}
+.grp{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-faint);padding:14px 18px 6px}
+.nav-item{display:block;width:100%;text-align:left;background:none;border:none;border-left:3px solid transparent;
+  color:var(--text-dim);padding:9px 18px 9px 14px;cursor:pointer;font-family:var(--sans);font-size:13px}
+.nav-item:hover{background:var(--ground-2);color:var(--text)}
+.nav-item.active{border-left-color:var(--accent);background:var(--accent-soft);color:var(--text)}
+.nav-item .ix{font-family:var(--mono);font-size:10px;color:var(--text-faint);margin-right:8px}
+.main{overflow-y:auto;overflow-x:hidden;background:var(--ground)}
+.panel{display:none;max-width:1100px;margin:0 auto;padding:36px 40px 80px}
+.panel.show{display:block;animation:fade .25s ease}
+@keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@media(prefers-reduced-motion:reduce){.panel.show{animation:none}}
+.ph{display:flex;align-items:baseline;gap:12px;margin-bottom:10px}
+.ph .pn{font-family:var(--mono);font-size:11px;color:var(--accent)}
+.ph h1{margin:0;font-size:22px;font-weight:600}
+.lead{color:var(--text-dim);max-width:78ch;margin:0 0 24px}
+h2.sub{font-size:15px;margin:28px 0 12px;display:flex;align-items:center;gap:8px}
+h2.sub .mk{font-family:var(--mono);font-size:10px;color:var(--cool)}
+.note{border-left:3px solid var(--accent);background:var(--ground-2);padding:12px 16px;margin:16px 0;border-radius:0 6px 6px 0;color:var(--text-dim);font-size:13px}
+.stack{display:flex;flex-direction:column;gap:2px;margin:16px 0}
+.layer{display:grid;grid-template-columns:64px 1fr;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:var(--ground-2)}
+.lid{font-family:var(--mono);font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;color:#111}
+.l0{background:var(--cool)}.l1{background:var(--accent)}.l2{background:var(--grn)}.l3{background:var(--vio)}.l4{background:var(--rose)}
+.bd{padding:12px 14px}
+.bd .nm{font-family:var(--mono);font-size:12px;color:var(--accent)}
+.bd .ds{font-size:12px;color:var(--text-dim);margin-top:4px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.chip{font-family:var(--mono);font-size:10px;padding:2px 8px;border-radius:4px;background:var(--ground-3);color:var(--text-dim);border:1px solid var(--line-soft)}
+.flow{display:flex;flex-direction:column;align-items:center;gap:0;margin:20px 0}
+.fnode{border:1px solid var(--line);border-radius:8px;padding:12px 18px;background:var(--ground-2);min-width:280px;text-align:center}
+.fnode.in{border-color:var(--cool);background:var(--cool-soft)}
+.fnode.mid{border-color:var(--accent)}
+.fnode.out{border-color:var(--grn)}
+.fdown{font-family:var(--mono);color:var(--text-faint);padding:4px 0;font-size:12px}
+.fdown .lab{font-size:10px;color:var(--text-dim)}
+.tree,.codeblk{font-family:var(--mono);font-size:11.5px;line-height:1.5;background:var(--ground-2);border:1px solid var(--line);
+  border-radius:8px;padding:14px 16px;overflow-x:auto;white-space:pre;margin:12px 0}
+.tree .d{color:var(--accent)}.tree .f{color:var(--text)}.tree .c{color:var(--text-faint)}.tree .s{color:var(--cool)}.tree .v{color:var(--vio)}.tree .g{color:var(--grn)}
+.codeblk .kw{color:var(--vio)}.codeblk .ty{color:var(--cool)}.codeblk .fn{color:var(--accent)}.codeblk .cm{color:var(--text-faint)}.codeblk .st{color:var(--grn)}
+table{width:100%;border-collapse:collapse;margin:12px 0;font-size:12.5px}
+th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+th{background:var(--ground-3);font-family:var(--mono);font-size:10px;text-transform:uppercase;color:var(--text-dim)}
+.k{font-family:var(--mono);color:var(--accent);font-size:11px}
+.kc{font-family:var(--mono);color:var(--cool);font-size:11px}
+.tg{display:inline-block;font-family:var(--mono);font-size:10px;padding:2px 7px;border-radius:4px;background:var(--ground-3);color:var(--hold)}
+.tg.on{background:#1a3324;color:var(--ok)}.tg.no{background:#332020;color:var(--rose)}.tg.rt{background:#1a2833;color:var(--cool)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:12px 0}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:12px 0}
+@media(max-width:900px){body{grid-template-columns:1fr;height:auto;overflow:auto}.side{display:none}.grid2,.grid3{grid-template-columns:1fr}}
+.card{background:var(--ground-2);border:1px solid var(--line);border-radius:8px;padding:14px}
+.card .lbl{font-family:var(--mono);font-size:10px;text-transform:uppercase;color:var(--text-faint)}
+.card .val{font-family:var(--mono);font-size:13px;margin:6px 0;color:var(--accent)}
+.card p{margin:0;font-size:12px;color:var(--text-dim)}
+.foot{text-align:center;font-family:var(--mono);font-size:10px;color:var(--text-faint);padding:24px;border-top:1px solid var(--line-soft);margin-top:40px}
+.search{width:100%;max-width:360px;padding:8px 12px;border-radius:6px;border:1px solid var(--line);background:var(--ground-3);color:var(--text);font-family:var(--mono);font-size:12px;margin-bottom:12px}
+.search:focus{outline:2px solid var(--accent);outline-offset:1px}
+tr.hidden{display:none}
+.tabs{display:flex;gap:4px;margin-bottom:12px;flex-wrap:wrap}
+.tab{font-family:var(--mono);font-size:11px;padding:6px 12px;border-radius:6px;border:1px solid var(--line);background:var(--ground-2);color:var(--text-dim);cursor:pointer}
+.tab.on{border-color:var(--accent);background:var(--accent-soft);color:var(--text)}
+.tabpane{display:none}.tabpane.on{display:block}
+.nav-item:focus-visible,.tab:focus-visible,.search:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+</style>
+</head>
+<body>
+<aside class="side">
+  <div class="head">
+    <div><b>NVR</b> Data Map</div>
+    <div class="meta">NT12-32 · NOP12-32<br>2026-08-20 · schema v9<br>DB · 裸盘 · JSON</div>
+  </div>
+  <nav id="nav">
+    <div class="grp">总览</div>
+    <button class="nav-item active" data-t="p0"><span class="ix">00</span>数据分层总览</button>
+    <button class="nav-item" data-t="p1"><span class="ix">01</span>设置库 16 表</button>
+    <button class="nav-item" data-t="p2"><span class="ix">02</span>setting KV 清单</button>
+    <button class="nav-item" data-t="p10"><span class="ix">02b</span>录像码流策略</button>
+    <div class="grp">录像存储</div>
+    <button class="nav-item" data-t="p3"><span class="ix">03</span>裸盘分区布局</button>
+    <button class="nav-item" data-t="p4"><span class="ix">04</span>索引区 IndexRegion</button>
+    <button class="nav-item" data-t="p5"><span class="ix">05</span>元数据 / 图片区</button>
+    <button class="nav-item" data-t="p6"><span class="ix">06</span>meta.db 索引库</button>
+    <div class="grp">配置文件</div>
+    <button class="nav-item" data-t="p7"><span class="ix">07</span>种子 JSON (/dvr/config)</button>
+    <button class="nav-item" data-t="p8"><span class="ix">08</span>运行期 JSON / 身份</button>
+    <button class="nav-item" data-t="p9"><span class="ix">09</span>路径树 & 启动流</button>
+  </nav>
+</aside>
+<main class="main" id="main">
+
+<!-- P0 -->
+<section class="panel show" data-p="p0">
+  <div class="ph"><span class="pn">00</span><h1>数据分层总览</h1></div>
+  <p class="lead">NVR 持久化分三层：<strong>设置 SQLite</strong>（通道/系统配置）、<strong>裸盘 RSDK</strong>（视频帧 + 盘上索引 + MetaRegion 大对象）、<strong>meta.db SQLite</strong>（事件/AI/抓拍文档检索索引）。JSON 分<strong>种子</strong>（只读镜像）与<strong>运行期</strong>（/flash/nvrcfg、/mnt/custom）。</p>
+
+  <div class="stack">
+    <div class="layer"><div class="lid l0">UI</div><div class="bd"><div class="nm">LVGL + NOP :8089</div><div class="ds">GUI_CONFIG.json · channels.json(映射) · SQLite GET</div></div></div>
+    <div class="layer"><div class="lid l1">APP</div><div class="bd"><div class="nm">nvr_app / router</div><div class="ds">编排：settings · persist · storage · rsdk · stream</div></div></div>
+    <div class="layer"><div class="lid l2">持久</div><div class="bd"><div class="nm">/flash/nvrcfg</div><div class="chips"><span class="chip">nvr_settings.db</span><span class="chip">meta.db</span><span class="chip">channels.json</span></div></div></div>
+    <div class="layer"><div class="lid l3">裸盘</div><div class="bd"><div class="nm">/dev/sdX · RSDK01</div><div class="chips"><span class="chip">IndexRegion 64B×N</span><span class="chip">DataRegion 帧</span><span class="chip">MetaRegion PIC0/MDOC</span></div></div></div>
+    <div class="layer"><div class="lid l4">出厂</div><div class="bd"><div class="nm">/User + /dvr/config</div><div class="ds">SN/MAC/UID/TUTK · 种子 JSON（首启写 DB 一次）</div></div></div>
+  </div>
+
+  <div class="note">同名 <code>channels.json</code> 有两份：<span class="tg rt">种子</span> <code>/dvr/config/channels.json</code>（PoE 展开）≠ <span class="tg rt">运行期</span> <code>/flash/nvrcfg/channels.json</code>（映射/名称/状态）。</div>
+
+  <div class="grid3">
+    <div class="card"><div class="lbl">设置库</div><div class="val">nvr_settings.db</div><p>16 表 · schema v9 · 10 表有 seed</p></div>
+    <div class="card"><div class="lbl">本地录像</div><div class="val">stream_type=both</div><p>record_config → 主+子 writer</p></div>
+    <div class="card"><div class="lbl">云存上传</div><div class="val">stream_type=sub</div><p>cloud_channel → query_stream(1)</p></div>
+  </div>
+  <div class="grid3" style="margin-top:12px">
+    <div class="card"><div class="lbl">元数据索引</div><div class="val">meta.db</div><p>meta_doc · 运行时写入</p></div>
+    <div class="card"><div class="lbl">录像盘</div><div class="val">RSDK 裸盘</div><p>Index 64B · Data chunk · MetaRegion</p></div>
+    <div class="card"><div class="lbl">策略模块</div><div class="val">nvr_record_policy</div><p>stream_type 解析 · 云存门控</p></div>
+  </div>
+</section>
+
+<!-- P1 -->
+<section class="panel" data-p="p1">
+  <div class="ph"><span class="pn">01</span><h1>设置库 nvr_settings.db — 16 表</h1></div>
+  <p class="lead">路径：<code>/flash/nvrcfg/nvr_settings.db</code>（设备）或开发时 <code>config_dir/nvr_settings.db</code>。通道表 seed <code>chn=0..31</code>；下表示例 <strong>chn=0</strong> 或 <strong>id=1</strong>。</p>
+  <input class="search" type="search" placeholder="过滤表名…" data-filter="#tbl-settings"/>
+
+  <table id="tbl-settings">
+    <thead><tr><th>#</th><th>表</th><th>Seed</th><th>示例一行（出厂 / 首启）</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td class="k">setting</td><td><span class="tg on">✅</span></td><td><code>key='system.capacity', ival=32</code></td></tr>
+      <tr><td>2</td><td class="k">auth</td><td><span class="tg no">没有</span></td><td>— 改密/登录才写 id=1</td></tr>
+      <tr><td>3</td><td class="k">local_user</td><td><span class="tg no">没有</span></td><td>— GUI_createUser 建 Admin</td></tr>
+      <tr><td>4</td><td class="k">nop_owner</td><td><span class="tg no">没有</span></td><td>— GUI_login 云绑定</td></tr>
+      <tr><td>5</td><td class="k">camera</td><td><span class="tg on">✅</span></td><td><code>chn=0, enabled=0, type='single', dev_chn=1</code>（ip/mac 空）</td></tr>
+      <tr><td>6</td><td class="k">camera_capability</td><td><span class="tg on">✅</span></td><td><code>chn=0, caps_json='', signal='IPC', probed_at=0</code></td></tr>
+      <tr><td>7</td><td class="k">record_config</td><td><span class="tg on">✅</span></td><td><code>chn=0, record_on=1, triggers='pir,pixelChange,…,fieldIntrusion', stream_type='both'</code> → streaming 主/子掩码</td></tr>
+      <tr><td>8</td><td class="k">record_schedule</td><td><span class="tg on">✅</span></td><td><code>chn=0, sched_on=1, rules='[{"id":"rule-id-1","weekdays":[1..7],"startTime":"000000","endTime":"235959"}]'</code></td></tr>
+      <tr><td>9</td><td class="k">push_config</td><td><span class="tg on">✅</span></td><td><code>chn=0, switch_on=0, dnd_enable=0, dnd_start='2100', dnd_end='0700', dnd_weekdays='1,2,3,4,5,6,7', time_unit='hour', triggers='', photo_on=0, snooze_end=0</code></td></tr>
+      <tr><td>10</td><td class="k">cloud_channel</td><td><span class="tg on">✅</span></td><td><code>chn=0, stream_type='sub', triggers='human,face,vehicle', enable=0</code> → 云存登记+上传子轨</td></tr>
+      <tr><td>11</td><td class="k">schedule</td><td><span class="tg on">✅</span></td><td><code>chn=0, domain='record_event', sensor='pixelChange', rule_id='rule-id-1', weekdays='1,2,3,4,5,6,7', start_hms='000000', end_hms='235959'</code>（+8 sensor/通道）</td></tr>
+      <tr><td>12</td><td class="k">local_link</td><td><span class="tg on">✅</span></td><td><code>id=1, network_type='DHCP', ip='192.168.9.114', subnet_mask='255.255.255.0', gateway='192.168.9.1', dns1='8.8.8.8', dns2='8.8.4.4'</code></td></tr>
+      <tr><td>13</td><td class="k">email_alert</td><td><span class="tg no">没有</span></td><td>—</td></tr>
+      <tr><td>14</td><td class="k">ftp</td><td><span class="tg no">没有</span></td><td>—</td></tr>
+      <tr><td>15</td><td class="k">ddns</td><td><span class="tg no">没有</span></td><td>—</td></tr>
+      <tr><td>16</td><td class="k">meta_kv</td><td><span class="tg on">✅</span></td><td><code>schema_version='9'</code> · 首启 <code>seeded='1'</code> · v9 迁移 both/sub</td></tr>
+    </tbody>
+  </table>
+
+  <h2 class="sub"><span class="mk">▸</span>schedule 每通道 9 行 sensor</h2>
+  <p class="lead" style="margin-top:0">pixelChange, human, face, vehicle, animal, package, doorbellRing, lineCross, fieldIntrusion — 均为 7×24 全周。</p>
+</section>
+
+<!-- P2 -->
+<section class="panel" data-p="p2">
+  <div class="ph"><span class="pn">02</span><h1>setting 表 KV 清单</h1></div>
+  <p class="lead">首启 <code>seed_from_json()</code> + 每通道 <code>record.ch.N.post_s/pre_s</code>（<code>INSERT OR IGNORE</code>）。</p>
+  <table>
+    <thead><tr><th>key</th><th>类型</th><th>默认值</th><th>来源</th></tr></thead>
+    <tbody>
+      <tr><td class="k">system.model</td><td>sval</td><td>NT12-32</td><td>system.json</td></tr>
+      <tr><td class="k">system.device_name</td><td>sval</td><td>NVR-01</td><td>system.json</td></tr>
+      <tr><td class="k">system.timezone</td><td>sval</td><td>America/New_York</td><td>system.json</td></tr>
+      <tr><td class="k">system.ntp</td><td>sval</td><td>pool.ntp.org</td><td>system.json</td></tr>
+      <tr><td class="k">network.eth0.dhcp</td><td>ival</td><td>1</td><td>system.json</td></tr>
+      <tr><td class="k">network.eth0.ip</td><td>sval</td><td>192.168.9.114</td><td>system.json</td></tr>
+      <tr><td class="k">network.eth0.mask</td><td>sval</td><td>255.255.255.0</td><td>system.json</td></tr>
+      <tr><td class="k">network.eth0.gw</td><td>sval</td><td>192.168.9.1</td><td>system.json</td></tr>
+      <tr><td class="k">network.eth1.vlan_base</td><td>ival</td><td>2001</td><td>system.json</td></tr>
+      <tr><td class="k">system.capacity</td><td>ival</td><td>32</td><td>system.json</td></tr>
+      <tr><td class="k">system.poe_ports</td><td>ival</td><td>16</td><td>system.json</td></tr>
+      <tr><td class="k">system.ip_channels</td><td>ival</td><td>16</td><td>system.json</td></tr>
+      <tr><td class="k">storage.hdd_full</td><td>sval</td><td>overwrite</td><td>storage.json</td></tr>
+      <tr><td class="k">storage.encryption</td><td>ival</td><td>1</td><td>storage.json</td></tr>
+      <tr><td class="k">cloud.switch</td><td>ival</td><td>0</td><td>system.json · cloud.switch（云存总开关）</td></tr>
+      <tr><td class="k">cloudServer.current</td><td>sval</td><td>tutk</td><td>system.json · getCurrentClouds</td></tr>
+      <tr><td class="k">cloudServer.available</td><td>sval</td><td>tutk</td><td>system.json 数组 → 逗号分隔 KV</td></tr>
+      <tr><td class="k">tutk.license_key</td><td>sval</td><td>000000</td><td>cloud_tutk.json</td></tr>
+      <tr><td class="k">tutk.max_sessions</td><td>ival</td><td>8</td><td>cloud_tutk.json</td></tr>
+      <tr><td class="k">record.ch.N.post_s</td><td>ival</td><td>10</td><td>seed_chn_defaults N=0..31</td></tr>
+      <tr><td class="k">record.ch.N.pre_s</td><td>ival</td><td>5</td><td>seed_chn_defaults N=0..31</td></tr>
+    </tbody>
+  </table>
+  <div class="note">故意不 seed：SN / TUTK uid / authkey / av_password → 读 <code>/User/*</code>（nvr_identity）</div>
+</section>
+
+<!-- P10 录像码流策略 -->
+<section class="panel" data-p="p10">
+  <div class="ph"><span class="pn">02b</span><h1>录像码流策略（DB → 行为）</h1></div>
+  <p class="lead">每通道一行配置，<strong>不再</strong>在 streaming/uploader 里硬编码「永远双轨」或「云存合并全轨」。解析在 <code>nvr_record_policy.c</code>；schema <strong>v9</strong> 把旧库 <code>main</code> 迁为本地 <code>both</code>、未启用云存 <code>sub</code>。</p>
+
+  <table>
+    <thead><tr><th>表 · 列</th><th>出厂默认</th><th>取值</th><th>下游</th></tr></thead>
+    <tbody>
+      <tr><td class="k">record_config.stream_type</td><td><code>both</code></td><td>both · main · sub · disable</td><td><code>rec_schedule_apply</code> → <code>nvr_stream_set_record_mask</code> → <code>writer_main</code>/<code>writer_sub</code></td></tr>
+      <tr><td class="k">cloud_channel.stream_type</td><td><code>sub</code></td><td>main · sub · disable</td><td>事件登记 <code>nvr_rec_trigger_event</code> + 上传 <code>rsdk_group_query_stream</code></td></tr>
+      <tr><td class="k">cloud_channel.triggers</td><td>human,face,vehicle</td><td>CSV</td><td>与 <code>cloud.switch</code>、<code>enable</code> 一并门控登记/上传</td></tr>
+      <tr><td class="k">record_config.triggers</td><td>10 类全开</td><td>CSV</td><td><span class="tg no">仅存库</span> — 本地 AI 过滤未接</td></tr>
+    </tbody>
+  </table>
+
+  <h2 class="sub"><span class="mk">▸</span>本地连续 / 事件录像</h2>
+  <div class="flow">
+    <div class="fnode in">record_config + record_schedule + schedule(record_event)</div>
+    <div class="fdown">▼ <span class="lab">nvr_app · rec_schedule_apply (≤5s / 设置变更)</span></div>
+    <div class="fnode mid">nvr_record_stream_mask(stream_type) → main_on / sub_on</div>
+    <div class="fdown">▼</div>
+    <div class="fnode mid">nvr_stream_set_record_mask + set_record / set_event_arm</div>
+    <div class="fdown">▼</div>
+    <div class="fnode out">stream_router · writer_main(0) / writer_sub(1) · 音频→主流</div>
+  </div>
+
+  <h2 class="sub"><span class="mk">▸</span>云存事件</h2>
+  <div class="flow">
+    <div class="fnode in">AI 事件 → nvr_rec_trigger_event</div>
+    <div class="fdown">▼ <span class="lab">nvr_cloud_ch_upload_stream(settings, chn, trigger)</span></div>
+    <div class="fnode mid">cloud.switch ∧ enable ∧ stream≠disable ∧ triggers 匹配</div>
+    <div class="fdown">▼</div>
+    <div class="fnode mid">rsdk_cloud_event_begin(PENDING)</div>
+    <div class="fdown">▼</div>
+    <div class="fnode out">uploader · rsdk_group_query_stream(..., stream=0|1) → TS → VSaaS</div>
+  </div>
+
+  <div class="note">NOP：<code>setCloudRecordConfigs</code> 缺省 <code>streamType=sub</code>。本地 <code>stream_type</code> 无独立 SET 命令（仅 DB/出厂 seed）；App 改主/子/双轨需后续补接口或直接写库。</div>
+</section>
+
+<!-- P3 -->
+<section class="panel" data-p="p3">
+  <div class="ph"><span class="pn">03</span><h1>裸盘 RSDK 分区布局</h1></div>
+  <p class="lead">每块 <code>/dev/sdX</code> 格式化后 magic <code>RSDK01</code>。视频帧在 DataRegion；<strong>IndexRegion</strong> 在 RSV 内；<strong>MetaRegion</strong> 占 chunk 池尾部（抓拍 JPEG + 大 JSON）。</p>
+
+  <div class="codeblk"><span class="cm">/* 512B 扇区 · 自 sector 0 起 */</span>
+Sector 0           Protective MBR + 0x55AA
+Sector 1–2         SuperBlock (main + backup)     magic <span class="st">"RSDK01\0\0"</span>
+Sector 3–18        SysTab (main + backup)         magic <span class="st">'STAB'</span>
+                   AllocBitmap (main + backup)    2 bits/chunk
+                   <span class="fn">IndexRegion</span>                    64B × (chunk_count × slots_per_chunk)
+── RSV 结束 ──     data_start_sec
+<span class="fn">DataRegion</span>         chunk[0 .. N-1]                8/16/32 MiB/chunk · 环形覆盖
+                   └─ 尾部 meta_chunk_count 个 chunk = <span class="fn">MetaRegion</span> (默认 0.5%)</div>
+
+  <h2 class="sub"><span class="mk">▸</span>容量示例（chunk=8MiB, slots=4, meta=0.5%）</h2>
+  <table>
+    <thead><tr><th>磁盘</th><th>chunk_count</th><th>RSV+索引</th><th>MetaRegion</th><th>视频数据</th></tr></thead>
+    <tbody>
+      <tr><td>500 GB</td><td>59,600</td><td>~32 MiB</td><td>~2.3 GiB</td><td>~463 GiB</td></tr>
+      <tr><td>2 TB</td><td>238,403</td><td>~120 MiB</td><td>~9.3 GiB</td><td>~1.8 TiB</td></tr>
+      <tr><td>18 TB</td><td>2,145,635</td><td>~1.0 GiB</td><td>~84 GiB</td><td>~16.3 TiB</td></tr>
+    </tbody>
+  </table>
+
+  <h2 class="sub"><span class="mk">▸</span>DataRegion 帧记录</h2>
+  <div class="codeblk"><span class="fn">rsdk_frame_hdr_t</span>  64B  magic <span class="st">"rsdkfrm\0"</span> + 通道/时间/PTS/codec …
+payload             H.264/H.265/AAC 裸流
+对齐                128B (<span class="ty">RSDK_FRAME_ALIGN</span>)</div>
+</section>
+
+<!-- P4 -->
+<section class="panel" data-p="p4">
+  <div class="ph"><span class="pn">04</span><h1>索引区 IndexRegion（模拟示例）</h1></div>
+  <p class="lead">每条录像段占 <strong>64 字节</strong>固定槽（<code>rsdk_index_slot_t</code>）。查询按时间/通道；与 meta.db 的 <code>seg_*</code> 字段对应。</p>
+
+  <table>
+    <thead><tr><th>偏移</th><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>0x00</td><td class="k">seg_id</td><td>u32</td><td>段 ID</td></tr>
+      <tr><td>0x04</td><td class="k">chn</td><td>u16</td><td>通道 0-based</td></tr>
+      <tr><td>0x06</td><td class="k">rectype</td><td>u8</td><td>0=连续 2=human …</td></tr>
+      <tr><td>0x07</td><td class="k">flags</td><td>u8</td><td>bit0 valid · bit1 event · bit2 open</td></tr>
+      <tr><td>0x08</td><td class="k">start_time</td><td>u32</td><td>epoch 秒</td></tr>
+      <tr><td>0x0C</td><td class="k">end_time</td><td>u32</td><td>0xFFFFFFFF=录制中</td></tr>
+      <tr><td>0x10</td><td class="k">frame_count</td><td>u32</td><td></td></tr>
+      <tr><td>0x14</td><td class="k">total_bytes</td><td>u64</td><td></td></tr>
+      <tr><td>0x1C</td><td class="k">start_disk/end_disk</td><td>u16×2</td><td>盘组内索引</td></tr>
+      <tr><td>0x20</td><td class="k">start_chunk/off</td><td>u64+u32</td><td>数据起始</td></tr>
+      <tr><td>0x2C</td><td class="k">end_chunk/off</td><td>u64+u32</td><td>数据结束</td></tr>
+      <tr><td>0x38</td><td class="k">crc32</td><td>u32</td><td></td></tr>
+      <tr><td>0x3C</td><td class="k">stream</td><td>u8</td><td>0=main 1=sub 2=audio</td></tr>
+    </tbody>
+  </table>
+
+  <h2 class="sub"><span class="mk">▸</span>模拟槽位 · 通道 13 人形事件段</h2>
+  <div class="codeblk"><span class="cm">/* 解码后含义 — 非 hex dump */</span>
+seg_id=<span class="fn">10042</span>  chn=<span class="fn">13</span>  rectype=<span class="fn">RSDK_REC_HUMAN(2)</span>  flags=<span class="fn">valid|event</span>
+start_time=<span class="fn">1784486062</span>  end_time=<span class="fn">1784486092</span>  frame_count=<span class="fn">900</span>  total_bytes=<span class="fn">12458032</span>
+start_disk=<span class="fn">0</span>  start_chunk=<span class="fn">12040</span>  start_off=<span class="fn">384</span>
+end_disk=<span class="fn">0</span>  end_chunk=<span class="fn">12040</span>  end_off=<span class="fn">12458416</span>
+stream=<span class="fn">0 (main)</span></div>
+</section>
+
+<!-- P5 -->
+<section class="panel" data-p="p5">
+  <div class="ph"><span class="pn">05</span><h1>MetaRegion — 元数据区 & 图片区</h1></div>
+  <p class="lead">MetaRegion 在裸盘 chunk 池<strong>尾部</strong>，由 SysTab 环形分配。小文档 (&le;4KB) 可 inline 进 meta.db；大 JSON / JPEG 存盘上并写指针。</p>
+
+  <div class="grid2">
+    <div class="card">
+      <div class="lbl">图片区 · rsdk_pic_hdr_t</div>
+      <div class="val">magic "PIC0" · 40B + JPEG</div>
+      <p>type: 0=target 1=main 2=scene 3=cover<br>enc: 0=plain 1=AES-256-CTR<br>绑定 event_id + ts + chn</p>
+    </div>
+    <div class="card">
+      <div class="lbl">元数据 blob · rsdk_mdoc_hdr_t</div>
+      <div class="val">magic "MDOC" · 32B + JSON</div>
+      <p>doc_type 与 meta_doc 一致<br>enc bit0=AES bit1=gzip</p>
+    </div>
+  </div>
+
+  <h2 class="sub"><span class="mk">▸</span>模拟 · 事件抓拍 PIC0（storage=1）</h2>
+  <div class="codeblk"><span class="cm">/* 盘上 MetaRegion */</span>
+PIC0  chn=<span class="fn">13</span>  event_id=<span class="fn">10769</span>  ts=<span class="fn">1784486092</span>
+type=<span class="fn">1 (main)</span>  enc=<span class="fn">0</span>  w=<span class="fn">320</span> h=<span class="fn">240</span>  jpeg_len=<span class="fn">18432</span>
+<span class="cm">/* 后跟 JPEG 字节 … */</span>
+
+<span class="cm">/* meta.db 索引行指向 */</span>
+meta_disk=<span class="fn">0</span>  meta_off=<span class="fn">0x2A1F800</span>  meta_len=<span class="fn">18472</span>
+doc_type=<span class="fn">5 (RSDK_DOC_SNAP)</span>  json=<span class="st">'{"pic":1,"w":320,"h":240}'</span></div>
+
+  <h2 class="sub"><span class="mk">▸</span>模拟 · AI 事件 MDOC（大 JSON → MetaRegion）</h2>
+  <div class="codeblk">MDOC  event_id=<span class="fn">10769</span>  ts=<span class="fn">1784486092</span>  doc_type=<span class="fn">1 (AI_EVENT)</span>
+json_len=<span class="fn">8192</span>  enc=<span class="fn">1 (AES)</span>
+<span class="cm">/* 盘上 JSON 原文（节选） */</span>
+{
+  <span class="st">"ts"</span>: 1784486092, <span class="st">"chn"</span>: 13, <span class="st">"event"</span>: <span class="st">"human"</span>,
+  <span class="st">"objects"</span>: [{ <span class="st">"id"</span>: 7, <span class="st">"cls"</span>: <span class="st">"person"</span>, <span class="st">"conf"</span>: 0.92,
+    <span class="st">"bbox"</span>: [0.12,0.08,0.26,0.64], <span class="st">"color"</span>: <span class="st">"red"</span> }],
+  <span class="st">"seg"</span>: { <span class="st">"chunk"</span>: 12040, <span class="st">"off"</span>: 384, <span class="st">"pts"</span>: 90000 }
+}</div>
+
+  <div class="note">混合策略（rsdk_features.conf）：JSON &le; 4KB → meta.db inline（storage=0）；更大 → MetaRegion（storage=1）。</div>
+</section>
+
+<!-- P6 -->
+<section class="panel" data-p="p6">
+  <div class="ph"><span class="pn">06</span><h1>meta.db — 元数据索引库</h1></div>
+  <p class="lead">路径：<code>/flash/nvrcfg/meta.db</code>。出厂<strong>无行</strong>；事件/录像/AI/抓拍运行时写入。仅 1 张业务表 <code>meta_doc</code>。</p>
+
+  <table>
+    <thead><tr><th>列</th><th>类型</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td class="k">id</td><td>INTEGER PK</td><td>自增</td></tr>
+      <tr><td class="k">ts, ts_ms</td><td>INTEGER</td><td>主检索键（epoch）</td></tr>
+      <tr><td class="k">chn</td><td>INTEGER</td><td>通道</td></tr>
+      <tr><td class="k">event_id</td><td>INTEGER</td><td>与录像/抓拍同一事件</td></tr>
+      <tr><td class="k">doc_type</td><td>INTEGER</td><td>1=AI_EVENT 2=AI_FRAME 3=LPR 4=FACE <strong>5=SNAP</strong> 6=ALARM …</td></tr>
+      <tr><td class="k">seg_disk/chunk/off/pts</td><td>INTEGER</td><td>视频 seek 绑定</td></tr>
+      <tr><td class="k">storage</td><td>INTEGER</td><td>0=inline json · 1=MetaRegion 指针</td></tr>
+      <tr><td class="k">enc</td><td>INTEGER</td><td>0=明文 · bit0 AES · bit1 gzip</td></tr>
+      <tr><td class="k">json_len, json</td><td>INT,TEXT</td><td>storage=0 时完整 JSON</td></tr>
+      <tr><td class="k">meta_disk/off/len</td><td>INTEGER</td><td>storage=1 时盘上 MDOC/PIC0</td></tr>
+    </tbody>
+  </table>
+
+  <h2 class="sub"><span class="mk">▸</span>模拟运行时行 · AI 事件（inline）</h2>
+  <div class="codeblk"><span class="kw">INSERT INTO</span> meta_doc
+  (ts, ts_ms, chn, event_id, doc_type, seg_disk, seg_chunk, seg_off, seg_pts, storage, enc, json_len, json)
+<span class="kw">VALUES</span> (
+  <span class="fn">1784486092</span>, <span class="fn">320</span>, <span class="fn">13</span>, <span class="fn">10769</span>, <span class="fn">1</span>,
+  <span class="fn">0</span>, <span class="fn">12040</span>, <span class="fn">384</span>, <span class="fn">90000</span>,
+  <span class="fn">0</span>, <span class="fn">0</span>, <span class="fn">199</span>,
+  <span class="st">'{"ts":1784486092,"chn":13,"event":"human","objects":[{"id":7,"cls":"person","conf":0.92,"bbox":[0.12,0.08,0.26,0.64],"color":"red"}],"seg":{"chunk":12040,"off":384,"pts":90000}}'</span>
+);</div>
+</section>
+
+<!-- P7 -->
+<section class="panel" data-p="p7">
+  <div class="ph"><span class="pn">07</span><h1>种子 JSON — /dvr/config</h1></div>
+  <p class="lead">仓库 <code>config/</code> = 设备 <code>/dvr/config/</code>（rootfs 镜像）。<code>nvr_config_load</code> 当前解析 4 个；其余存在但未接入 loader。</p>
+
+  <table>
+    <thead><tr><th>文件</th><th>Loader</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td class="k">system.json</td><td><span class="tg on">✅</span></td><td>型号/容量/HDMI/时区/网络</td></tr>
+      <tr><td class="k">channels.json</td><td><span class="tg on">✅</span></td><td>PoE 口展开 → 通道（非 persist）</td></tr>
+      <tr><td class="k">storage.json</td><td><span class="tg on">✅</span></td><td>裸盘/加密/满盘策略</td></tr>
+      <tr><td class="k">streaming.json</td><td><span class="tg on">✅</span></td><td>拉流/重连/硬解</td></tr>
+      <tr><td class="k">nop.json</td><td><span class="tg">未接</span></td><td>NOP 8089/鉴权</td></tr>
+      <tr><td class="k">onvif.json</td><td><span class="tg">未接</span></td><td>发现/客户端</td></tr>
+      <tr><td class="k">cloud_tutk.json</td><td><span class="tg">未接</span></td><td>TUTK（部分 KV 首启 seed）</td></tr>
+      <tr><td class="k">recorder.json</td><td><span class="tg">未接</span></td><td>录像计划模板</td></tr>
+    </tbody>
+  </table>
+
+  <div class="tabs" data-tabs="cfg">
+    <button class="tab on" data-tab="system">system.json</button>
+    <button class="tab" data-tab="channels">channels.json</button>
+    <button class="tab" data-tab="storage">storage.json</button>
+    <button class="tab" data-tab="streaming">streaming.json</button>
+    <button class="tab" data-tab="tutk">cloud_tutk.json</button>
+  </div>
+  <div class="tabpane on" data-tabpane="system" data-group="cfg">
+    <div class="codeblk">{
+  <span class="st">"device"</span>: { <span class="st">"model"</span>: <span class="st">"NT12-32"</span>, <span class="st">"name"</span>: <span class="st">"NVR-01"</span> },
+  <span class="st">"channels"</span>: { <span class="st">"capacity"</span>: 32, <span class="st">"poe_ports"</span>: 16, <span class="st">"ip_channels"</span>: 16 },
+  <span class="st">"video_out"</span>: { <span class="st">"hdmi"</span>: { <span class="st">"resolution"</span>: <span class="st">"1920x1080"</span> }, <span class="st">"default_layout"</span>: 16 },
+  <span class="st">"time"</span>: { <span class="st">"timezone"</span>: <span class="st">"America/New_York"</span>, <span class="st">"ntp"</span>: <span class="st">"pool.ntp.org"</span> },
+  <span class="st">"network"</span>: {
+    <span class="st">"eth0"</span>: { <span class="st">"dhcp"</span>: true, <span class="st">"ip"</span>: <span class="st">"192.168.9.114"</span>, <span class="st">"mask"</span>: <span class="st">"255.255.255.0"</span>, <span class="st">"gw"</span>: <span class="st">"192.168.9.1"</span> },
+    <span class="st">"eth1"</span>: { <span class="st">"vlan_base"</span>: 2001 }
+  },
+  <span class="st">"cloud"</span>: { <span class="st">"switch"</span>: false },
+  <span class="st">"cloudServer"</span>: { <span class="st">"current"</span>: <span class="st">"tutk"</span>, <span class="st">"available"</span>: [<span class="st">"tutk"</span>] }
+}</div>
+    <div class="note"><code>cloud.switch</code> → KV（云存总开关）；<code>cloudServer.current</code>/<code>cloudServer.available</code> → <code>getCurrentClouds</code>；运行期 SET 云存开关仍写 SQLite。</div>
+  </div>
+  <div class="tabpane" data-tabpane="channels" data-group="cfg">
+    <div class="codeblk">{
+  <span class="st">"capacity"</span>: { <span class="st">"total_channels"</span>: 32, <span class="st">"poe_ports"</span>: 16, <span class="st">"ip_channels"</span>: 16 },
+  <span class="st">"defaults"</span>: {
+    <span class="st">"poe_ip_pattern"</span>: <span class="st">"198.18.%d.1"</span>, <span class="st">"record_stream"</span>: <span class="st">"main"</span>, <span class="st">"preview_stream"</span>: <span class="st">"sub"</span>
+  },
+  <span class="st">"devices"</span>: [{
+    <span class="st">"id"</span>: <span class="st">"poe-ports"</span>, <span class="st">"type"</span>: <span class="st">"poe"</span>, <span class="st">"enable"</span>: true,
+    <span class="st">"expand_ports"</span>: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16],
+    <span class="st">"onvif"</span>: { <span class="st">"auto"</span>: true }
+  }]
+}</div>
+    <div class="note">种子 <code>channels.json</code> 里 <code>record_stream:main</code> 仅为 JSON 镜像；**运行期录像码流以 SQLite <code>record_config.stream_type</code> 为准**（出厂 <code>both</code>）。</div>
+  </div>
+  <div class="tabpane" data-tabpane="storage" data-group="cfg">
+    <div class="codeblk">{
+  <span class="st">"mode"</span>: <span class="st">"rawdisk"</span>,
+  <span class="st">"encryption"</span>: { <span class="st">"enable"</span>: true, <span class="st">"cipher"</span>: <span class="st">"aes-256-ctr"</span> },
+  <span class="st">"hdd_full"</span>: <span class="st">"overwrite"</span>,
+  <span class="st">"metadata"</span>: { <span class="st">"enable"</span>: true, <span class="st">"ratio_pct"</span>: 0.5 },
+  <span class="st">"layout"</span>: { <span class="st">"chunk_mib"</span>: <span class="st">"auto"</span>, <span class="st">"slots_per_chunk"</span>: 4 }
+}</div>
+  </div>
+  <div class="tabpane" data-tabpane="streaming" data-group="cfg">
+    <div class="codeblk">{
+  <span class="st">"transport"</span>: { <span class="st">"over_tcp"</span>: true, <span class="st">"conn_timeout_s"</span>: 5 },
+  <span class="st">"reconnect"</span>: { <span class="st">"interval_s"</span>: 5, <span class="st">"max_backoff_s"</span>: 30 },
+  <span class="st">"decode"</span>: { <span class="st">"backend"</span>: <span class="st">"hardware"</span> },
+  <span class="st">"preview"</span>: { <span class="st">"single_view_stream"</span>: <span class="st">"main"</span>, <span class="st">"multi_view_stream"</span>: <span class="st">"sub"</span> }
+}</div>
+  </div>
+  <div class="tabpane" data-tabpane="tutk" data-group="cfg">
+    <div class="codeblk">{
+  <span class="st">"license_key"</span>: <span class="st">"000000"</span>, <span class="st">"max_sessions"</span>: 8,
+  <span class="st">"tunnel_ports"</span>: { <span class="st">"nop"</span>: 8089, <span class="st">"rtsp_live"</span>: 8554 }
+  <span class="cm">/* uid/auth_key 不 seed → /User */</span>
+}</div>
+  </div>
+
+  <div class="note">首启 <code>seed_from_json(config_dir)</code> 把 system/storage/tutk 部分字段写入 <code>nvr_settings.db</code>，并标记 <code>meta_kv.seeded=1</code>。</div>
+</section>
+
+<!-- P8 -->
+<section class="panel" data-p="p8">
+  <div class="ph"><span class="pn">08</span><h1>运行期 JSON & 身份文件</h1></div>
+  <p class="lead">与种子分离：写在 <code>/flash/nvrcfg</code>、<code>/mnt/custom</code>、<code>/User</code>，重启/OTA 保留（除出厂复位）。</p>
+
+  <table>
+    <thead><tr><th>路径</th><th>类型</th><th>内容 / 默认</th></tr></thead>
+    <tbody>
+      <tr><td class="kc">/flash/nvrcfg/channels.json</td><td><span class="tg rt">运行期</span></td><td>channelMapping · channelCaps · channelStatus · channelNames · channelResolution</td></tr>
+      <tr><td class="kc">/flash/nvrcfg/channels.json.bak</td><td>备份</td><td>原子写前一份</td></tr>
+      <tr><td class="kc">/mnt/custom/GUI_CONFIG.json</td><td><span class="tg rt">运行期</span></td><td>displayMode · displayPage · channels=[PoE,LAN] · allDisplayModes</td></tr>
+      <tr><td class="kc">/mnt/custom/gui_cfg.ini</td><td>LVGL</td><td>界面布局；出厂复位删除</td></tr>
+      <tr><td class="kc">/mnt/custom/_http_debug.json</td><td>调试</td><td>httpClientConnectTo / httpServerListen</td></tr>
+      <tr><td class="kc">/dvr/config/defaults/GUI_CONFIG.json</td><td>出厂模板</td><td>恢复出厂覆盖用</td></tr>
+      <tr><td class="kc">/User/OWLSerialNumber</td><td>身份</td><td>SN（只读）</td></tr>
+      <tr><td class="kc">/User/mac_addr_v2</td><td>身份</td><td>eth0 MAC</td></tr>
+      <tr><td class="kc">/User/tutk_agent_udid</td><td>身份</td><td>TUTK UID</td></tr>
+      <tr><td class="kc">/User/OWL/tutkdata.json</td><td>身份</td><td>IotcAuthKey · AvPassword</td></tr>
+      <tr><td class="kc">/User/OWLModel</td><td>身份</td><td>默认 NOP12-32</td></tr>
+    </tbody>
+  </table>
+
+  <h2 class="sub"><span class="mk">▸</span>/flash/nvrcfg/channels.json（默认结构）</h2>
+  <div class="codeblk">{
+  <span class="st">"channelMapping"</span>: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,…,32],
+  <span class="st">"channelCaps"</span>: [],
+  <span class="st">"channelStatus"</span>: [{ <span class="st">"channel"</span>: 1, <span class="st">"status"</span>: 1 }],
+  <span class="st">"channelNames"</span>: [{ <span class="st">"channel"</span>: 1, <span class="st">"name"</span>: <span class="st">"Front Door"</span> }],
+  <span class="st">"channelResolution"</span>: [{ <span class="st">"channel"</span>: 1, <span class="st">"main"</span>: <span class="st">"3840x2160"</span>, <span class="st">"sub"</span>: <span class="st">"640x360"</span> }]
+}</div>
+
+  <h2 class="sub"><span class="mk">▸</span>GUI_CONFIG.json（典型）</h2>
+  <div class="codeblk">{
+  <span class="st">"channels"</span>: [16, 16],
+  <span class="st">"allDisplayModes"</span>: [1, 4, 8, 9, 16, 25, 36],
+  <span class="st">"allPlaybackDisplayModes"</span>: [1, 4, 9, 16, 25, 36],
+  <span class="st">"displayMode"</span>: 9,
+  <span class="st">"displayPage"</span>: 1
+}
+<span class="cm">/* 路径: $NVR_GUI_CONFIG → /mnt/custom/GUI_CONFIG.json → config_dir/GUI_CONFIG.json */</span></div>
+</section>
+
+<!-- P9 -->
+<section class="panel" data-p="p9">
+  <div class="ph"><span class="pn">09</span><h1>路径树 & 启动流</h1></div>
+  <p class="lead"><code>config_dir</code> 设备上为 <code>/dvr/config</code>；持久数据 <code>data_dir=/flash/nvrcfg</code>。</p>
+
+  <div class="tree"><span class="d">/</span>
+├── <span class="d">dvr/</span>
+│   ├── <span class="d">config/</span>              <span class="c">← 种子 JSON（只读镜像）</span>
+│   │   ├── <span class="f">system.json</span> <span class="f">channels.json</span> <span class="f">storage.json</span> <span class="f">streaming.json</span>
+│   │   ├── <span class="f">nop.json</span> <span class="f">onvif.json</span> <span class="f">cloud_tutk.json</span> <span class="f">recorder.json</span>
+│   │   └── <span class="d">defaults/</span><span class="f">GUI_CONFIG.json</span>
+│   ├── <span class="d">bin/</span> <span class="f">nvr_app</span> <span class="f">nvr_do_update.sh</span>
+│   └── <span class="d">tutk_cloud_agent/</span> <span class="f">device.sh</span> <span class="f">nvr_tutk_cgi</span>
+├── <span class="d">flash/</span>
+│   ├── <span class="d">nvrcfg/</span>              <span class="c">← 持久分区 data_dir</span>
+│   │   ├── <span class="s">nvr_settings.db</span>      <span class="c">16 表 SQLite</span>
+│   │   ├── <span class="s">meta.db</span>              <span class="c">meta_doc 索引</span>
+│   │   ├── <span class="v">channels.json</span>        <span class="c">运行期映射（≠种子 channels.json）</span>
+│   │   └── <span class="v">channels.json.bak</span>
+│   └── <span class="f">nvr_localtime</span>          <span class="c">/etc/localtime → 此处</span>
+├── <span class="d">mnt/</span>
+│   ├── <span class="d">custom/</span> <span class="v">GUI_CONFIG.json</span> <span class="v">gui_cfg.ini</span> <span class="f">_http_debug.json</span>
+│   ├── <span class="d">usb/</span> <span class="d">usb2/</span> <span class="d">sdcard/</span>     <span class="c">导出/备份挂载</span>
+├── <span class="d">User/</span>                    <span class="c">身份（OTA 不覆盖）</span>
+│   ├── <span class="g">OWLSerialNumber</span> <span class="g">mac_addr_v2</span> <span class="g">tutk_agent_udid</span> <span class="g">OWLModel</span>
+│   └── <span class="d">OWL/</span> <span class="g">tutkdata.json</span>
+├── <span class="f">dev/sda</span> … <span class="f">sdX</span>            <span class="c">RSDK 裸盘（Index+Data+Meta）</span>
+└── <span class="d">SYS/</span> <span class="f">dhcp_eth0.ip</span> <span class="f">nvr_dns.conf</span></div>
+
+  <h2 class="sub"><span class="mk">▸</span>nvr_app 启动顺序</h2>
+  <div class="flow">
+    <div class="fnode in">nvr_config_load(<span class="fn">/dvr/config</span>)</div>
+    <div class="fdown">▼ <span class="lab">system · channels · storage · streaming</span></div>
+    <div class="fnode mid">nvr_settings_open(<span class="fn">/flash/nvrcfg/nvr_settings.db</span>)</div>
+    <div class="fdown">▼ <span class="lab">seed_chn_defaults + 首启 seed_from_json</span></div>
+    <div class="fnode mid">nvr_identity_* ← <span class="fn">/User</span></div>
+    <div class="fdown">▼</div>
+    <div class="fnode mid">nvr_storage_init → scan <span class="fn">/dev/sd*</span></div>
+    <div class="fdown">▼</div>
+    <div class="fnode mid">rsdk_meta_open(<span class="fn">/flash/nvrcfg/meta.db</span>)</div>
+    <div class="fdown">▼</div>
+    <div class="fnode mid">nvr_chan_persist_open → <span class="fn">channels.json</span></div>
+    <div class="fdown">▼</div>
+    <div class="fnode out">nvr_gui_config_init → <span class="fn">GUI_CONFIG.json</span> → set_mode 出图</div>
+  </div>
+
+  <h2 class="sub"><span class="mk">▸</span>主循环 · 录像排程（节选）</h2>
+  <div class="flow">
+    <div class="fnode in">每 1s tick · 每 5s <code>rec_schedule_apply</code></div>
+    <div class="fdown">▼</div>
+    <div class="fnode mid">读 record_config.stream_type → set_record_mask</div>
+    <div class="fdown">▼</div>
+    <div class="fnode out">连续 record_on∧排程 → set_record · 否则 event_arm+pre_s</div>
+  </div>
+
+  <table>
+    <thead><tr><th>服务</th><th>端口/地址</th></tr></thead>
+    <tbody>
+      <tr><td>NOP / GUI HTTP</td><td>127.0.0.1:8089 · eth0</td></tr>
+      <tr><td>TUTK agent CGI</td><td>127.0.0.1:6061</td></tr>
+      <tr><td>Live / Playback RTSP</td><td>:8554</td></tr>
+      <tr><td>对讲</td><td>127.0.0.1:7000</td></tr>
+      <tr><td>LAN 发现</td><td>UDP :34569</td></tr>
+    </tbody>
+  </table>
+
+  <div class="foot">NVR_DATA_MAP.html · NT12-32 · 2026-08-20 · schema v9 · 对照 nvr_settings.c / nvr_record_policy.c / DB_SEED_DEFAULTS.md</div>
+</section>
+
+</main>
+<script>
+const nav=document.getElementById('nav'),panels=document.querySelectorAll('.panel'),
+      items=document.querySelectorAll('.nav-item'),main=document.getElementById('main');
+nav.addEventListener('click',e=>{const b=e.target.closest('.nav-item');if(!b)return;
+  items.forEach(i=>i.classList.toggle('active',i===b));
+  panels.forEach(p=>p.classList.toggle('show',p.dataset.p===b.dataset.t));
+  main.scrollTo({top:0,behavior:'auto'});});
+
+document.querySelectorAll('[data-filter]').forEach(inp=>{
+  inp.addEventListener('input',()=>{
+    const q=inp.value.toLowerCase(),sel=inp.dataset.filter;
+    document.querySelectorAll(sel+' tbody tr').forEach(tr=>{
+      tr.classList.toggle('hidden',q&&!tr.textContent.toLowerCase().includes(q));
+    });
+  });
+});
+
+document.querySelectorAll('[data-tabs]').forEach(bar=>{
+  const group=bar.dataset.tabs;
+  bar.querySelectorAll('.tab').forEach(tab=>{
+    tab.addEventListener('click',()=>{
+      bar.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t===tab));
+      document.querySelectorAll('[data-group="'+group+'"]').forEach(p=>{
+        p.classList.toggle('on',p.dataset.tabpane===tab.dataset.tab);
+      });
+    });
+  });
+});
+</script>
+</body>
+</html>

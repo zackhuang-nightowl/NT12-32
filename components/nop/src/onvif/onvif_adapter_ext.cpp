@@ -1206,6 +1206,13 @@ int nop_onvif_analytics_get_rules(nop_onvif_device_t *device, const char *config
                 r->enabled = parse_bool_str(val);
             else if (!strcmp(nm, "ClassFilter") && !r->class_filter[0])
                 parse_stringlist(val, r->class_filter, sizeof(r->class_filter));
+            else if (!strcmp(nm, "ConfidenceLevel")) {
+                r->confidence_level = (float)atof(val);
+                r->has_confidence = 1;
+            } else if (!strcmp(nm, "DwellTime")) {
+                strncpy(r->dwell_time, val, sizeof(r->dwell_time) - 1);
+                r->has_dwell_time = 1;
+            }
         }
         for (ElementItemList *ei = c->Parameters.ElementItem; ei; ei = ei->next) {
             const char *nm = ei->ElementItem.Name;
@@ -1241,6 +1248,15 @@ static ConfigList *build_rule_config(const nop_onvif_rule_t *r)
         char spaces[128];
         csv_to_spaces(r->class_filter, spaces, sizeof(spaces));
         add_simple(&c->Parameters, "ClassFilter", spaces);
+    }
+    if (strstr(r->type, "ObjectDetection")) {
+        char conf[24];
+        if (r->has_confidence) {
+            snprintf(conf, sizeof(conf), "%.4f", r->confidence_level);
+            add_simple(&c->Parameters, "ConfidenceLevel", conf);
+        }
+        if (r->has_dwell_time && r->dwell_time[0])
+            add_simple(&c->Parameters, "DwellTime", r->dwell_time);
     }
     if (r->point_count > 0) {
         ElementItemList *ei = onvif_add_ElementItem(&c->Parameters.ElementItem);
@@ -1369,14 +1385,13 @@ int nop_onvif_analytics_set_cellmotion(nop_onvif_device_t *device, const char *c
         return -1;
 
     char b64[NOP_ONVIF_CELLS_MAX_BITS / 8 * 2 + 8];
-    char sens[16], mincnt[16];
+    char mincnt[16];
     uint8 packed[NOP_ONVIF_CELLS_MAX_BITS / 8 + 64];
     int   plen = nop_coord_packbits_encode((const unsigned char *)in->active, nbytes,
                                            packed, (int)sizeof(packed));
     if (plen <= 0)
         return -1;
     base64_encode(packed, (uint32)plen, b64, (uint32)sizeof(b64));
-    snprintf(sens, sizeof(sens), "%d", in->sensitivity);
     snprintf(mincnt, sizeof(mincnt), "%d", in->min_count);
 
     tan_GetRules_REQ greq;
@@ -1404,7 +1419,7 @@ int nop_onvif_analytics_set_cellmotion(nop_onvif_device_t *device, const char *c
     onvif_Config *c = &node->Config;
 
     if (src) {
-        int have_active = 0, have_min = 0, have_sens = 0;
+        int have_active = 0, have_min = 0;
         strncpy(c->Name, src->Name, sizeof(c->Name) - 1);
         strncpy(c->Type, src->Type, sizeof(c->Type) - 1);
         for (SimpleItemList *si = src->Parameters.SimpleItem; si; si = si->next) {
@@ -1412,17 +1427,14 @@ int nop_onvif_analytics_set_cellmotion(nop_onvif_device_t *device, const char *c
             const char *val = si->SimpleItem.Value;
             if (!strcmp(nm, "ActiveCells")) {
                 val = b64; have_active = 1;
-            } else if (!strcmp(nm, "MinCount")) {
+            } else if (!strcmp(nm, "MinCount") && in->min_count > 0) {
                 val = mincnt; have_min = 1;
-            } else if (!strcmp(nm, "Sensitivity") && in->sensitivity > 0) {
-                val = sens; have_sens = 1;
             }
             add_simple(&c->Parameters, nm, val);
         }
         if (!have_active) add_simple(&c->Parameters, "ActiveCells", b64);
-        if (!have_min)    add_simple(&c->Parameters, "MinCount", mincnt);
-        if (!have_sens && in->sensitivity > 0)
-            add_simple(&c->Parameters, "Sensitivity", sens);
+        if (!have_min && in->min_count > 0)
+            add_simple(&c->Parameters, "MinCount", mincnt);
 
         tan_ModifyRules_REQ mreq;
         tan_ModifyRules_RES mres;
@@ -1438,11 +1450,10 @@ int nop_onvif_analytics_set_cellmotion(nop_onvif_device_t *device, const char *c
 
     strncpy(c->Name, "CellMotion", sizeof(c->Name) - 1);
     strncpy(c->Type, "tt:CellMotionDetector", sizeof(c->Type) - 1);
-    add_simple(&c->Parameters, "MinCount", mincnt);
     add_simple(&c->Parameters, "ActiveCells", b64);
     add_simple(&c->Parameters, "Enabled", "true");
-    if (in->sensitivity > 0)
-        add_simple(&c->Parameters, "Sensitivity", sens);
+    if (in->min_count > 0)
+        add_simple(&c->Parameters, "MinCount", mincnt);
 
     tan_CreateRules_REQ creq;
     tan_CreateRules_RES cres;
@@ -1453,6 +1464,125 @@ int nop_onvif_analytics_set_cellmotion(nop_onvif_device_t *device, const char *c
     int ok = onvif_tan_CreateRules(&device->dev, &creq, &cres) ? 0 : -2;
     onvif_free_Configs(&creq.Rule);
     onvif_free_Configs(&gres.Rule);
+    return ok;
+}
+
+static void copy_element_items(ElementItemList *src, onvif_ItemList *dst)
+{
+    for (ElementItemList *ei = src; ei; ei = ei->next) {
+        ElementItemList *n = onvif_add_ElementItem(&dst->ElementItem);
+        if (!n)
+            continue;
+        strncpy(n->ElementItem.Name, ei->ElementItem.Name,
+                sizeof(n->ElementItem.Name) - 1);
+        n->ElementItem.AnyFlag = ei->ElementItem.AnyFlag;
+        if (ei->ElementItem.AnyFlag && ei->ElementItem.Any) {
+            n->ElementItem.Any = strdup(ei->ElementItem.Any);
+            n->ElementItem.AnyFlag = n->ElementItem.Any ? 1 : 0;
+        }
+    }
+}
+
+int nop_onvif_analytics_get_cellmotion_engine_sensitivity(nop_onvif_device_t *device,
+                                                          const char *config_token,
+                                                          int *out_sensitivity)
+{
+    if (!device || !config_token || !out_sensitivity)
+        return -1;
+    *out_sensitivity = 0;
+
+    tan_GetAnalyticsModules_REQ req;
+    tan_GetAnalyticsModules_RES res;
+    memset(&req, 0, sizeof(req));
+    memset(&res, 0, sizeof(res));
+    strncpy(req.ConfigurationToken, config_token, sizeof(req.ConfigurationToken) - 1);
+    if (!onvif_tan_GetAnalyticsModules(&device->dev, &req, &res))
+        return -2;
+
+    int found = 0;
+    for (ConfigList *l = res.AnalyticsModule; l; l = l->next) {
+        if (!strstr(l->Config.Type, "CellMotionEngine"))
+            continue;
+        for (SimpleItemList *si = l->Config.Parameters.SimpleItem; si; si = si->next) {
+            if (!strcmp(si->SimpleItem.Name, "Sensitivity")) {
+                *out_sensitivity = atoi(si->SimpleItem.Value);
+                found = 1;
+                break;
+            }
+        }
+        break;
+    }
+    onvif_free_Configs(&res.AnalyticsModule);
+    return found ? 0 : -3;
+}
+
+int nop_onvif_analytics_set_cellmotion_engine_sensitivity(nop_onvif_device_t *device,
+                                                          const char *config_token,
+                                                          int sensitivity)
+{
+    if (!device || !config_token || sensitivity <= 0)
+        return -1;
+
+    tan_GetAnalyticsModules_REQ req;
+    tan_GetAnalyticsModules_RES res;
+    memset(&req, 0, sizeof(req));
+    memset(&res, 0, sizeof(res));
+    strncpy(req.ConfigurationToken, config_token, sizeof(req.ConfigurationToken) - 1);
+    if (!onvif_tan_GetAnalyticsModules(&device->dev, &req, &res))
+        return -2;
+
+    const onvif_Config *src = NULL;
+    for (ConfigList *l = res.AnalyticsModule; l; l = l->next) {
+        if (strstr(l->Config.Type, "CellMotionEngine")) {
+            src = &l->Config;
+            break;
+        }
+    }
+    if (!src) {
+        onvif_free_Configs(&res.AnalyticsModule);
+        return -3;
+    }
+
+    char sens[16];
+    snprintf(sens, sizeof(sens), "%d", sensitivity);
+
+    ConfigList *list = NULL;
+    ConfigList *node = onvif_add_Config(&list);
+    if (!node) {
+        onvif_free_Configs(&res.AnalyticsModule);
+        return -4;
+    }
+    onvif_Config *c = &node->Config;
+    strncpy(c->Name, src->Name, sizeof(c->Name) - 1);
+    strncpy(c->Type, src->Type, sizeof(c->Type) - 1);
+    if (src->attrFlag) {
+        c->attrFlag = src->attrFlag;
+        strncpy(c->attr, src->attr, sizeof(c->attr) - 1);
+    }
+
+    int have_sens = 0;
+    for (SimpleItemList *si = src->Parameters.SimpleItem; si; si = si->next) {
+        const char *nm  = si->SimpleItem.Name;
+        const char *val = si->SimpleItem.Value;
+        if (!strcmp(nm, "Sensitivity")) {
+            val = sens;
+            have_sens = 1;
+        }
+        add_simple(&c->Parameters, nm, val);
+    }
+    if (!have_sens)
+        add_simple(&c->Parameters, "Sensitivity", sens);
+    copy_element_items(src->Parameters.ElementItem, &c->Parameters);
+
+    tan_ModifyAnalyticsModules_REQ mreq;
+    tan_ModifyAnalyticsModules_RES mres;
+    memset(&mreq, 0, sizeof(mreq));
+    memset(&mres, 0, sizeof(mres));
+    strncpy(mreq.ConfigurationToken, config_token, sizeof(mreq.ConfigurationToken) - 1);
+    mreq.AnalyticsModule = list;
+    int ok = onvif_tan_ModifyAnalyticsModules(&device->dev, &mreq, &mres) ? 0 : -2;
+    onvif_free_Configs(&mreq.AnalyticsModule);
+    onvif_free_Configs(&res.AnalyticsModule);
     return ok;
 }
 

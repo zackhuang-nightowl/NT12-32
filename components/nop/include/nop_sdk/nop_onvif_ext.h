@@ -258,6 +258,10 @@ typedef struct nop_onvif_rule {
     char  direction[16];     /**< line direction ("Left"/"Right"/"Any")    */
     char  class_filter[128]; /**< comma-joined trigger classes             */
     int   enabled;           /**< 1=on；GetRules 无 Enabled 栏位时默认 1     */
+    float confidence_level;  /**< ObjectDetection ConfidenceLevel 0.0~1.0   */
+    int   has_confidence;    /**< 1=confidence_level 来自 GetRules/待写入   */
+    char  dwell_time[32];    /**< ObjectDetection DwellTime (e.g. PT0S)     */
+    int   has_dwell_time;    /**< 1=dwell_time 有效                          */
     int   point_count;
     float x[NOP_ONVIF_RULE_MAX_PTS]; /**< ONVIF 归一化 [-1,1]              */
     float y[NOP_ONVIF_RULE_MAX_PTS];
@@ -437,12 +441,23 @@ int nop_onvif_analytics_get_cellmotion(nop_onvif_device_t *device, const char *c
                                        nop_onvif_cellmotion_t *io);
 
 /**
- * Write ActiveCells / MinCount onto the existing CellMotionDetector via
- * ModifyRules (keep Name and other SimpleItems). CreateRules only if none
- * exists. Never DeleteRules.
+ * Write ActiveCells onto the existing CellMotionDetector via ModifyRules
+ * (keep Name / MinCount / other SimpleItems). CreateRules only if none exists.
+ * Never DeleteRules. Sensitivity is on tt:CellMotionEngine — use the engine
+ * helpers below, not this call.
  */
 int nop_onvif_analytics_set_cellmotion(nop_onvif_device_t *device, const char *config_token,
                                        const nop_onvif_cellmotion_t *in);
+
+/** GetAnalyticsModules tt:CellMotionEngine Sensitivity (0~100). 0=ok, -3=none. */
+int nop_onvif_analytics_get_cellmotion_engine_sensitivity(nop_onvif_device_t *device,
+                                                          const char *config_token,
+                                                          int *out_sensitivity);
+
+/** ModifyAnalyticsModules tt:CellMotionEngine Sensitivity; other module params preserved. */
+int nop_onvif_analytics_set_cellmotion_engine_sensitivity(nop_onvif_device_t *device,
+                                                          const char *config_token,
+                                                          int sensitivity);
 
 /* ======================================================================== */
 /* §1 Events — structured PullMessages                                      */

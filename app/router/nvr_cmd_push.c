@@ -4,7 +4,6 @@
 #include "nvr_cmd_internal.h"
 #include "nvr_cmd_util.h"
 #include "nvr_defaults.h"
-#include "nvr_urls.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -52,12 +51,10 @@ static int is_push_trigger(const char *s)
     return 0;
 }
 
-static void load_or_def(const nvr_cmd_ctx_t *c, int chn0, nvr_push_cfg_t *p)
+static int push_load(const nvr_cmd_ctx_t *c, int chn0, nvr_push_cfg_t *p)
 {
-    memset(p, 0, sizeof(*p));
-    p->chn = chn0;
-    if (c && c->settings)
-        (void)nvr_settings_push_get(c->settings, chn0, p);
+    if (!c || !c->settings) return -1;
+    return nvr_settings_push_get(c->settings, chn0, p);
 }
 
 static cJSON *triggers_arr(const char *csv)
@@ -89,7 +86,8 @@ char *cmd_X_NightOwl_getChannelPushNotificationSwitch(cJSON *a, const nvr_cmd_ct
 {
     int chn0 = chn0_of(a);
     if (!valid_ch(c, chn0)) return nvr_resp_err("invalid_param");
-    nvr_push_cfg_t p; load_or_def(c, chn0, &p);
+    nvr_push_cfg_t p;
+    if (push_load(c, chn0, &p) != 0) return nvr_resp_err("no_config");
     cJSON *o = cJSON_CreateObject();
     cJSON_AddBoolToObject(o, "value", p.switch_on);
     return nvr_resp_content(o);
@@ -100,7 +98,8 @@ char *cmd_X_NightOwl_setChannelPushNotificationSwitch(cJSON *a, const nvr_cmd_ct
     int chn0 = chn0_of(a);
     if (!valid_ch(c, chn0) || !nvr_jhas(a, "value") || !c || !c->settings)
         return nvr_resp_err("invalid_param");
-    nvr_push_cfg_t p; load_or_def(c, chn0, &p);
+    nvr_push_cfg_t p;
+    if (push_load(c, chn0, &p) != 0) return nvr_resp_err("no_config");
     p.chn = chn0;
     p.switch_on = nvr_jbool(a, "value", 0);
     if (nvr_settings_push_set(c->settings, &p) != 0) return nvr_resp_err("persist_failed");
@@ -114,7 +113,8 @@ char *cmd_X_NightOwl_getChannelsPushNotificationSwitch(cJSON *a, const nvr_cmd_c
     cJSON *o = cJSON_CreateObject();
     cJSON *chs = cJSON_AddArrayToObject(o, "channels");
     for (int i = 0; i < cap; i++) {
-        nvr_push_cfg_t p; load_or_def(c, i, &p);
+        nvr_push_cfg_t p;
+        if (push_load(c, i, &p) != 0) return nvr_resp_err("no_config");
         cJSON *e = cJSON_CreateObject();
         cJSON_AddNumberToObject(e, "channel", i + 1);
         cJSON_AddBoolToObject(e, "value", p.switch_on);
@@ -132,7 +132,8 @@ char *cmd_X_NightOwl_setChannelsPushNotificationSwitch(cJSON *a, const nvr_cmd_c
         int chn0 = nvr_jint(it, "channel", 0) - 1;
         if (!valid_ch(c, chn0) || !nvr_jhas(it, "value"))
             return nvr_resp_err("invalid_param");
-        nvr_push_cfg_t p; load_or_def(c, chn0, &p);
+        nvr_push_cfg_t p;
+        if (push_load(c, chn0, &p) != 0) return nvr_resp_err("no_config");
         p.chn = chn0;
         p.switch_on = nvr_jbool(it, "value", 0);
         if (nvr_settings_push_set(c->settings, &p) != 0) return nvr_resp_err("persist_failed");
@@ -144,7 +145,8 @@ char *cmd_X_NightOwl_getChannelPushNotificationTriggers(cJSON *a, const nvr_cmd_
 {
     int chn0 = chn0_of(a);
     if (!valid_ch(c, chn0)) return nvr_resp_err("invalid_param");
-    nvr_push_cfg_t p; load_or_def(c, chn0, &p);
+    nvr_push_cfg_t p;
+    if (push_load(c, chn0, &p) != 0) return nvr_resp_err("no_config");
     cJSON *o = cJSON_CreateObject();
     cJSON_AddItemToObject(o, "triggers", triggers_arr(p.triggers));
     return nvr_resp_content(o);
@@ -156,7 +158,8 @@ char *cmd_X_NightOwl_setChannelPushNotificationTriggers(cJSON *a, const nvr_cmd_
     cJSON *tr = a ? cJSON_GetObjectItem(a, "triggers") : NULL;
     if (!valid_ch(c, chn0) || !cJSON_IsArray(tr) || !c || !c->settings)
         return nvr_resp_err("invalid_param");
-    nvr_push_cfg_t p; load_or_def(c, chn0, &p);
+    nvr_push_cfg_t p;
+    if (push_load(c, chn0, &p) != 0) return nvr_resp_err("no_config");
     p.chn = chn0;
     if (triggers_from_arr(tr, p.triggers, (int)sizeof(p.triggers)) != 0)
         return nvr_resp_err("invalid_param");
@@ -168,12 +171,13 @@ char *cmd_X_NightOwl_getChannelPushNotificationDoNotDisturb(cJSON *a, const nvr_
 {
     int chn0 = chn0_of(a);
     if (!valid_ch(c, chn0)) return nvr_resp_err("invalid_param");
-    nvr_push_cfg_t p; load_or_def(c, chn0, &p);
+    nvr_push_cfg_t p;
+    if (push_load(c, chn0, &p) != 0) return nvr_resp_err("no_config");
     cJSON *o = cJSON_CreateObject();
     cJSON_AddBoolToObject(o, "isEnabled", p.dnd_enable);
-    cJSON_AddStringToObject(o, "startTime", p.dnd_start[0] ? p.dnd_start : NVR_URL_PUSH_DND_START);
-    cJSON_AddStringToObject(o, "endTime", p.dnd_end[0] ? p.dnd_end : NVR_URL_PUSH_DND_END);
-    cJSON_AddStringToObject(o, "timeUnit", p.time_unit[0] ? p.time_unit : "hour");
+    cJSON_AddStringToObject(o, "startTime", p.dnd_start);
+    cJSON_AddStringToObject(o, "endTime", p.dnd_end);
+    cJSON_AddStringToObject(o, "timeUnit", p.time_unit);
     return nvr_resp_content(o);
 }
 
@@ -187,7 +191,8 @@ char *cmd_X_NightOwl_setChannelPushNotificationDoNotDisturb(cJSON *a, const nvr_
     const char *et = nvr_jstr(a, "endTime", NULL);
     if (en && (!valid_hhmm(st) || !valid_hhmm(et)))
         return nvr_resp_err("invalid_param");
-    nvr_push_cfg_t p; load_or_def(c, chn0, &p);
+    nvr_push_cfg_t p;
+    if (push_load(c, chn0, &p) != 0) return nvr_resp_err("no_config");
     p.chn = chn0;
     p.dnd_enable = en;
     if (valid_hhmm(st)) snprintf(p.dnd_start, sizeof(p.dnd_start), "%s", st);
@@ -207,7 +212,8 @@ char *cmd_setSnooze(cJSON *a, const nvr_cmd_ctx_t *c)
         int end  = nvr_jint(it, "endTime", 0);
         if (!valid_ch(c, chn0)) return nvr_resp_err("invalid_param");
         if (end != 0 && end <= (int)now) continue;   /* 只能设未来；0=关 */
-        nvr_push_cfg_t p; load_or_def(c, chn0, &p);
+        nvr_push_cfg_t p;
+        if (push_load(c, chn0, &p) != 0) return nvr_resp_err("no_config");
         p.chn = chn0;
         p.snooze_end = end;
         if (nvr_settings_push_set(c->settings, &p) != 0) return nvr_resp_err("persist_failed");
@@ -222,7 +228,8 @@ char *cmd_getSnooze(cJSON *a, const nvr_cmd_ctx_t *c)
     cJSON *o = cJSON_CreateObject();
     cJSON *chs = cJSON_AddArrayToObject(o, "channels");
     for (int i = 0; i < cap; i++) {
-        nvr_push_cfg_t p; load_or_def(c, i, &p);
+        nvr_push_cfg_t p;
+        if (push_load(c, i, &p) != 0) return nvr_resp_err("no_config");
         cJSON *e = cJSON_CreateObject();
         cJSON_AddNumberToObject(e, "endTime", p.snooze_end);
         cJSON_AddNumberToObject(e, "channel", i + 1);
@@ -239,7 +246,8 @@ char *cmd_setPushPhotoSwitch(cJSON *a, const nvr_cmd_ctx_t *c)
     cJSON_ArrayForEach(it, chs) {
         int chn0 = nvr_jint(it, "channel", 0) - 1;
         if (!valid_ch(c, chn0)) return nvr_resp_err("invalid_param");
-        nvr_push_cfg_t p; load_or_def(c, chn0, &p);
+        nvr_push_cfg_t p;
+        if (push_load(c, chn0, &p) != 0) return nvr_resp_err("no_config");
         p.chn = chn0;
         p.photo_on = nvr_jbool(it, "enable", 0);
         if (nvr_settings_push_set(c->settings, &p) != 0) return nvr_resp_err("persist_failed");
@@ -254,7 +262,8 @@ char *cmd_getPushPhotoSwitch(cJSON *a, const nvr_cmd_ctx_t *c)
     cJSON *o = cJSON_CreateObject();
     cJSON *chs = cJSON_AddArrayToObject(o, "channels");
     for (int i = 0; i < cap; i++) {
-        nvr_push_cfg_t p; load_or_def(c, i, &p);
+        nvr_push_cfg_t p;
+        if (push_load(c, i, &p) != 0) return nvr_resp_err("no_config");
         cJSON *e = cJSON_CreateObject();
         cJSON_AddBoolToObject(e, "enable", p.photo_on);
         cJSON_AddNumberToObject(e, "channel", i + 1);

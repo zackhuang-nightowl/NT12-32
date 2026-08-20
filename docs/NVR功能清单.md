@@ -54,7 +54,7 @@
 
 | 命令 | 功能 | handler | 状态 |
 |---|---|---|---|
-| `X_NightOwl_setCloudRecordSwitch` / `getCloudRecordSwitch` | 云存总开关 | `cmd_X_NightOwl_set/getCloudRecordSwitch` | ✅ |
+| `X_NightOwl_setCloudRecordSwitch` / `getCloudRecordSwitch` | 云存**总开关** | `args.value` ↔ KV **`cloud.switch`** | ✅ |
 | `setCloudRecordConfigs` / `getCloudRecordConfigs` | 每通道云存配置(触发/码流) | `cmd_set/getCloudRecordConfigs` | ✅ |
 
 > 说明:此处只存**配置**;真正上传由后台「云上传链路」执行(见二.3)。
@@ -125,7 +125,8 @@
 
 ## 三、数据库(SQLite)
 
-NVR 用两个 SQLite 库。建库 DDL 均为 `CREATE TABLE IF NOT EXISTS`(不重建、不动老数据)。
+NVR 用两个 SQLite 库。建库 DDL 均为 `CREATE TABLE IF NOT EXISTS`(不重建、不动老数据)。  
+**出厂默认行清单**（每表示例 + setting KV）：[DB_SEED_DEFAULTS.md](DB_SEED_DEFAULTS.md)
 
 ### 库 A · 设置库 `nvr_settings.db`
 路径:`<config_dir>/nvr_settings.db`([nvr_app.c:296](../app/src/nvr_app.c#L296)) · WAL · `chmod 600` · 实现:[nvr_settings.c](../components/config/src/nvr_settings.c)
@@ -138,9 +139,9 @@ NVR 用两个 SQLite 库。建库 DDL 均为 `CREATE TABLE IF NOT EXISTS`(不重
 | `nop_owner` | id=1, owner_id, username, stoken, updated | NOP 绑定账户 | `setOwner`/`getOwner`、远程门控 | ✅ |
 | `camera` | chn(PK), name, protocol, kind, backend, ip, mac, user, password, onvif_port, url, poe_port, serial, model, bound, active … | 通道=子设备主表 | LAN 接入全套 | ✅ |
 | `camera_capability` | chn(PK), caps_json, signal, probed_at | 每通道能力集(上线探测写) | `getDeviceCapabilities` | ✅ |
-| `record_config` | chn(PK), record_on, triggers, stream_type | 每通道录像配置 | `set/getChannelRecording*` | ✅ |
+| `record_config` | chn(PK), record_on, triggers, stream_type | 每通道录像；**stream_type→主/子 writer**（出厂 `both`） | `set/getChannelRecording*` | ✅ |
 | `push_config` | chn(PK), switch_on, dnd_enable, dnd_start/end, dnd_weekdays, time_unit | 每通道推送+免打扰 | `set/getChannelsPushNotificationSwitch` | ✅ |
-| `cloud_channel` | chn(PK), stream_type, triggers, enable | 每通道云存配置 | `set/getCloudRecordConfigs` | ✅ |
+| `cloud_channel` | chn(PK), stream_type, triggers, enable | 每通道云存；**stream_type→上传轨**（出厂 `sub`） | `set/getCloudRecordConfigs` | ✅ |
 | `schedule` | chn, domain, sensor, rule_id, weekdays, start/end_hms | 排程规则(连续/事件+云存) | — | 🟡 **有表无命令**(排程未接) |
 | `local_link` | id=1, network_type, mac, ip, mask, gateway, dns1/2 | eth0 网络配置 | `GUI_get/setLocalLink` | ✅ |
 | `email_alert` | id=1, enable, receiver1-5, smtp_*, use_ssl, interval | 邮件告警 | `GUI_get/setEmailAlert`、`GUI_testEmailAlert` | ✅(SMTP 465 待做) |

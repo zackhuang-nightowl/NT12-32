@@ -13,6 +13,7 @@
 #include "nvr_defaults.h"
 #include "nvr_display_modes.h"  /* NVR_DISPLAY_MODES 单一档位来源 */
 #include "nvr_playback.h"       /* setDeviceDisplayMode 切回 live 前先停回放 */
+#include "mhal_vout.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -443,5 +444,16 @@ char *cmd_X_NightOwl_getChannelZoomPan(cJSON *a, const nvr_cmd_ctx_t *c)
     cJSON_AddNumberToObject(o, "CenterPointX", cx);
     cJSON_AddNumberToObject(o, "CenterPointY", cy);
     cJSON_AddNumberToObject(o, "ZoomRatio", ratio);
+    return nvr_resp_content(o);
+}
+
+char *cmd_getCableConnectStatus(cJSON *a, const nvr_cmd_ctx_t *c)
+{
+    int hdmi = 0, vga = 0;
+    (void)a; (void)c;
+    mhal_vout_get_cable_connect(&hdmi, &vga);
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddBoolToObject(o, "HDMI", hdmi ? 1 : 0);
+    cJSON_AddBoolToObject(o, "VGA", vga ? 1 : 0);
     return nvr_resp_content(o);
 }

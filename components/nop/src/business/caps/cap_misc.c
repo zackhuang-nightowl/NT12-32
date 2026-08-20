@@ -116,21 +116,6 @@ static nop_status_t handle_set_iotc_auth_key(const nop_request_t *request,
     return NOP_OK;
 }
 
-static nop_status_t handle_get_current_clouds(const nop_request_t *request,
-                                              nop_response_t *response,
-                                              void *handler_context)
-{
-    nop_json_t *available;
-    (void)request; (void)handler_context;
-    response->content = nop_json_obj();
-    nop_json_add_str(response->content, "currentCloud", "tutk");
-    available = nop_json_arr();
-    nop_json_arr_push_str(available, "tutk");
-    nop_json_arr_push_str(available, "pepper");
-    nop_json_add(response->content, "availableClouds", available);
-    return NOP_OK;
-}
-
 static nop_status_t handle_get_owner(const nop_request_t *request,
                                      nop_response_t *response,
                                      void *handler_context)
@@ -589,7 +574,6 @@ void cap_misc_register(nop_router_t *router)
     nop_router_register(router, "getAvPassword", CAP_MISC, handle_get_av_password);
     nop_router_register(router, "setAvPassword", CAP_MISC, handle_set_av_password);
     nop_router_register(router, "getChannelsStatus", CAP_MISC, handle_get_channels_status);
-    nop_router_register(router, "getCurrentClouds", CAP_MISC, handle_get_current_clouds);
     nop_router_register(router, "getIotcAuthKey", CAP_MISC, handle_get_iotc_auth_key);
     nop_router_register(router, "setIotcAuthKey", CAP_MISC, handle_set_iotc_auth_key);
     nop_router_register(router, "getPowerSupplyStats", CAP_MISC, handle_get_power_supply_stats);

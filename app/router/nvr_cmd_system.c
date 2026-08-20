@@ -561,5 +561,6 @@ char *cmd_GUI_getUID(cJSON *a, const nvr_cmd_ctx_t *c)
 
 char *cmd_GUI_getSystemLog(cJSON *a, const nvr_cmd_ctx_t *c)
 {
-    return nvr_cmd_nop_dispatch(a, c, "GUI_getSystemLog");
+    (void)a; (void)c;
+    return nvr_resp_not_support();
 }

@@ -2,14 +2,15 @@
 
 > 本文记录固件**当前已实现/可编译**的能力，供团队对照与补充。
 > 图例：✅ 已实现并主机自测/编译通过 · 🟡 结构就位，需上真机对接/调优 · ❌ 未开始（后续里程碑）
-> 最近更新：2026-08-19（ODC TUTK agent cgi/device.sh/profile + 出厂 AuthKey 00000000）。
+> 最近更新：2026-08-20（cap 单机桩清理 → LOCAL 501；云存 sync/async；schema v9 stream_type）。
 
 ---
 
 ## 0. 一句话现状
 
 六大子系统 + NOP↔ONVIF 映射 + **app 整机编排** 已串成一台可交叉编译的 NVR。
-出图/双轨录像/本机回放/8089 三档路由/绑定握手（首次一轮等密码）/8012 事件/ODC TUTK agent（6061 命令 + 8554 live + 7000 对讲）/Cognito 绑 owner 已接线。
+出图/双轨录像/本机回放/8089 三档路由/绑定握手/8012 事件/ODC TUTK agent/Cognito 绑 owner/**推送 TPNS**/**IPC OTA 下推** 已接线。
+streaming 已切 **Frame Hub + Record Worker**（puller 只入队）；**RSDK v2 可靠性改造已落地**（见 [rsdk-v2 spec](superpowers/specs/2026-08-20-rsdk-v2-reliable-recording-design.md) §13）。
 主机单测已按实机策略移除；整机 `nvr_app` 仅在目标机（`-DNVR_WITH_ONBOARD=ON` + na51090 BSP）链接。
 
 ---
@@ -48,7 +49,7 @@
 
 | 能力 | 状态 | 实现位置 / 说明 |
 |---|---|---|
-| 每通道主+子**常拉**（不重连切显示） | ✅ | `stream_internal.h`：`pmain`/`psub`；`NopRtspClient` |
+| 每通道主+子**常拉** + Frame Hub 解耦写盘 | ✅ | `stream_hub.c` + `stream_record_worker.c`；puller 只 push |
 | 可见窗硬解上屏 + 隐藏窗只拉不解码 | ✅ | `nvr_stream_set_display` 门控 |
 | 通道管理 + 掉线退避重连 | ✅ | `app/channel/nvr_channel.c` |
 | 动态增删 / PoE 绑定 / 发现落地 | ✅ | `nvr_chan_add/remove/bind_poe` |
@@ -66,9 +67,11 @@
 | 能力 | 状态 | 实现位置 / 说明 |
 |---|---|---|
 | 录像引擎（裸盘/环形/索引/加密/导出 MP4） | ✅ | `components/recorder` |
-| 主/子双 writer（独立段索引） | ✅ | streaming `writer_main`/`writer_sub`；音频挂主流 |
-| 连续录像排程（周计划 + 手动开关） | ✅ | GET 无库=开+7×24；保存后才录。保存立刻 `rec_schedule_apply` |
-| 事件录像排程（按 sensor） | ✅ | GET 无库=7×24；无保存规则不触发落盘 |
+| 写盘并发/掉电可靠性（RSDK v2） | ✅ | `RSDK_FORMAT_VERSION=2`、组递归锁(R1/R2/R3)、O(1) chunk 回收、载荷 CRC、周期 fdatasync(≤1s)；streaming：256 队列 GOP 背压 + gap + IDR 对齐 60s 切片 |
+| 主/子双 writer（独立段索引） | ✅ | streaming `writer_main`/`writer_sub`；**`record_config.stream_type` 驱动掩码**（出厂 `both`） |
+| 连续录像排程（周计划 + 手动开关） | ✅ | 只读 DB；`rec_schedule_apply` 合并开关+时段 → `nvr_stream_set_record`（≤5s / 保存即生效） |
+| 事件录像排程（按 sensor） | ✅ | `schedule(record_event)` + 事件待命/预录；无保存规则不触发落盘 |
+| 本地录像 triggers | 🟡 | DB 有 GET/SET；**尚未**用于过滤 AI 事件落盘 |
 | 事件时窗 / 满盘策略编排 | ✅ | `nvr_record_sched.c` |
 | 盘管理（发现/格式化/装配/热插拔） | 🟡 | `components/storage`；SMART 已接 `rsdk_smart`（温度/重映射/通电时长），真机判定待核 |
 | 本机 HDMI 回放（墙钟时钟、倍速、I 倒放、日界停） | ✅ | `nvr_playback.c` + `GUI_playbackControl` |
@@ -88,7 +91,7 @@
 | 事件抓拍 → 列表缩略图 | ✅ | 异步 GetSnapshot/`rsdk_pic`；`thumbnailUrl=http://iotc-tunnel:8089/eventSnap?eid=`（仅隧道 GET） |
 | NOP 8012 客户端（逐相机） | ✅ | `nvr_nop8012_start` 已在 `nvr_app_start` 启动 |
 | ONVIF 事件轮询 → 同一 hub | ✅ | `nop_onvif_map_events_start` |
-| 抓拍 / 推送联动 | ✅ | 事件 JPEG 落盘；推送附图仍可后续接云存 |
+| 抓拍 / 推送联动 | ✅ | 事件 JPEG → `rsdk_pic`；推送读图 → 图床 → TPNS |
 
 ---
 
@@ -97,11 +100,13 @@
 | 能力 | 状态 | 实现位置 / 说明 |
 |---|---|---|
 | 云存状态内置 Recorder | ✅ | `rsdk_cloud.*` |
-| 上传引擎：待传→取段→TS→VSaaS | ✅ | `components/cloud_uploader` |
+| 上传引擎：待传→取段→TS→VSaaS | ✅ | **`cloud_channel.stream_type`** 选主/子轨（出厂 `sub`）；`rsdk_group_query_stream` |
+| 云存事件登记门控 | ✅ | `cloud.switch` + enable + triggers + stream≠disable（`nvr_record_policy`） |
 | 整机门控（UID / stoken / switch） | ✅ | `maybe_start_uploader` + settings 订阅 |
 | MPEG-TS 封装 | 🟡 | 极简 PAT/PMT/PES；PCR 上真机调 |
 | 错误 -1002/-1003/-1004 → 强制关 | ✅ | `uploader force_off` |
-| 同步（无盘 BaseStation）实时上传 | ❌ | v2 延后 |
+| 同步（无盘）实时上传 | ✅ | `cloud_sync.c`：旁路取流→内存 TS 分片→VSaaS；事件结束 `vsaas_update_tags`(duration) |
+| `getCloudRecordConfigs.mode` | ✅ | 有盘 `async` / 无盘 `sync`（`storage.has_disk` + 运行时 `group`） |
 
 ---
 
@@ -134,25 +139,51 @@
 | 电子放大 ZoomPan | ✅ | `mhal_vout_set_crop`；已 start 的 VPE 先 stop 再设 IN_CROP |
 | 网络落地（eth0/eth1 VLAN+DHCP、NTP） | ✅ | `nvr_netime.c`；口 P → VLAN(2001+P)=2002..2017 |
 | 周维护自动重启 | ✅ | `nvr_app.c` `auto_reboot_tick`；`GUI_get/setAutoRebootSetting` |
-| OTA（MD5 + 版本 + A/B；查服务器；IPC 下推） | ✅ | NVR 自升级 `nvr_ota.c`。`GUI_checkServerFirmware` 查 NightOwl OTA。IPC：NVR 下载后 NOP `upload.cgi` / ONVIF `StartFirmwareUpgrade` |
+| OTA（MD5 + 版本 + A/B；查服务器；IPC 下推） | ✅ | IPC 下推时通道 status=6 + longPolling；查新/下载阶段不改 |
+| `reboot` | ✅ | `nvr_cmd_system.c` |
+| LAN 无线 attach | ✅ | `X_NightOwl_attachIPDevices` / detach / getAttachStatus |
 
 ---
 
 ## 9. 待接线 / 上真机调（结构已就位）
 
+> 完整代码级清单见 **[CODE_GAP_AUDIT.md](CODE_GAP_AUDIT.md)**（501 / 桩 / 仅配置 / 部分 / 真机待核）。
+
+### 9.1 明确未做（501 或零代码）
+
 | 项 | 说明 |
 |---|---|
-| media_hal 板级 | 4K 时序 / YUV 抓拍（ddr_id 已按 dts）；回放 HDMI 音频真机出声 |
-| BLE GATT | 协议桥已接 router；BlueZ 0xFFF0 待板级 |
-| TUTK 远程回放 | 真机对 App 拖时间轴 / 事件回放回归 |
-| TS PCR / 推送 | 云存封装调优；推送开关已落库、外发未做 |
+| `GUI_setNetPort` | 501；改口需重启 listener，未做热切换 |
+| Chromecast | `NVR_URL_SMART_HOME` 未引用 |
+| DDNS 客户端 | 仅 SQLite 读写，无 inadyn 等 apply |
+| FTP 上传引擎 | 仅配置读写 |
+| SMTP SSL/465 | 587/25 可测；465 返回失败 |
+| Wizard / 产测 / 无盘 BaseStation / 电池机 / LVGL GUI | 本期不做或独立仓 |
+
+### 9.2 产品不需要的 LOCAL 命令（501）
+
+`getChannelStats` · `getChannelLoading` · `getCloudStatusHistory` · `getChannelCloudRecordStats*` · `getChannelRecordingContent` · `getLog`/`GUI_getSystemLog` · `getReportServer` · `getEnvironment` · 云存 test/log 五命令 — **501**（cap 单机桩已删，见 [CODE_GAP_AUDIT.md](CODE_GAP_AUDIT.md) §2）。
+
+### 9.3 部分实现
+
+| 项 | 说明 |
+|---|---|
+| 推送 | TPNS 主链路 ✅；**animal/package/lineCross/intrusion 缺 E_DVR payload → 不发** |
+| 抓拍 | 事件/ONVIF ✅；本机 YUV 硬解截帧 ❌ |
+| 对讲 | 隧道→相机 ✅；HDMI MIC 采集 ❌ |
+| media_hal | HDMI ✅；**CVBS/VGA 未接** |
+| 云存 TS | 上传通；PCR/连续性待调 |
+| RSDK v2 遗留 | 单 record worker；writer 开闭仍在 puller；`pread` 短读仍补零 |
+
+### 9.4 真机待核
+
+media_hal 4K 时序 · 回放 HDMI 音频 · BLE BlueZ GATT 0xFFF0 · 32 路 soak · OTA/IPC OTA 烧写
 
 ---
 
-## 10. 产品外围（❌ 未开始，后续里程碑）
+## 10. 产品外围（❌ 未开始或本期不做）
 
-Wizard 四场景 · LVGL GUI 本体（独立仓）· 推送通知 · Chromecast · 产测 · BaseStation 无盘形态。
-> `nop_sdk` 已含大量对应 cap handler，接线时复用。
+Wizard 四场景状态机 · LVGL GUI 本体（独立仓）· Chromecast/Google Home · 产测 · BaseStation 无盘形态 · 无线/电池机配对 · 邮件 SMTP 465 · NetPort 热切换。
 
 ---
 

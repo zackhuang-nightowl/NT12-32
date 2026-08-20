@@ -2,7 +2,7 @@
  *  nvr_cmd_table.c — 唯一权威路由表:NOP func 名 → 命名 handler(黑名单 = 本表)。
  *
  *  新增本地接口 = 在此加一行 + 在对应域文件写一个 cmd_<func>。手动加行,不自动注册。
- *  无 NVR 真实实现、仅 cap 回落的行用行尾注释「待做:...」标注。
+ *  无 NVR 真实实现、标记暂不实现的行用行尾注释「暂不实现:501」标注。
  ***************************************************************************************/
 #include "nvr_cmd_internal.h"
 #include <string.h>
@@ -40,6 +40,7 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
     { "AI_getChannelAICapabilities",           cmd_AI_getChannelAICapabilities },
     { "X_NightOwl_setChannelZoomPan",          cmd_X_NightOwl_setChannelZoomPan },
     { "X_NightOwl_getChannelZoomPan",          cmd_X_NightOwl_getChannelZoomPan },
+    { "getCableConnectStatus",                 cmd_getCableConnectStatus },
 
     /* --- lan 子设备 --- */
     { "GUI_LanSearch",                         cmd_GUI_LanSearch },
@@ -89,7 +90,7 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
     { "GUI_getUID",                            cmd_GUI_getUID },
     { "GUI_getAutoRebootSetting",              cmd_GUI_getAutoRebootSetting },
     { "GUI_setAutoRebootSetting",              cmd_GUI_setAutoRebootSetting },
-    { "GUI_getSystemLog",                      cmd_GUI_getSystemLog },           /* 待做:NVR 日志 */
+    { "GUI_getSystemLog",                      cmd_GUI_getSystemLog },           /* 暂不实现:501 */
 
     /* --- account 鉴权 --- */
     { "GUI_login",                             cmd_GUI_login },
@@ -106,21 +107,21 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
     /* --- misc 通道聚合/安全 --- */
     { "getChannelsStatus",                     cmd_getChannelsStatus },
     { "X_NightOwl_getChannelInfo",             cmd_X_NightOwl_getChannelInfo },
-    { "getChannelStats",                       cmd_getChannelStats },            /* 待做:通道统计 */
-    { "getChannelLoading",                     cmd_getChannelLoading },          /* 待做:加载状态 */
+    { "getChannelStats",                       cmd_getChannelStats },            /* 暂不实现:501 */
+    { "getChannelLoading",                     cmd_getChannelLoading },          /* 暂不实现:501 */
     { "getEnhancedSecurity",                   cmd_getEnhancedSecurity },        /* NVR 代查 NOP digest random */
     { "setEnhancedSecurity",                   cmd_setEnhancedSecurity },        /* NVR 代开/关 digest，入库 P_enh/空 */
     { "X_NightOwl_getDeviceActive",            cmd_X_NightOwl_getDeviceActive }, /* NVR 代查/代激活 nopOnvif */
     { "X_NightOwl_setDeviceActive",            cmd_X_NightOwl_setDeviceActive },
     { "getCurrentClouds",                      cmd_getCurrentClouds },
-    { "getCloudStatusHistory",                 cmd_getCloudStatusHistory },      /* 待做:云存历史 */
-    { "getChannelCloudRecordStats",            cmd_getChannelCloudRecordStats }, /* 待做:云存统计 */
-    { "getChannelCloudRecordStatsSwitch",      cmd_getChannelCloudRecordStatsSwitch }, /* 待做 */
-    { "setChannelCloudRecordStatsSwitch",      cmd_setChannelCloudRecordStatsSwitch }, /* 待做 */
-    { "getChannelRecordingContent",            cmd_getChannelRecordingContent }, /* 待做:recorder */
-    { "getReportServer",                       cmd_getReportServer },            /* 待做:配置 */
-    { "getEnvironment",                        cmd_getEnvironment },             /* 待做:配置 */
-    { "getLog",                                cmd_getLog },                     /* 待做:NVR 日志 */
+    { "getCloudStatusHistory",                 cmd_getCloudStatusHistory },      /* 暂不实现:501 */
+    { "getChannelCloudRecordStats",            cmd_getChannelCloudRecordStats }, /* 暂不实现:501 */
+    { "getChannelCloudRecordStatsSwitch",      cmd_getChannelCloudRecordStatsSwitch }, /* 暂不实现:501 */
+    { "setChannelCloudRecordStatsSwitch",      cmd_setChannelCloudRecordStatsSwitch }, /* 暂不实现:501 */
+    { "getChannelRecordingContent",            cmd_getChannelRecordingContent }, /* 暂不实现:501 */
+    { "getReportServer",                       cmd_getReportServer },            /* 暂不实现:501 */
+    { "getEnvironment",                        cmd_getEnvironment },             /* 暂不实现:501 */
+    { "getLog",                                cmd_getLog },                     /* 暂不实现:501 */
 
     /* --- network 网络/时间 --- */
     { "GUI_getLocalLink",                      cmd_GUI_getLocalLink },
@@ -150,6 +151,11 @@ const nvr_cmd_route_t g_nvr_cmd_table[] = {
     { "getCloudRecordSwitch",                  cmd_getCloudRecordSwitch },
     { "setCloudRecordConfigs",                 cmd_setCloudRecordConfigs },
     { "getCloudRecordConfigs",                 cmd_getCloudRecordConfigs },
+    { "getCloudRecordLogConfig",               cmd_getCloudRecordLogConfig },    /* 暂不实现 */
+    { "setCloudRecordLogConfig",               cmd_setCloudRecordLogConfig },    /* 暂不实现 */
+    { "startCloudRecordTest",                  cmd_startCloudRecordTest },       /* 暂不实现 */
+    { "stopCloudRecordTest",                   cmd_stopCloudRecordTest },        /* 暂不实现 */
+    { "getCloudRecordTestProgress",            cmd_getCloudRecordTestProgress }, /* 暂不实现 */
 
     /* --- record 录像/推送 --- */
     { "X_NightOwl_setChannelRecordingTriggers",           cmd_X_NightOwl_setChannelRecordingTriggers },

@@ -26,7 +26,7 @@ char *cmd_setCloudRecordConfigs(cJSON *a, const nvr_cmd_ctx_t *c)
         row.chn = nvr_jint(it, "channel", -1);
         if (row.chn < 0) continue;
         row.enable = 1;
-        snprintf(row.stream_type, sizeof(row.stream_type), "%s", nvr_jstr(it, "streamType", "main"));
+        snprintf(row.stream_type, sizeof(row.stream_type), "%s", nvr_jstr(it, "streamType", "sub"));
         cJSON *tg = cJSON_GetObjectItem(it, "triggers"), *t; char buf[128] = {0}; int first = 1;
         if (cJSON_IsArray(tg)) cJSON_ArrayForEach(t, tg) {
             if (cJSON_IsString(t)) { if (!first) strncat(buf, ",", sizeof(buf)-strlen(buf)-1);
@@ -41,7 +41,8 @@ char *cmd_getCloudRecordConfigs(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     (void)a; nvr_cloud_ch_row_t rows[64]; int n = nvr_settings_cloud_ch_list(c->settings, rows, 64);
     cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "mode", nvr_settings_get_int(c->settings, "storage.has_disk", 1) ? "async" : "sync");
+    cJSON_AddStringToObject(o, "mode",
+        (c->group || nvr_settings_get_int(c->settings, "storage.has_disk", 0)) ? "async" : "sync");
     cJSON *arr = cJSON_AddArrayToObject(o, "channels");
     for (int i = 0; i < n; i++) {
         cJSON *e = cJSON_CreateObject();
@@ -59,3 +60,14 @@ char *cmd_getCloudRecordSwitch(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     return cmd_X_NightOwl_getCloudRecordSwitch(a, c);
 }
+
+#define NVR_CLOUD_NOT_IMPL(name) \
+char *cmd_##name(cJSON *a, const nvr_cmd_ctx_t *c) { (void)a; (void)c; return nvr_resp_not_support(); }
+
+NVR_CLOUD_NOT_IMPL(getCloudRecordLogConfig)
+NVR_CLOUD_NOT_IMPL(setCloudRecordLogConfig)
+NVR_CLOUD_NOT_IMPL(startCloudRecordTest)
+NVR_CLOUD_NOT_IMPL(stopCloudRecordTest)
+NVR_CLOUD_NOT_IMPL(getCloudRecordTestProgress)
+
+#undef NVR_CLOUD_NOT_IMPL
