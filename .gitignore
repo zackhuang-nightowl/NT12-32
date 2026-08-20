@@ -32,3 +32,5 @@ third_party/ffmpeg/
 .vscode/
 .idea/
 .cursor/
+requirement/
+tools/
