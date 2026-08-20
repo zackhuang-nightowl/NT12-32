@@ -960,10 +960,7 @@ static int resolve_from_media2_list(MediaProfileList *head, const char *source_t
                                     nop_onvif_source_tokens_t *out)
 {
     char target[100] = "";
-    char sub_profile[100] = "";
-    char ptz_profile[100] = "";
     int found = 0, main_area = -1, venc_sub = -1;
-    int sub_area = 0x7fffffff, ptz_area = 0x7fffffff, ana_area = 0x7fffffff;
     if (source_token && source_token[0])
         strncpy(target, source_token, sizeof(target) - 1);
     for (MediaProfileList *p = head; p; p = p->next) {
@@ -979,8 +976,12 @@ static int resolve_from_media2_list(MediaProfileList *head, const char *source_t
             continue;
         if (!found) {
             strncpy(out->source_token, src, sizeof(out->source_token) - 1);
+            strncpy(out->profile, mp->token, sizeof(out->profile) - 1);
             strncpy(out->vsc_token, mp->Configurations.VideoSource.token,
                     sizeof(out->vsc_token) - 1);
+            if (mp->Configurations.AnalyticsFlag)
+                strncpy(out->analytics_cfg, mp->Configurations.Analytics.token,
+                        sizeof(out->analytics_cfg) - 1);
             found = 1;
         }
         if (mp->Configurations.VideoEncoderFlag) {
@@ -988,28 +989,6 @@ static int resolve_from_media2_list(MediaProfileList *head, const char *source_t
             area = ve->Resolution.Width * ve->Resolution.Height;
             resolve_rank_venc(out, ve->token, area, &main_area, &venc_sub);
         }
-        /* 子码流 = 该源最低分辨率 Profile（无编码器当 0，优先当子）。 */
-        if (area < sub_area) {
-            sub_area = area;
-            strncpy(sub_profile, mp->token, sizeof(sub_profile) - 1);
-        }
-        /* PTZ：在带 PTZ 的 Profile 里取最低分辨率（NightOwl 约定子码流绑 PTZ）。 */
-        if (mp->Configurations.PTZFlag && area < ptz_area) {
-            ptz_area = area;
-            strncpy(ptz_profile, mp->token, sizeof(ptz_profile) - 1);
-        }
-        /* Analytics：同样取该源最低分辨率上带 Analytics 的。 */
-        if (mp->Configurations.AnalyticsFlag && area < ana_area) {
-            ana_area = area;
-            strncpy(out->analytics_cfg, mp->Configurations.Analytics.token,
-                    sizeof(out->analytics_cfg) - 1);
-        }
-    }
-    if (found) {
-        if (ptz_profile[0])
-            strncpy(out->profile, ptz_profile, sizeof(out->profile) - 1);
-        else if (sub_profile[0])
-            strncpy(out->profile, sub_profile, sizeof(out->profile) - 1);
     }
     return found ? 0 : -1;
 }
@@ -1018,10 +997,7 @@ static int resolve_from_media1_list(ONVIF_PROFILE *head, const char *source_toke
                                     nop_onvif_source_tokens_t *out)
 {
     char target[100] = "";
-    char sub_profile[100] = "";
-    char ptz_profile[100] = "";
     int found = 0, main_area = -1, venc_sub = -1;
-    int sub_area = 0x7fffffff, ptz_area = 0x7fffffff, ana_area = 0x7fffffff;
     if (source_token && source_token[0])
         strncpy(target, source_token, sizeof(target) - 1);
     for (ONVIF_PROFILE *p = head; p; p = p->next) {
@@ -1038,8 +1014,12 @@ static int resolve_from_media1_list(ONVIF_PROFILE *head, const char *source_toke
             continue;
         if (!found) {
             strncpy(out->source_token, src, sizeof(out->source_token) - 1);
+            strncpy(out->profile, p->token, sizeof(out->profile) - 1);
             strncpy(out->vsc_token, p->v_src_cfg->Configuration.token,
                     sizeof(out->vsc_token) - 1);
+            if (p->va_cfg)
+                strncpy(out->analytics_cfg, p->va_cfg->Configuration.token,
+                        sizeof(out->analytics_cfg) - 1);
             found = 1;
         }
         if (p->v_enc_cfg) {
@@ -1047,25 +1027,6 @@ static int resolve_from_media1_list(ONVIF_PROFILE *head, const char *source_toke
             area = ve->Resolution.Width * ve->Resolution.Height;
             resolve_rank_venc(out, ve->token, area, &main_area, &venc_sub);
         }
-        if (area < sub_area) {
-            sub_area = area;
-            strncpy(sub_profile, p->token, sizeof(sub_profile) - 1);
-        }
-        if (p->ptz_cfg && area < ptz_area) {
-            ptz_area = area;
-            strncpy(ptz_profile, p->token, sizeof(ptz_profile) - 1);
-        }
-        if (p->va_cfg && area < ana_area) {
-            ana_area = area;
-            strncpy(out->analytics_cfg, p->va_cfg->Configuration.token,
-                    sizeof(out->analytics_cfg) - 1);
-        }
-    }
-    if (found) {
-        if (ptz_profile[0])
-            strncpy(out->profile, ptz_profile, sizeof(out->profile) - 1);
-        else if (sub_profile[0])
-            strncpy(out->profile, sub_profile, sizeof(out->profile) - 1);
     }
     return found ? 0 : -1;
 }
