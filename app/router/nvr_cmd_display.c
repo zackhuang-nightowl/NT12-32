@@ -192,17 +192,35 @@ static void lp_add_u32_if(cJSON *o, const char *key, uint32_t val, int emit)
 {
     if (emit) cJSON_AddNumberToObject(o, key, (double)val);
 }
+static int lp_masks_eq(const nvr_evt_mask_set_t *a, const nvr_evt_mask_set_t *b)
+{
+    return a->motion == b->motion && a->human == b->human && a->face == b->face &&
+           a->car == b->car && a->animal == b->animal && a->package == b->package &&
+           a->linecross == b->linecross && a->field == b->field;
+}
+/* 八类事件电平位图全量落 JSON(GUI_longPolling.txt 8 个 *Status 字段)。 */
+static void lp_add_event_masks(cJSON *o, const nvr_evt_mask_set_t *m)
+{
+    lp_add_u32_if(o, "MotionStatus",         m->motion,    1);
+    lp_add_u32_if(o, "FaceStatus",           m->face,      1);
+    lp_add_u32_if(o, "HumanStatus",          m->human,     1);
+    lp_add_u32_if(o, "CarStatus",            m->car,       1);
+    lp_add_u32_if(o, "AnimalStatus",         m->animal,    1);
+    lp_add_u32_if(o, "PackageStatus",        m->package,   1);
+    lp_add_u32_if(o, "LineCrossStatus",      m->linecross, 1);
+    lp_add_u32_if(o, "FieldIntrusionStatus", m->field,     1);
+}
 
 char *cmd_GUI_longPolling(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     int refresh = a ? nvr_jbool(a, "refresh", 0) : 0;
     unsigned notify = 0;
-    uint32_t mo0 = 0, hu0 = 0, fa0 = 0, car0 = 0, rec0 = 0;
-    uint32_t mo = 0, hu = 0, fa = 0, car = 0, rec = 0;
+    nvr_evt_mask_set_t m0 = {0}, m = {0};
+    uint32_t rec0 = 0, rec = 0;
     int setup0 = nvr_gui_setup_gen();
     int setup_has = 0, setup_now = 0;
 
-    if (c->eh) nvr_evt_masks(c->eh, &mo0, &hu0, &fa0, &car0);
+    if (c->eh) nvr_evt_masks(c->eh, &m0);
     rec0 = c->sm ? nvr_stream_recording_mask(c->sm) : 0;
     setup_now = nvr_gui_get_setup_status(&setup_has);
 
@@ -229,35 +247,33 @@ char *cmd_GUI_longPolling(cJSON *a, const nvr_cmd_ctx_t *c)
                 if (left <= 0) break;
                 if (left > 200) left = 200;
                 notify = c->cm ? nvr_chan_wait_notify(c->cm, (int)left) : 0;
-                if (c->eh) nvr_evt_masks(c->eh, &mo, &hu, &fa, &car);
+                if (c->eh) nvr_evt_masks(c->eh, &m);
                 rec = c->sm ? nvr_stream_recording_mask(c->sm) : 0;
-                if (notify || mo != mo0 || hu != hu0 || fa != fa0 || car != car0 || rec != rec0)
+                if (notify || !lp_masks_eq(&m, &m0) || rec != rec0)
                     break;
                 if (nvr_gui_setup_gen() != setup0)
                     break;
             }
         }
     }
-    if (c->eh) nvr_evt_masks(c->eh, &mo, &hu, &fa, &car);
+    if (c->eh) nvr_evt_masks(c->eh, &m);
     rec = c->sm ? nvr_stream_recording_mask(c->sm) : 0;
     setup_now = nvr_gui_get_setup_status(&setup_has);
 
     cJSON *o = cJSON_CreateObject();
     if (refresh) {
         lp_add_u32_if(o, "ChannelStatusNotify", notify, 1);
-        lp_add_u32_if(o, "MotionStatus", mo, 1);
-        lp_add_u32_if(o, "FaceStatus", fa, 1);
-        lp_add_u32_if(o, "HumanStatus", hu, 1);
-        lp_add_u32_if(o, "CarStatus", car, 1);
+        lp_add_event_masks(o, &m);            /* 8 类事件位全量 */
         lp_add_u32_if(o, "RecordStatus", rec, 1);
         if (setup_has) cJSON_AddNumberToObject(o, "APPNotifySetupStatus", setup_now);
     } else {
+        /* ChannelStatusNotify 是**边沿**(drain 消费),按变化回。 */
         lp_add_u32_if(o, "ChannelStatusNotify", notify, notify != 0);
-        lp_add_u32_if(o, "MotionStatus", mo, mo != mo0);
-        lp_add_u32_if(o, "FaceStatus", fa, fa != fa0);
-        lp_add_u32_if(o, "HumanStatus", hu, hu != hu0);
-        lp_add_u32_if(o, "CarStatus", car, car != car0);
-        lp_add_u32_if(o, "RecordStatus", rec, rec != rec0);
+        /* 事件位/录像位是**电平/衰减态**:longPolling 无客户端游标是无状态的,若只在
+         * "相对本次进入前有变化" 才回,事件在两次 poll 之间衰减清零(icon decay)会丢失
+         * "事件结束" 这次跳变 → GUI 图标永不消失。故电平态**恒回当前值**保持同步。 */
+        lp_add_event_masks(o, &m);            /* 8 类事件位全量 */
+        lp_add_u32_if(o, "RecordStatus", rec, 1);
         if (setup_has && nvr_gui_setup_gen() != setup0)
             cJSON_AddNumberToObject(o, "APPNotifySetupStatus", setup_now);
     }

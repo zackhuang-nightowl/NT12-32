@@ -79,13 +79,15 @@ static void slot_backoff(slot_t *s, time_t now)
     s->next_retry = now + s->backoff;
 }
 
-/* 选登录账密:
- *   通道 pass 非空 = digest 已开 → 上层用时间戳 + 8012 digest(P_enh)；
- *   通道 pass 空 = digest 已关 → 空密码交互。 */
+/* 选登录账密(仅 **非 digest** 明文路径用;digest 路径在 slot_send_login 内自行处理):
+ *   通道 pass 非空 → 用之(明文密码);
+ *   通道 pass 空 → 回退相机出厂默认口令 "admin"(默认账密 admin/admin,非空口令)。
+ * 注:此前支持 digest 的改动把空口令回退从 "admin" 误改为空串,导致默认相机 8012 登录被拒
+ *     (ACK_FAIL);此处恢复 "admin" 默认。 */
 static void pick_password(nvr_nop8012_t *c, const slot_t *s, char *out, size_t cap)
 {
     (void)c;
-    snprintf(out, cap, "%s", s->pass[0] ? s->pass : "");
+    snprintf(out, cap, "%s", s->pass[0] ? s->pass : "admin");
 }
 
 /* 从 nvr_chan_mgr 同步 NOP 通道到 slot[](按通道号索引)。 */

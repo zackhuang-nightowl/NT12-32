@@ -490,6 +490,7 @@ static nop_detect_type_t topic_to_detect(const char *t)
     if (!t) return NOP_DETECT_TYPE_MAX;
     if (strstr(t, "LineDetector") || strstr(t, "LineCross"))   return NOP_DETECT_LINE_CROSS;
     if (strstr(t, "FieldDetector"))                            return NOP_DETECT_FIELD_INTRUSION;
+    if (strstr(t, "Package"))                                  return NOP_DETECT_PACKAGE;
     if (strstr(t, "CellMotion") || strstr(t, "Motion"))        return NOP_DETECT_MOTION;
     /* Class names may also appear directly in vendor topics: */
     if (strstr(t, "Vehicle"))                                  return NOP_DETECT_VEHICLE;
@@ -507,6 +508,7 @@ static nop_detect_type_t class_to_detect(const char *c)
     if (strstr(c, "Human") || strstr(c, "Person")) return NOP_DETECT_HUMAN;
     if (strstr(c, "Face"))                       return NOP_DETECT_FACE;
     if (strstr(c, "Animal"))                     return NOP_DETECT_ANIMAL;
+    if (strstr(c, "Package"))                    return NOP_DETECT_PACKAGE;
     return NOP_DETECT_TYPE_MAX;
 }
 
@@ -518,6 +520,7 @@ static const char *nop_evt_class(const char *c)
     if (strstr(c, "Human") || strstr(c, "Person")) return "human";
     if (strstr(c, "Face"))                         return "face";
     if (strstr(c, "Animal"))                       return "animal";
+    if (strstr(c, "Package"))                      return "package";
     return NULL;
 }
 

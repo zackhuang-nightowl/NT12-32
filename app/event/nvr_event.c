@@ -111,19 +111,22 @@ static const char *sensor_of(nop_detect_type_t type)
     }
 }
 
-/* 事件类型 → GUI_longPolling 的四类状态位。motion/human/face/car 对应 GUI 四个位图。 */
+/* 事件类型 → GUI_longPolling 状态位。八类各自独立(motion/human/face/car/animal/
+ * package/lineCross/field),对应 GUI_longPolling.txt 的 8 个 *Status 字段。 */
 static unsigned icon_of(nop_detect_type_t type)
 {
     switch (type) {
         case NOP_DETECT_MOTION:
-        case NOP_DETECT_PIXEL_CHANGE:    return NVR_ICON_MOTION;
-        case NOP_DETECT_HUMAN:
-        case NOP_DETECT_FIELD_INTRUSION:
-        case NOP_DETECT_LINE_CROSS:      return NVR_ICON_HUMAN;   /* 人/越线/入侵 → 人形 */
+        case NOP_DETECT_PIXEL_CHANGE:       return NVR_ICON_MOTION;
+        case NOP_DETECT_HUMAN:              return NVR_ICON_HUMAN;
         case NOP_DETECT_FACE:
         case NOP_DETECT_FACIAL_RECOGNITION: return NVR_ICON_FACE;
-        case NOP_DETECT_VEHICLE:         return NVR_ICON_CAR;
-        default:                         return 0;
+        case NOP_DETECT_VEHICLE:            return NVR_ICON_CAR;
+        case NOP_DETECT_ANIMAL:             return NVR_ICON_ANIMAL;
+        case NOP_DETECT_PACKAGE:            return NVR_ICON_PACKAGE;
+        case NOP_DETECT_LINE_CROSS:         return NVR_ICON_LINECROSS;
+        case NOP_DETECT_FIELD_INTRUSION:    return NVR_ICON_FIELD;
+        default:                            return 0;
     }
 }
 
@@ -394,21 +397,27 @@ int nvr_evt_ingest(nvr_evt_hub_t *h, int chn, nop_detect_type_t type, uint64_t t
 }
 
 /* GUI_longPolling 用:四类状态的**每通道位图**(bit chn=通道 chn+1 近 ICON_DECAY_S 秒内有该类事件)。 */
-void nvr_evt_masks(nvr_evt_hub_t *h, uint32_t *motion, uint32_t *human, uint32_t *face, uint32_t *car)
+void nvr_evt_masks(nvr_evt_hub_t *h, nvr_evt_mask_set_t *out)
 {
-    uint32_t m = 0, hu = 0, f = 0, c = 0;
+    nvr_evt_mask_set_t s;
+    memset(&s, 0, sizeof(s));
     if (h) {
         pthread_mutex_lock(&h->lock);
         for (int i = 0; i < EVT_MAX_CH; i++) {
             unsigned b = h->icon[i].bits;
-            if (b & NVR_ICON_MOTION) m  |= (1u << i);
-            if (b & NVR_ICON_HUMAN)  hu |= (1u << i);
-            if (b & NVR_ICON_FACE)   f  |= (1u << i);
-            if (b & NVR_ICON_CAR)    c  |= (1u << i);
+            uint32_t chbit = (1u << i);
+            if (b & NVR_ICON_MOTION)    s.motion    |= chbit;
+            if (b & NVR_ICON_HUMAN)     s.human     |= chbit;
+            if (b & NVR_ICON_FACE)      s.face      |= chbit;
+            if (b & NVR_ICON_CAR)       s.car       |= chbit;
+            if (b & NVR_ICON_ANIMAL)    s.animal    |= chbit;
+            if (b & NVR_ICON_PACKAGE)   s.package   |= chbit;
+            if (b & NVR_ICON_LINECROSS) s.linecross |= chbit;
+            if (b & NVR_ICON_FIELD)     s.field     |= chbit;
         }
         pthread_mutex_unlock(&h->lock);
     }
-    if (motion) *motion = m; if (human) *human = hu; if (face) *face = f; if (car) *car = c;
+    if (out) *out = s;
 }
 
 void nvr_evt_tick(nvr_evt_hub_t *h)

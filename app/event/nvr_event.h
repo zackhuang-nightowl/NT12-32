@@ -17,14 +17,23 @@
 extern "C" {
 #endif
 
-/* longPolling 事件位图用（GUI 自绘 OSD） */
-#define NVR_ICON_MOTION 0x1
-#define NVR_ICON_HUMAN  0x2
-#define NVR_ICON_FACE   0x4
-#define NVR_ICON_REC    0x8
-#define NVR_ICON_CAR    0x10
+/* longPolling 事件位图用（GUI 自绘 OSD）。每类对应 GUI_longPolling 一个 *Status 字段。 */
+#define NVR_ICON_MOTION    0x1
+#define NVR_ICON_HUMAN     0x2
+#define NVR_ICON_FACE      0x4
+#define NVR_ICON_REC       0x8
+#define NVR_ICON_CAR       0x10
+#define NVR_ICON_ANIMAL    0x20
+#define NVR_ICON_PACKAGE   0x40
+#define NVR_ICON_LINECROSS 0x80
+#define NVR_ICON_FIELD     0x100
 
 typedef struct nvr_evt_hub nvr_evt_hub_t;
+
+/* GUI_longPolling 八类事件电平位图(每 uint32 的 bitN=通道 N+1)。见 nop_api_doc GUI_longPolling.txt。 */
+typedef struct {
+    uint32_t motion, human, face, car, animal, package, linecross, field;
+} nvr_evt_mask_set_t;
 
 /* 事件段落盘窗口(秒):mark_event 记录 [start, start+此] 的事件段末。 */
 #define NVR_EVT_POST_RECORD_S 30
@@ -75,7 +84,7 @@ void nvr_evt_queue_meta_pull(nvr_evt_hub_t *h, int chn, uint64_t event_id, uint3
 int  nvr_evt_ingest(nvr_evt_hub_t *h, int chn, nop_detect_type_t type, uint64_t ts_ms);
 
 /* GUI_longPolling 用:motion/human/face/car 四类的每通道位图(bit chn=通道 chn+1 近期有该类事件)。 */
-void nvr_evt_masks(nvr_evt_hub_t *h, uint32_t *motion, uint32_t *human, uint32_t *face, uint32_t *car);
+void nvr_evt_masks(nvr_evt_hub_t *h, nvr_evt_mask_set_t *out);
 
 /* 周期：图标衰减（一段时间无事件后清 motion/human/face 图标）。 */
 void nvr_evt_tick(nvr_evt_hub_t *h);
