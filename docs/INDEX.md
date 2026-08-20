@@ -13,6 +13,7 @@
 | [ARCHITECTURE.md](ARCHITECTURE.md) | **分层架构、数据流、模块契约、启动时序**（2026-08-18 对照实码） |
 | [STATUS.md](STATUS.md) | **当前实现状态**（✅/🟡/❌，2026-08-20 更新） |
 | [CODE_GAP_AUDIT.md](CODE_GAP_AUDIT.md) | **代码级缺口审计**（501 / 桩 / 仅配置 / 部分 / 真机待核） |
+| [8-22完成内容.md](8-22完成内容.md) | **8-22 里程碑**：cap 清理、硬编码字段清单、AI/活动区改造 |
 | [API_HARDCODED_DEFAULTS.md](API_HARDCODED_DEFAULTS.md) | **接口硬编码默认值**（应仅来自 DB 或 IPC） |
 | [DB_SEED_DEFAULTS.md](DB_SEED_DEFAULTS.md) | **数据库出厂默认值**（16 表 seed · schema v9 · stream_type 策略） |
 | [NVR_DATA_MAP.html](NVR_DATA_MAP.html) | **数据与配置可视化**（DB · 裸盘 · 录像码流策略 · JSON · 路径树） |
