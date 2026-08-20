@@ -24,6 +24,10 @@ extern "C" {
 #include "onvif_api.h"
 }
 
+extern "C" {
+#include "onvif/mapping/onvif_coord.h"
+}
+
 #include <string.h>
 #include <stdio.h>
 
@@ -1297,10 +1301,9 @@ int nop_onvif_analytics_delete_rule(nop_onvif_device_t *device, const char *conf
     return onvif_tan_DeleteRules(&device->dev, &req, &res) ? 0 : -2;
 }
 
-/* ---- §8 CellMotion (ActiveCells base64) -------------------------------- */
-/* ActiveCells layout note (tune vs a real camera): row-major, one bit per
- * cell, bit index = row*columns + col, MSB-first within each byte, base64 of
- * ceil(columns*rows/8) bytes. Carried as a SimpleItem "ActiveCells". */
+/* ---- §8 CellMotion (ActiveCells base64 + PackBits) --------------------- */
+/* ONVIF Analytics: row-major bitmask (MSB=first cell), padded to whole bytes,
+ * PackBits-compressed (TIFF 6.0), then base64. Full 22×18 active → "0P8A8A==". */
 
 int nop_onvif_analytics_get_cellmotion(nop_onvif_device_t *device, const char *config_token,
                                        nop_onvif_cellmotion_t *io)
@@ -1330,9 +1333,24 @@ int nop_onvif_analytics_get_cellmotion(nop_onvif_device_t *device, const char *c
                 io->sensitivity = atoi(val);
             else if (!strcmp(nm, "MinCount"))
                 io->min_count = atoi(val);
-            else if (!strcmp(nm, "ActiveCells"))
-                base64_decode(val, (uint32)strlen(val), (uint8 *)io->active,
-                              (uint32)sizeof(io->active));
+            else if (!strcmp(nm, "ActiveCells")) {
+                uint8 packed[NOP_ONVIF_CELLS_MAX_BITS / 8 + 64];
+                uint8 raw[sizeof(io->active)];
+                int   plen = base64_decode(val, (uint32)strlen(val), packed,
+                                           (uint32)sizeof(packed));
+                if (plen > 0) {
+                    int rlen = nop_coord_packbits_decode(packed, plen, raw,
+                                                         (int)sizeof(raw));
+                    if (rlen > 0) {
+                        int need = (io->columns * io->rows + 7) / 8;
+                        if (need <= 0 || need > (int)sizeof(io->active))
+                            need = (int)sizeof(io->active);
+                        if (rlen > need)
+                            rlen = need;
+                        memcpy(io->active, raw, (size_t)rlen);
+                    }
+                }
+            }
         }
         found = 1;
     }
@@ -1352,7 +1370,12 @@ int nop_onvif_analytics_set_cellmotion(nop_onvif_device_t *device, const char *c
 
     char b64[NOP_ONVIF_CELLS_MAX_BITS / 8 * 2 + 8];
     char sens[16], mincnt[16];
-    base64_encode((uint8 *)in->active, (uint32)nbytes, b64, (uint32)sizeof(b64));
+    uint8 packed[NOP_ONVIF_CELLS_MAX_BITS / 8 + 64];
+    int   plen = nop_coord_packbits_encode((const unsigned char *)in->active, nbytes,
+                                           packed, (int)sizeof(packed));
+    if (plen <= 0)
+        return -1;
+    base64_encode(packed, (uint32)plen, b64, (uint32)sizeof(b64));
     snprintf(sens, sizeof(sens), "%d", in->sensitivity);
     snprintf(mincnt, sizeof(mincnt), "%d", in->min_count);
 

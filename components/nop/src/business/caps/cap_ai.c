@@ -28,7 +28,6 @@ static int clamp_channel(int channel)
 static char *g_detect_filter_json[AI_MAX_CHANNELS];
 static char *g_detect_threshold_json[AI_MAX_CHANNELS];
 static char *g_ptz_track_json[AI_MAX_CHANNELS];
-static char *g_activity_zone_json[AI_MAX_CHANNELS];
 
 /* ---- small helpers -------------------------------------------------------- */
 
@@ -220,10 +219,7 @@ static nop_status_t handle_set_channel_sensor_config(const nop_request_t *reques
         return NOP_ERR_PARAM;
     if (nop_onvif_map_is_onvif(handler_context, (int)nop_json_num(request->args, "channel", 0)))
         return nop_onvif_map_dispatch(handler_context, request, response);
-    (void)response;
-    /* Accepted and acknowledged; per-sensor enablement is applied by the HAL
-     * layer later. No stored state is required for this command today. */
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 /* ===========================================================================
@@ -241,73 +237,18 @@ static nop_status_t handle_get_activity_zone_types(const nop_request_t *request,
 /* ===========================================================================
  * NightOwl: channel trigger activity zone (zone geometry + sensitivity)
  * =========================================================================== */
-static void add_default_activity_zone(nop_json_t *content)
-{
-    nop_json_t *points = nop_json_arr();
-    int row;
-    nop_json_add_int(content, "width", 22);
-    nop_json_add_int(content, "height", 18);
-    nop_json_add_str(content, "sensitivity", "middle");
-    for (row = 0; row < 3; row++) {
-        nop_json_t *point = nop_json_arr();
-        nop_json_arr_push_int(point, 0);
-        nop_json_arr_push_int(point, (double)row);
-        nop_json_arr_push(points, point);
-    }
-    nop_json_add(content, "activityZonePoints", points);
-}
-
 static nop_status_t handle_get_trigger_activity_zone(const nop_request_t *request,
                                                      nop_response_t *response,
                                                      void *handler_context)
 {
-    int channel = clamp_channel((int)nop_json_num(request->args, "channel", 1));
-    /* ONVIF，以及 NOP 透传失败回落：先走 mapping。NOTIMPL 才用本机快照。 */
-    {
-        nop_status_t rc = nop_onvif_map_dispatch(handler_context, request, response);
-        if (rc != NOP_ERR_NOTIMPL)
-            return rc;
-    }
-    if (g_activity_zone_json[channel]) {
-        response->content = nop_json_parse(g_activity_zone_json[channel],
-                                           strlen(g_activity_zone_json[channel]));
-    }
-    if (!response->content) {
-        response->content = nop_json_obj();
-        add_default_activity_zone(response->content);
-    }
-    return NOP_OK;
+    return nop_onvif_map_dispatch(handler_context, request, response);
 }
 
 static nop_status_t handle_set_trigger_activity_zone(const nop_request_t *request,
                                                      nop_response_t *response,
                                                      void *handler_context)
 {
-    int channel = clamp_channel((int)nop_json_num(request->args, "channel", 1));
-    nop_json_t *snapshot;
-    nop_json_t *points;
-    /* ONVIF，以及 NOP 透传失败回落：Modify 已有 CellMotion。NOTIMPL 才落本机快照。 */
-    {
-        nop_status_t rc = nop_onvif_map_dispatch(handler_context, request, response);
-        if (rc != NOP_ERR_NOTIMPL)
-            return rc;
-    }
-    if (!nop_json_has(request->args, "triggers") &&
-        !nop_json_has(request->args, "activityZonePoints"))
-        return NOP_ERR_PARAM;
-    snapshot = nop_json_obj();
-    nop_json_add_int(snapshot, "width", (double)nop_json_num(request->args, "width", 22));
-    nop_json_add_int(snapshot, "height", (double)nop_json_num(request->args, "height", 18));
-    nop_json_add_str(snapshot, "sensitivity",
-                     nop_json_str(request->args, "sensitivity", "middle"));
-    points = clone_json(nop_json_get(request->args, "activityZonePoints"));
-    if (points)
-        nop_json_add(snapshot, "activityZonePoints", points);
-    else
-        nop_json_add(snapshot, "activityZonePoints", nop_json_arr());
-    store_json_snapshot(&g_activity_zone_json[channel], snapshot);
-    nop_json_free(snapshot);
-    return NOP_OK;
+    return nop_onvif_map_dispatch(handler_context, request, response);
 }
 
 /* ===========================================================================

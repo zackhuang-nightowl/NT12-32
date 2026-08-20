@@ -232,9 +232,7 @@ static nop_status_t handle_get_channel_sensor_config(const nop_request_t *reques
         return NOP_ERR_PARAM;
     if (nop_onvif_map_is_onvif(handler_context, (int)nop_json_num(request->args, "channel", 0)))
         return nop_onvif_map_dispatch(handler_context, request, response);
-    response->content = nop_json_obj();
-    add_default_sensor_config(response->content);
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 /* ===========================================================================
@@ -496,13 +494,7 @@ static nop_status_t handle_get_osd(const nop_request_t *request,
 
     if (nop_onvif_map_is_onvif(handler_context, channel))
         return nop_onvif_map_dispatch(handler_context, request, response);
-
-    response->content = load_json_snapshot(g_osd_configs_json[channel]);
-    if (!response->content) {
-        response->content = nop_json_obj();
-        add_default_osd_configs(response->content);
-    }
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 /* Build a one-entry OSDConfigs snapshot from the set args. */
@@ -529,20 +521,13 @@ static nop_status_t handle_set_osd(const nop_request_t *request,
                                    void *handler_context)
 {
     int channel;
-    nop_json_t *snapshot;
     if (!nop_json_has(request->args, "channel") || !nop_json_has(request->args, "osdToken"))
         return NOP_ERR_PARAM;
     channel = read_channel(request);
 
     if (nop_onvif_map_is_onvif(handler_context, channel))
         return nop_onvif_map_dispatch(handler_context, request, response);
-
-    snapshot = build_osd_snapshot(request);
-    store_json_snapshot(&g_osd_configs_json[channel], snapshot);
-    nop_json_free(snapshot);
-    response->content = nop_json_obj();
-    nop_json_add_str(response->content, "error", "");
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 /* ===========================================================================
@@ -553,34 +538,13 @@ static nop_status_t handle_get_channel_privacy_zone(const nop_request_t *request
                                                     void *handler_context)
 {
     int channel;
-    nop_json_t *stored;
     if (!nop_json_has(request->args, "channel"))
         return NOP_ERR_PARAM;
     channel = read_channel(request);
 
     if (nop_onvif_map_is_onvif(handler_context, channel))
         return nop_onvif_map_dispatch(handler_context, request, response);
-
-    response->content = nop_json_obj();
-    nop_json_add_int(response->content, "width", 22);
-    nop_json_add_int(response->content, "height", 18);
-    stored = load_json_snapshot(g_privacy_zone_json[channel]);
-    if (stored && nop_json_get(stored, "privacyZonePoints")) {
-        char *points_text = nop_json_print(nop_json_get(stored, "privacyZonePoints"));
-        nop_json_free(stored);
-        if (points_text) {
-            nop_json_t *points = nop_json_parse(points_text, strlen(points_text));
-            free(points_text);
-            if (points) {
-                nop_json_add(response->content, "privacyZonePoints", points);
-                return NOP_OK;
-            }
-        }
-    } else if (stored) {
-        nop_json_free(stored);
-    }
-    nop_json_add(response->content, "privacyZonePoints", nop_json_arr());
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 static nop_status_t handle_set_channel_privacy_zone(const nop_request_t *request,
@@ -588,7 +552,6 @@ static nop_status_t handle_set_channel_privacy_zone(const nop_request_t *request
                                                     void *handler_context)
 {
     int channel;
-    nop_json_t *snapshot;
     if (!nop_json_has(request->args, "channel") ||
         !nop_json_has(request->args, "privacyZonePoints"))
         return NOP_ERR_PARAM;
@@ -596,22 +559,7 @@ static nop_status_t handle_set_channel_privacy_zone(const nop_request_t *request
 
     if (nop_onvif_map_is_onvif(handler_context, channel))
         return nop_onvif_map_dispatch(handler_context, request, response);
-
-    snapshot = nop_json_obj();
-    {
-        char *points_text = nop_json_print(nop_json_get(request->args, "privacyZonePoints"));
-        if (points_text) {
-            nop_json_t *points = nop_json_parse(points_text, strlen(points_text));
-            free(points_text);
-            if (points)
-                nop_json_add(snapshot, "privacyZonePoints", points);
-        }
-    }
-    if (!nop_json_get(snapshot, "privacyZonePoints"))
-        nop_json_add(snapshot, "privacyZonePoints", nop_json_arr());
-    store_json_snapshot(&g_privacy_zone_json[channel], snapshot);
-    nop_json_free(snapshot);
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 /* ===========================================================================

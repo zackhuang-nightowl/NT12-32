@@ -4,7 +4,7 @@
  *        / get/setChannelTriggerActivityZone <-> ONVIF CellMotionDetector.
  *
  *   Types: GetRules Type 含 Motion（或 GetSupportedRules CellMotion）→ triggers=["pixelChange"].
- *   activityZonePoints [[col,row]] <-> ActiveCells bitmap (row*cols+col bit).
+ *   activityZonePoints [[col,row]] <-> ActiveCells bitmask (PackBits+base64).
  *   SET: ModifyRules 已有 CellMotion（保留 Name / Enabled / delays）；无规则才 Create。
  *   sensitivity level string <-> MinCount. Grid = width x height (default 22x18).
  */
@@ -75,7 +75,7 @@ nop_status_t onvif_map_X_NightOwl_getChannelActivityZoneTypes(nop_onvif_map_back
     (void)req;
 
     s = onvif_session_begin(be, ch);
-    if (!s) return NOP_ERR_IO;
+    if (!s) return ONVIF_MAP_FAIL;
     if (onvif_session_analytics_cfg(s, cfg, sizeof(cfg)) != 0) {
         onvif_session_end(be);
         return NOP_ERR_NOTIMPL;
@@ -106,16 +106,16 @@ nop_status_t onvif_map_X_NightOwl_getChannelTriggerActivityZone(nop_onvif_map_ba
     (void)req;
 
     s = onvif_session_begin(be, ch);
-    if (!s) return NOP_ERR_IO;
+    if (!s) return ONVIF_MAP_FAIL;
     if (onvif_session_analytics_cfg(s, cfg, sizeof(cfg)) != 0) {
-        onvif_session_end(be); return NOP_ERR_IO;
+        onvif_session_end(be); return ONVIF_MAP_FAIL;
     }
     memset(&cm, 0, sizeof(cm));
     cm.columns = NOP_COORD_DEFAULT_W;
     cm.rows    = NOP_COORD_DEFAULT_H;
     rc = nop_onvif_analytics_get_cellmotion(onvif_session_dev(s), cfg, &cm);
     onvif_session_end(be);
-    if (rc < 0) return NOP_ERR_IO;
+    if (rc < 0) return ONVIF_MAP_FAIL;
 
     for (r = 0; r < cm.rows; r++)
         for (c = 0; c < cm.columns; c++)
@@ -167,9 +167,9 @@ nop_status_t onvif_map_X_NightOwl_setChannelTriggerActivityZone(nop_onvif_map_ba
     }
 
     s = onvif_session_begin(be, ch);
-    if (!s) return NOP_ERR_IO;
+    if (!s) return ONVIF_MAP_FAIL;
     if (onvif_session_analytics_cfg(s, cfg, sizeof(cfg)) != 0) {
-        onvif_session_end(be); return NOP_ERR_IO;
+        onvif_session_end(be); return ONVIF_MAP_FAIL;
     }
     /* Preserve the camera's current Sensitivity(0..100): NOP sensitivity
      * string maps to MinCount; ActiveCells is the grid. Adapter ModifyRules
@@ -182,7 +182,7 @@ nop_status_t onvif_map_X_NightOwl_setChannelTriggerActivityZone(nop_onvif_map_ba
             cm.sensitivity = cur.sensitivity;
     }
     if (nop_onvif_analytics_set_cellmotion(onvif_session_dev(s), cfg, &cm) != 0)
-        rc = NOP_ERR_IO;
+        rc = ONVIF_MAP_FAIL;
     onvif_session_end(be);
 
     resp->content = nop_json_obj();

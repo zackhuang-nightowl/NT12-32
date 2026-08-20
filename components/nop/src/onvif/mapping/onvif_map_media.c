@@ -260,7 +260,7 @@ nop_status_t onvif_map_GUI_setChannelMediaProfiles(nop_onvif_map_backend_t *be, 
             cfg.const_bitrate = nop_json_bool(prof, "VideoEncoderConstantBitRate", false) ? 1 : 0;
 
         if (nop_onvif_media2_set_venc(onvif_session_dev(s), &cfg) != 0)
-            rc = NOP_ERR_IO;
+            rc = ONVIF_MAP_FAIL;
         else
             nop_onvif_device_venc_cache_put(onvif_session_dev(s), &cfg);
     }

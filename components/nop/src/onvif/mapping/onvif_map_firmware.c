@@ -28,7 +28,7 @@ nop_status_t onvif_map_upgradeChannelFirmware(nop_onvif_map_backend_t *be, int c
 
     s = onvif_session_begin(be, ch);
     if (!s)
-        return NOP_ERR_IO;
+        return ONVIF_MAP_FAIL;
     rc = onvif_map_rc(nop_onvif_firmware_upgrade(onvif_session_dev(s), file));
     onvif_session_end(be);
 

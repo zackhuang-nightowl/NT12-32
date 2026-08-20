@@ -96,7 +96,7 @@ nop_status_t onvif_map_X_NightOwl_getOSD(nop_onvif_map_backend_t *be, int ch,
 
     s = onvif_session_begin(be, ch);
     if (!s)
-        return NOP_ERR_IO;
+        return ONVIF_MAP_FAIL;
     {
         char myvsc[100];
         int has_vsc = (onvif_session_vsc(s, myvsc, sizeof(myvsc)) == 0);
@@ -104,7 +104,7 @@ nop_status_t onvif_map_X_NightOwl_getOSD(nop_onvif_map_backend_t *be, int ch,
                                       has_vsc ? myvsc : NULL);
         onvif_session_end(be);
         if (n < 0)
-            return NOP_ERR_IO;
+            return ONVIF_MAP_FAIL;
         /* 再按 VSC 过滤：部分相机会忽略 GetOSDs 的 ConfigurationToken */
         if (has_vsc) {
             int w = 0;
@@ -155,7 +155,7 @@ nop_status_t onvif_map_X_NightOwl_setOSD(nop_onvif_map_backend_t *be, int ch,
 
     s = onvif_session_begin(be, ch);
     if (!s)
-        return NOP_ERR_IO;
+        return ONVIF_MAP_FAIL;
 
     /* 连接时已缓存 OSD token；没有才 GetOSDs。 */
     has_vsc = (onvif_session_vsc(s, myvsc, sizeof(myvsc)) == 0);
@@ -166,7 +166,7 @@ nop_status_t onvif_map_X_NightOwl_setOSD(nop_onvif_map_backend_t *be, int ch,
     if (n < 0) {
         n = nop_onvif_media2_get_osds(onvif_session_dev(s), osds, OSD_MAX,
                                       has_vsc ? myvsc : NULL);
-        if (n < 0) { onvif_session_end(be); return NOP_ERR_IO; }
+        if (n < 0) { onvif_session_end(be); return ONVIF_MAP_FAIL; }
     }
 
     /* Match the existing OSD carrying this osdToken's identity on THIS source. */
@@ -187,7 +187,7 @@ nop_status_t onvif_map_X_NightOwl_setOSD(nop_onvif_map_backend_t *be, int ch,
         /* Disable == remove the OSD (ONVIF has no per-OSD enable flag). */
         if (found >= 0 &&
             nop_onvif_media2_delete_osd(onvif_session_dev(s), osds[found].token) != 0)
-            rc = NOP_ERR_IO;
+            rc = ONVIF_MAP_FAIL;
         else if (found >= 0)
             nop_onvif_device_osd_cache_del(onvif_session_dev(s),
                                            has_vsc ? myvsc : onvif_session_bound_source(s),
@@ -222,7 +222,7 @@ nop_status_t onvif_map_X_NightOwl_setOSD(nop_onvif_map_backend_t *be, int ch,
         snprintf(target.config_token, sizeof(target.config_token), "%s", osds[found].config_token);
         snprintf(target.plain_text, sizeof(target.plain_text), "%s", osds[found].plain_text);
         snprintf(target.img_path, sizeof(target.img_path), "%s", osds[found].img_path);
-        rc = (nop_onvif_media2_set_osd(onvif_session_dev(s), &target) == 0) ? NOP_OK : NOP_ERR_IO;
+        rc = (nop_onvif_media2_set_osd(onvif_session_dev(s), &target) == 0) ? NOP_OK : ONVIF_MAP_FAIL;
         if (rc == NOP_OK)
             nop_onvif_device_osd_cache_put(onvif_session_dev(s),
                                            has_vsc ? myvsc : onvif_session_bound_source(s),
@@ -237,7 +237,7 @@ nop_status_t onvif_map_X_NightOwl_setOSD(nop_onvif_map_backend_t *be, int ch,
         else if (n > 0)
             snprintf(target.config_token, sizeof(target.config_token), "%s", osds[0].config_token);
         rc = (nop_onvif_media2_create_osd(onvif_session_dev(s), &target,
-                                          newtok, sizeof(newtok)) == 0) ? NOP_OK : NOP_ERR_IO;
+                                          newtok, sizeof(newtok)) == 0) ? NOP_OK : ONVIF_MAP_FAIL;
         if (rc == NOP_OK) {
             if (newtok[0])
                 snprintf(target.token, sizeof(target.token), "%s", newtok);

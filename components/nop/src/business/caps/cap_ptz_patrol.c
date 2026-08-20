@@ -156,26 +156,9 @@ static nop_status_t handle_get_ptz_presets(const nop_request_t *request,
                                            nop_response_t *response,
                                            void *handler_context)
 {
-    nop_json_t *presets;
-    int         i;
-
     if (nop_onvif_map_is_onvif(handler_context, (int)nop_json_num(request->args, "channel", 0)))
         return nop_onvif_map_dispatch(handler_context, request, response);
-
-    response->content = nop_json_obj();
-    presets = nop_json_arr();
-    for (i = 0; i < CAP_PTZ_PATROL_MAX_PRESETS; ++i) {
-        nop_json_t *entry;
-        if (!s_presets[i].used)
-            continue;
-        entry = nop_json_obj();
-        nop_json_add_str(entry, "token", s_presets[i].token);
-        nop_json_add_str(entry, "name", s_presets[i].name);
-        nop_json_add_int(entry, "index", s_presets[i].index);
-        nop_json_arr_push(presets, entry);
-    }
-    nop_json_add(response->content, "presets", presets);
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 static nop_status_t handle_set_ptz_preset(const nop_request_t *request,
@@ -198,35 +181,7 @@ static nop_status_t handle_set_ptz_preset(const nop_request_t *request,
      * 新建预置位(无 token)会被误拒 400 → "preset 无法创建"。与 handle_get_ptz_presets(先委派)一致。 */
     if (nop_onvif_map_is_onvif(handler_context, channel))
         return nop_onvif_map_dispatch(handler_context, request, response);
-
-    /* --- 以下为 HAL 本地路径:需要 token(""=自动分配) 与 name。 --- */
-    if (!nop_json_has(request->args, "token"))    /* Must; "" = auto-assign */
-        return NOP_ERR_PARAM;
-    name = nop_json_str(request->args, "name", NULL);
-    if (!name)
-        return NOP_ERR_PARAM;
-
-    token  = nop_json_str(request->args, "token", "");
-    preset = preset_find(token);
-    if (!preset) {
-        preset = preset_alloc();
-        if (!preset)
-            return NOP_ERR_PARAM;
-        preset->used = 1;
-        if (token[0] != '\0')
-            copy_str(preset->token, sizeof preset->token, token);
-        else
-            make_token(preset->token, sizeof preset->token, "preset_", s_preset_seq++);
-    }
-    copy_str(preset->name, sizeof preset->name, name);
-
-    /* Save the current gimbal position as this preset (best-effort). */
-    if (ptz && ptz->set_preset)
-        ptz->set_preset(ptz->ctx, channel, preset->index);
-
-    response->content = nop_json_obj();
-    nop_json_add_str(response->content, "token", preset->token);
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 static nop_status_t handle_remove_ptz_preset(const nop_request_t *request,
@@ -248,16 +203,7 @@ static nop_status_t handle_remove_ptz_preset(const nop_request_t *request,
 
     if (nop_onvif_map_is_onvif(handler_context, channel))
         return nop_onvif_map_dispatch(handler_context, request, response);
-
-    preset = preset_find(token);
-    if (preset) {
-        if (ptz && ptz->remove_preset)
-            ptz->remove_preset(ptz->ctx, channel, preset->index);
-        memset(preset, 0, sizeof *preset);
-    }
-
-    response->content = nop_json_obj();
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 static nop_status_t handle_goto_ptz_preset(const nop_request_t *request,
@@ -281,15 +227,7 @@ static nop_status_t handle_goto_ptz_preset(const nop_request_t *request,
 
     if (nop_onvif_map_is_onvif(handler_context, channel))
         return nop_onvif_map_dispatch(handler_context, request, response);
-
-    preset = preset_find(token);
-    if (!preset)
-        return NOP_ERR_PARAM;             /* unknown preset token */
-    if (!ptz || !ptz->goto_preset)
-        return NOP_ERR_NOTIMPL;           /* pure action needs the HAL */
-
-    response->content = nop_json_obj();
-    return ptz->goto_preset(ptz->ctx, channel, preset->index);
+    return NOP_ERR_NOTIMPL;
 }
 
 /* ---- home handlers -------------------------------------------------------- */
@@ -308,12 +246,7 @@ static nop_status_t handle_set_ptz_home(const nop_request_t *request,
 
     if (nop_onvif_map_is_onvif(handler_context, channel))
         return nop_onvif_map_dispatch(handler_context, request, response);
-
-    if (ptz && ptz->set_home)
-        ptz->set_home(ptz->ctx, channel);
-
-    response->content = nop_json_obj();
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 static nop_status_t handle_goto_ptz_home(const nop_request_t *request,
@@ -332,11 +265,7 @@ static nop_status_t handle_goto_ptz_home(const nop_request_t *request,
 
     if (nop_onvif_map_is_onvif(handler_context, channel))
         return nop_onvif_map_dispatch(handler_context, request, response);
-
-    if (!ptz || !ptz->goto_home)
-        return NOP_ERR_NOTIMPL;
-    response->content = nop_json_obj();
-    return ptz->goto_home(ptz->ctx, channel);
+    return NOP_ERR_NOTIMPL;
 }
 
 /* ---- patrol handlers ------------------------------------------------------ */
@@ -370,36 +299,16 @@ static nop_status_t handle_get_ptz_capabilities(const nop_request_t *request,
 {
     if (nop_onvif_map_is_onvif(handler_context, (int)nop_json_num(request->args, "channel", 0)))
         return nop_onvif_map_dispatch(handler_context, request, response);
-
-    response->content = nop_json_obj();
-    nop_json_add(response->content, "ptz", nop_json_arr());
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 static nop_status_t handle_get_ptz_patrols(const nop_request_t *request,
                                            nop_response_t *response,
                                            void *handler_context)
 {
-    const nop_business_context_t *context = (const nop_business_context_t *)handler_context;
-    nop_ptz_patrol_t             *engine = context ? (nop_ptz_patrol_t *)context->ptz_patrol : NULL;
-    int                           engine_running = engine ? nop_ptz_patrol_is_running(engine) : 0;
-    nop_json_t                   *patrols;
-    int                           i;
-
     if (nop_onvif_map_is_onvif(handler_context, (int)nop_json_num(request->args, "channel", 0)))
         return nop_onvif_map_dispatch(handler_context, request, response);
-
-    response->content = nop_json_obj();
-    patrols = nop_json_arr();
-    for (i = 0; i < CAP_PTZ_PATROL_MAX_PATROLS; ++i) {
-        if (!s_patrols[i].used)
-            continue;
-        /* Only the patrol whose token is the active one is reported Running. */
-        emit_patrol(patrols, &s_patrols[i],
-                    engine_running && !strcmp(s_patrols[i].token, s_active_patrol));
-    }
-    nop_json_add(response->content, "patrols", patrols);
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 static nop_status_t handle_set_ptz_patrol(const nop_request_t *request,
@@ -417,32 +326,7 @@ static nop_status_t handle_set_ptz_patrol(const nop_request_t *request,
     /* ONVIF：无 token → CreatePresetTour + ModifyPresetTour；有 token → Modify。 */
     if (nop_onvif_map_is_onvif(handler_context, (int)nop_json_num(request->args, "channel", 0)))
         return nop_onvif_map_dispatch(handler_context, request, response);
-
-    spots = nop_json_get(request->args, "spots");
-    if (!spots || !nop_json_is_arr(spots))
-        return NOP_ERR_PARAM;
-    token     = nop_json_str(request->args, "token", NULL);
-    has_token = (token && token[0]);
-    if (has_token) {
-        patrol = patrol_find(token);
-        if (!patrol)
-            return NOP_ERR_PARAM;
-    } else {
-        patrol = patrol_alloc();
-        if (!patrol)
-            return NOP_ERR_PARAM;
-        patrol->used = 1;
-        make_token(patrol->token, sizeof patrol->token, "patrol_", s_patrol_seq++);
-    }
-    name = nop_json_str(request->args, "name", NULL);
-    if (name)
-        copy_str(patrol->name, sizeof patrol->name, name);
-    patrol->spot_count = parse_spots(spots, patrol->spots, CAP_PTZ_PATROL_MAX_SPOTS);
-
-    response->content = nop_json_obj();
-    if (response->content)
-        nop_json_add_str(response->content, "token", patrol->token);
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 static nop_status_t handle_operate_ptz_patrol(const nop_request_t *request,
@@ -460,39 +344,7 @@ static nop_status_t handle_operate_ptz_patrol(const nop_request_t *request,
         return NOP_ERR_PARAM;
     if (nop_onvif_map_is_onvif(handler_context, (int)nop_json_num(request->args, "channel", 0)))
         return nop_onvif_map_dispatch(handler_context, request, response);
-    token = nop_json_str(request->args, "token", NULL);
-    if (!token || token[0] == '\0')
-        return NOP_ERR_PARAM;
-    op = nop_json_str(request->args, "op", NULL);
-    if (!op || op[0] == '\0')
-        return NOP_ERR_PARAM;
-    channel = (int)nop_json_num(request->args, "channel", 0);
-
-    patrol = patrol_find(token);
-    if (!patrol)
-        return NOP_ERR_PARAM;
-
-    response->content = nop_json_obj();
-
-    /* Drive the execution engine when attached; otherwise acknowledge. */
-    if (engine) {
-        if (!strcmp(op, "start")) {
-            /* start() replaces any running patrol, so this token becomes active
-             * only if it actually starts (propagate 501 when there is no HAL). */
-            nop_status_t status = nop_ptz_patrol_start(engine, channel,
-                                                       patrol->spots, patrol->spot_count);
-            if (status != NOP_OK)
-                return status;
-            copy_str(s_active_patrol, sizeof s_active_patrol, patrol->token);
-        } else if (!strcmp(op, "stop")) {
-            /* Stop only if THIS patrol is the one running. */
-            if (!strcmp(s_active_patrol, patrol->token)) {
-                nop_ptz_patrol_stop(engine);
-                s_active_patrol[0] = '\0';
-            }
-        }
-    }
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 static nop_status_t handle_remove_ptz_patrol(const nop_request_t *request,
@@ -508,22 +360,7 @@ static nop_status_t handle_remove_ptz_patrol(const nop_request_t *request,
         return NOP_ERR_PARAM;
     if (nop_onvif_map_is_onvif(handler_context, (int)nop_json_num(request->args, "channel", 0)))
         return nop_onvif_map_dispatch(handler_context, request, response);
-    token = nop_json_str(request->args, "token", NULL);
-    if (!token || token[0] == '\0')
-        return NOP_ERR_PARAM;
-
-    patrol = patrol_find(token);
-    if (patrol) {
-        /* Stop the engine only if the removed patrol is the one running. */
-        if (engine && !strcmp(s_active_patrol, patrol->token)) {
-            nop_ptz_patrol_stop(engine);
-            s_active_patrol[0] = '\0';
-        }
-        memset(patrol, 0, sizeof *patrol);
-    }
-
-    response->content = nop_json_obj();
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 /* ---- registration --------------------------------------------------------- */

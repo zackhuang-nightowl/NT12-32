@@ -124,14 +124,14 @@ nop_status_t onvif_map_getPtzCapabilities(nop_onvif_map_backend_t *be, int ch,
     (void)req;
 
     s = onvif_session_begin(be, ch);
-    if (!s) return NOP_ERR_IO;
+    if (!s) return ONVIF_MAP_FAIL;
     memset(&dc, 0, sizeof(dc));
     rc = nop_onvif_get_device_caps(onvif_session_dev(s), onvif_session_bound_source(s), &dc);
     onvif_session_end(be);
     fprintf(stderr, "[onvif_map] getPtzCapabilities ch=%d get_caps rc=%d has_ptz=%d preset=%d(max=%d) "
                     "patrol=%d(max=%d) focus=%d\n",
             ch, rc, dc.has_ptz, dc.ptz_preset, dc.ptz_max_presets, dc.ptz_patrol, dc.ptz_max_tours, dc.ptz_focus);
-    if (rc != 0) return NOP_ERR_IO;
+    if (rc != 0) return ONVIF_MAP_FAIL;
 
     /* No PTZ feature at all → 501 NOT_SUPPORT (per doc Response 2). */
     if (!dc.has_ptz && !dc.ptz_pan && !dc.ptz_tilt && !dc.ptz_zoom &&

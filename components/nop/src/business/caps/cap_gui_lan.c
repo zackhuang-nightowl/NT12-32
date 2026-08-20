@@ -158,27 +158,18 @@ static nop_status_t handle_get_channel_media_profiles(const nop_request_t *reque
         return NOP_ERR_PARAM;
     if (nop_onvif_map_is_onvif(handler_context, (int)nop_json_num(request->args, "channel", 0)))
         return nop_onvif_map_dispatch(handler_context, request, response);
-    response->content = nop_json_obj();
-    nop_json_add(response->content, "profiles", nop_json_arr());
-    nop_json_add_str(response->content, "error", "");
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 static nop_status_t handle_set_channel_media_profiles(const nop_request_t *request,
                                                       nop_response_t *response,
                                                       void *handler_context)
 {
-    nop_json_t *profiles;
     if (!nop_json_has(request->args, "channel"))
         return NOP_ERR_PARAM;
     if (nop_onvif_map_is_onvif(handler_context, (int)nop_json_num(request->args, "channel", 0)))
         return nop_onvif_map_dispatch(handler_context, request, response);
-    profiles = nop_json_get(request->args, "profiles");
-    if (!profiles || !nop_json_is_arr(profiles))
-        return NOP_ERR_PARAM;
-    response->content = nop_json_obj();
-    nop_json_add_str(response->content, "error", "");
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 /* ===========================================================================
@@ -231,8 +222,7 @@ static nop_status_t handle_upgrade_channel_firmware(const nop_request_t *request
         return NOP_ERR_PARAM;
     if (nop_onvif_map_is_onvif(handler_context, (int)nop_json_num(request->args, "channel", 0)))
         return nop_onvif_map_dispatch(handler_context, request, response);
-    (void)response;
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 /* ===========================================================================

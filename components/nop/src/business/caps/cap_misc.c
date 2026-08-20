@@ -468,8 +468,7 @@ static nop_status_t handle_upgrade_channel_firmware(const nop_request_t *request
         return NOP_ERR_PARAM;
     if (nop_onvif_map_is_onvif(handler_context, (int)nop_json_num(request->args, "channel", 0)))
         return nop_onvif_map_dispatch(handler_context, request, response);
-    (void)response;
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 static nop_status_t handle_check_channel_upgrade_status(const nop_request_t *request,

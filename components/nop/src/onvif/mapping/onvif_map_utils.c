@@ -4,6 +4,7 @@
  *        ONVIF dependency — always compiled (no NOP_ONVIF_MAP gate needed).
  */
 #include "onvif/mapping/onvif_map_utils.h"
+#include "onvif/mapping/onvif_map_internal.h"
 #include "onvif/mapping/nop_onvif_map.h"
 
 #include <stdio.h>
@@ -46,7 +47,7 @@ void onvif_map_dir_to_velocity(const char *dir, float mag,
 
 nop_status_t onvif_map_rc(int onvif_rc)
 {
-    return onvif_rc == 0 ? NOP_OK : NOP_ERR_IO;
+    return onvif_rc == 0 ? NOP_OK : ONVIF_MAP_FAIL;
 }
 
 const char *onvif_map_int_token(int id, char *buf, unsigned size)

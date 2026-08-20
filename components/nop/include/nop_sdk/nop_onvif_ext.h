@@ -417,8 +417,8 @@ int nop_onvif_device_ai_cache_put(nop_onvif_device_t *device, const char *source
 
 /**
  * CellMotion rule, flattened. @c active is a row-major bit-per-cell grid of
- * @c columns x @c rows (bit index = row*columns + col, MSB-first per byte),
- * mirroring the ONVIF ActiveCells base64. Caller presets columns/rows.
+ * @c columns x @c rows (bit index = row*columns + col, MSB-first per byte).
+ * Wire format: PackBits (TIFF 6.0) then base64 in ActiveCells SimpleItem.
  */
 typedef struct nop_onvif_cellmotion {
     int columns;

@@ -13,6 +13,10 @@
  *     top-left, default W=22 columns, H=18 rows. Used by *PrivacyZone /
  *     *TriggerActivityZone.
  *
+ * Empty geometry (NOPMappingONVIF.md §9): ONVIF stores every point as (-1,1);
+ * GET mappers return NOP [] (line/area/privacyZonePoints group). SET with NOP []
+ * writes (-1,1) for each required point.
+ *
  * All formulas are the exact ones from the spec's "公式汇总表" (§1.3).
  */
 #ifndef NOP_ONVIF_COORD_H
@@ -30,6 +34,11 @@ extern "C" {
  *  Mappers translate this to a domain-specific default (disable rule / full
  *  frame), never a degenerate zero-area polygon — see NOPMappingONVIF.md §9 ps. */
 #define NOP_COORD_EMPTY (-1)
+
+/** ONVIF placeholder for unconfigured point geometry (NOPMappingONVIF.md §9). */
+#define NOP_COORD_UNCONFIGURED_X (-1.0f)
+#define NOP_COORD_UNCONFIGURED_Y ( 1.0f)
+#define NOP_COORD_UNCONFIGURED_EPS 0.001f
 
 /** A normalized ONVIF point: x,y in [-1,1], center origin, +y up. */
 typedef struct nop_coord_pointf {
@@ -60,6 +69,36 @@ void nop_coord_norm_to_thousandths(float onx, float ony, int *nx, int *ny);
  *   ONVIF_x = NOP_x/500 - 1,  ONVIF_y = 1 - NOP_y/500
  */
 void nop_coord_thousandths_to_norm(int nx, int ny, float *onx, float *ony);
+
+/**
+ * True when @p count<=0 or every ONVIF point is the unconfigured sentinel (-1,1).
+ * GET mappers use this to emit NOP [] instead of converted coordinates.
+ */
+int nop_coord_norm_points_unconfigured(const float *xs, const float *ys, int count);
+
+/** Convenience wrapper for @ref nop_coord_pointf_t arrays. */
+int nop_coord_points_unconfigured(const nop_coord_pointf_t *pts, int count);
+
+/** Fill @p count points with the unconfigured sentinel (-1,1) for ONVIF SET. */
+void nop_coord_fill_unconfigured(float *xs, float *ys, int count);
+
+/* ======================================================================== */
+/* ActiveCells / MotionInCells — PackBits (TIFF 6.0 / ONVIF Analytics)    */
+/* ======================================================================== */
+
+/**
+ * Expand PackBits-compressed ONVIF cell bitmask into @p out (max @p out_max bytes).
+ * @return unpacked length (>0), 0 if empty input, negative on error.
+ */
+int nop_coord_packbits_decode(const unsigned char *in, int in_len,
+                              unsigned char *out, int out_max);
+
+/**
+ * Compress raw cell bitmask with PackBits (TIFF 6.0).
+ * @return packed length (>0), negative on error.
+ */
+int nop_coord_packbits_encode(const unsigned char *in, int in_len,
+                              unsigned char *out, int out_max);
 
 /* ======================================================================== */
 /* Privacy / Activity zones:  NOP macroblock grid <-> ONVIF normalized rect */

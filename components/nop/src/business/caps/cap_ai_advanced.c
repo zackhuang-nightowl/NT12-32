@@ -30,8 +30,6 @@ static int clamp_channel(int channel)
 }
 
 /* ---- per-channel snapshot state (indexed by clamped channel) -------------- */
-static char *g_line_cross_json[AI_ADV_MAX_CHANNELS];
-static char *g_field_intrusion_json[AI_ADV_MAX_CHANNELS];
 static char *g_event_ext_info_config_json[AI_ADV_MAX_CHANNELS];
 
 /* ---- small helpers -------------------------------------------------------- */
@@ -102,82 +100,15 @@ static nop_status_t handle_get_channel_ai_capabilities(const nop_request_t *requ
                                                        void *handler_context)
 {
     int channel = clamp_channel((int)nop_json_num(request->args, "channel", 1));
-    nop_json_t *object_detection;
-    nop_json_t *ruled_detection;
-    nop_json_t *line_cross;
-    nop_json_t *line_class_filter;
-    nop_json_t *direction;
-    nop_json_t *field_intrusion;
-    nop_json_t *field_class_filter;
 
     if (nop_onvif_map_is_onvif(handler_context, channel))
         return nop_onvif_map_dispatch(handler_context, request, response);
-
-    response->content = nop_json_obj();
-
-    /* objectDetection: one entry per supported object type. */
-    object_detection = nop_json_obj();
-    nop_json_add(object_detection, nop_detect_type_name(NOP_DETECT_HUMAN),
-                 make_object_detection_caps());
-    nop_json_add(object_detection, nop_detect_type_name(NOP_DETECT_VEHICLE),
-                 make_object_detection_caps());
-    nop_json_add(object_detection, nop_detect_type_name(NOP_DETECT_ANIMAL),
-                 make_object_detection_caps());
-    nop_json_add(object_detection, nop_detect_type_name(NOP_DETECT_PACKAGE),
-                 make_object_detection_caps());
-    nop_json_add(response->content, "objectDetection", object_detection);
-
-    /* ruledDetection: lineCross + fieldIntrusion + objectMissing. */
-    ruled_detection = nop_json_obj();
-
-    line_cross = nop_json_obj();
-    nop_json_add_int(line_cross, "maxLineCount", 2);
-    nop_json_add_int(line_cross, "maxPointsPerLine", 2);
-    line_class_filter = nop_json_arr();
-    nop_json_arr_push_str(line_class_filter, nop_detect_type_name(NOP_DETECT_HUMAN));
-    nop_json_arr_push_str(line_class_filter, nop_detect_type_name(NOP_DETECT_VEHICLE));
-    nop_json_add(line_cross, "classFilter", line_class_filter);
-    direction = nop_json_arr();
-    nop_json_arr_push_str(direction, "AB");
-    nop_json_arr_push_str(direction, "BA");
-    nop_json_arr_push_str(direction, "BOTH");
-    nop_json_add(line_cross, "direction", direction);
-    nop_json_add(ruled_detection, nop_detect_type_name(NOP_DETECT_LINE_CROSS), line_cross);
-
-    field_intrusion = nop_json_obj();
-    nop_json_add_int(field_intrusion, "maxFieldCount", 2);
-    nop_json_add_int(field_intrusion, "maxVerticesPerField", 6);
-    field_class_filter = nop_json_arr();
-    nop_json_arr_push_str(field_class_filter, nop_detect_type_name(NOP_DETECT_HUMAN));
-    nop_json_arr_push_str(field_class_filter, nop_detect_type_name(NOP_DETECT_VEHICLE));
-    nop_json_add(field_intrusion, "classFilter", field_class_filter);
-    nop_json_add(ruled_detection, nop_detect_type_name(NOP_DETECT_FIELD_INTRUSION),
-                 field_intrusion);
-
-    nop_json_add(ruled_detection, "objectMissing", nop_json_obj());
-
-    nop_json_add(response->content, "ruledDetection", ruled_detection);
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 /* ===========================================================================
  * Channel line-cross detect (rules: enable/name/line/direction/triggers)
  * =========================================================================== */
-
-/* Append one default (disabled, empty-line) line-cross rule named @p name. */
-static void add_default_line_cross_rule(nop_json_t *rules, const char *name)
-{
-    nop_json_t *rule     = nop_json_obj();
-    nop_json_t *line     = nop_json_arr();
-    nop_json_t *triggers = nop_json_arr();
-    nop_json_add_bool(rule, "enable", false);
-    nop_json_add_str(rule, "name", name);
-    nop_json_add(rule, "line", line);
-    nop_json_add_str(rule, "direction", "BOTH");
-    add_default_triggers(triggers);
-    nop_json_add(rule, "triggers", triggers);
-    nop_json_arr_push(rules, rule);
-}
 
 static nop_status_t handle_get_channel_line_cross_detect(const nop_request_t *request,
                                                          nop_response_t *response,
@@ -186,18 +117,8 @@ static nop_status_t handle_get_channel_line_cross_detect(const nop_request_t *re
     int channel = clamp_channel((int)nop_json_num(request->args, "channel", 1));
     if (nop_onvif_map_is_onvif(handler_context, channel))
         return nop_onvif_map_dispatch(handler_context, request, response);
-    if (g_line_cross_json[channel]) {
-        response->content = nop_json_parse(g_line_cross_json[channel],
-                                           strlen(g_line_cross_json[channel]));
-    }
-    if (!response->content) {
-        nop_json_t *rules = nop_json_arr();
-        response->content = nop_json_obj();
-        add_default_line_cross_rule(rules, "line1");
-        add_default_line_cross_rule(rules, "line2");
-        nop_json_add(response->content, "rules", rules);
-    }
-    return NOP_OK;
+    /* NOP 相机由 NVR 8089 透传；此处仅服务 ONVIF mapping。 */
+    return NOP_ERR_NOTIMPL;
 }
 
 static nop_status_t handle_set_channel_line_cross_detect(const nop_request_t *request,
@@ -205,43 +126,14 @@ static nop_status_t handle_set_channel_line_cross_detect(const nop_request_t *re
                                                          void *handler_context)
 {
     int channel = clamp_channel((int)nop_json_num(request->args, "channel", 1));
-    nop_json_t *snapshot;
-    nop_json_t *rules;
     if (nop_onvif_map_is_onvif(handler_context, channel))
         return nop_onvif_map_dispatch(handler_context, request, response);
-    if (!nop_json_has(request->args, "rules"))
-        return NOP_ERR_PARAM;
-    snapshot = nop_json_obj();
-    rules = clone_json(nop_json_get(request->args, "rules"));
-    if (rules)
-        nop_json_add(snapshot, "rules", rules);
-    else
-        nop_json_add(snapshot, "rules", nop_json_arr());
-    store_json_snapshot(&g_line_cross_json[channel], snapshot);
-    nop_json_free(snapshot);
-    response->content = nop_json_obj();
-    nop_json_add_str(response->content, "error", "");
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 /* ===========================================================================
  * Channel field-intrusion detect (rules: enable/name/area/timeThreshold/triggers)
  * =========================================================================== */
-
-/* Append one default (disabled, empty-area) field-intrusion rule named @p name. */
-static void add_default_field_intrusion_rule(nop_json_t *rules, const char *name)
-{
-    nop_json_t *rule     = nop_json_obj();
-    nop_json_t *area     = nop_json_arr();
-    nop_json_t *triggers = nop_json_arr();
-    nop_json_add_bool(rule, "enable", false);
-    nop_json_add_str(rule, "name", name);
-    nop_json_add(rule, "area", area);
-    nop_json_add_int(rule, "timeThreshold", 0);
-    add_default_triggers(triggers);
-    nop_json_add(rule, "triggers", triggers);
-    nop_json_arr_push(rules, rule);
-}
 
 static nop_status_t handle_get_channel_field_intrusion_detect(const nop_request_t *request,
                                                               nop_response_t *response,
@@ -250,18 +142,7 @@ static nop_status_t handle_get_channel_field_intrusion_detect(const nop_request_
     int channel = clamp_channel((int)nop_json_num(request->args, "channel", 1));
     if (nop_onvif_map_is_onvif(handler_context, channel))
         return nop_onvif_map_dispatch(handler_context, request, response);
-    if (g_field_intrusion_json[channel]) {
-        response->content = nop_json_parse(g_field_intrusion_json[channel],
-                                           strlen(g_field_intrusion_json[channel]));
-    }
-    if (!response->content) {
-        nop_json_t *rules = nop_json_arr();
-        response->content = nop_json_obj();
-        add_default_field_intrusion_rule(rules, "area1");
-        add_default_field_intrusion_rule(rules, "area2");
-        nop_json_add(response->content, "rules", rules);
-    }
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 static nop_status_t handle_set_channel_field_intrusion_detect(const nop_request_t *request,
@@ -269,23 +150,9 @@ static nop_status_t handle_set_channel_field_intrusion_detect(const nop_request_
                                                               void *handler_context)
 {
     int channel = clamp_channel((int)nop_json_num(request->args, "channel", 1));
-    nop_json_t *snapshot;
-    nop_json_t *rules;
     if (nop_onvif_map_is_onvif(handler_context, channel))
         return nop_onvif_map_dispatch(handler_context, request, response);
-    if (!nop_json_has(request->args, "rules"))
-        return NOP_ERR_PARAM;
-    snapshot = nop_json_obj();
-    rules = clone_json(nop_json_get(request->args, "rules"));
-    if (rules)
-        nop_json_add(snapshot, "rules", rules);
-    else
-        nop_json_add(snapshot, "rules", nop_json_arr());
-    store_json_snapshot(&g_field_intrusion_json[channel], snapshot);
-    nop_json_free(snapshot);
-    response->content = nop_json_obj();
-    nop_json_add_str(response->content, "error", "");
-    return NOP_OK;
+    return NOP_ERR_NOTIMPL;
 }
 
 /* ===========================================================================

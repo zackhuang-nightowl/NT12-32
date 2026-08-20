@@ -11,6 +11,9 @@
 #include "onvif/mapping/nop_onvif_map.h"
 #include "nop_sdk/nop_onvif.h"        /* nop_onvif_device_t + client ABI */
 
+/** ONVIF 会话/SOAP 失败 → 501，禁止 NVR 侧伪造默认数据。 */
+#define ONVIF_MAP_FAIL NOP_ERR_NOTIMPL
+
 /* ======================================================================== */
 /* Per-channel ONVIF session                                                */
 /* ======================================================================== */

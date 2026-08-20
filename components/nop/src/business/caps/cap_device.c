@@ -50,8 +50,12 @@ static nop_status_t handle_get_device_capabilities(const nop_request_t *request,
 
     /* If a specific ONVIF-camera channel is requested, return just that camera's
      * capabilities via the ONVIF mapping (device-level aggregation stays native). */
-    if (nop_onvif_map_is_onvif(handler_context, (int)nop_json_num(request->args, "channel", 0)))
-        return nop_onvif_map_dispatch(handler_context, request, response);
+    if (nop_json_has(request->args, "channel")) {
+        int ch = (int)nop_json_num(request->args, "channel", 0);
+        if (nop_onvif_map_is_onvif(handler_context, ch))
+            return nop_onvif_map_dispatch(handler_context, request, response);
+        return NOP_ERR_NOTIMPL;
+    }
 
     if (video && video->channel_count)
         channel_count = video->channel_count(video->ctx);

@@ -4,6 +4,7 @@
  *
  *   X_NightOwl_getChannelPrivacyZone -> GetMasks; each mask polygon (normalized)
  *       -> AABB -> grid cells; union -> privacyZonePoints [[col,row],...].
+ *       Polygon 各点均为 (-1,1) → 该组不出现在 privacyZonePoints（NOP []）。
  *   X_NightOwl_setChannelPrivacyZone -> privacyZonePoints -> cell AABB -> ONVIF
  *       4-corner polygon; replace masks (delete existing, create one). Empty
  *       point list disables privacy (delete only), never a zero-area polygon.
@@ -60,13 +61,13 @@ nop_status_t onvif_map_X_NightOwl_getChannelPrivacyZone(nop_onvif_map_backend_t 
 
     s = onvif_session_begin(be, ch);
     if (!s)
-        return NOP_ERR_IO;
+        return ONVIF_MAP_FAIL;
     has_vsc = (onvif_session_vsc(s, myvsc, sizeof(myvsc)) == 0);
     n = nop_onvif_media2_get_masks(onvif_session_dev(s), masks, PRIV_MAX_MASK,
                                   has_vsc ? myvsc : NULL);
     onvif_session_end(be);
     if (n < 0)
-        return NOP_ERR_IO;
+        return ONVIF_MAP_FAIL;
 
     /* One ONVIF Mask == one privacy rectangle == one group of cells. Emit each
      * mask as its own [[col,row],...] group so the client keeps them distinct
@@ -88,6 +89,8 @@ nop_status_t onvif_map_X_NightOwl_getChannelPrivacyZone(nop_onvif_map_backend_t 
             pts[k].x = masks[i].x[k];
             pts[k].y = masks[i].y[k];
         }
+        if (nop_coord_points_unconfigured(pts, masks[i].point_count))
+            continue;
         if (nop_coord_points_bounds(pts, masks[i].point_count,
                                     &xmin, &xmax, &ymin, &ymax) != 0)
             continue;
@@ -135,7 +138,7 @@ nop_status_t onvif_map_X_NightOwl_setChannelPrivacyZone(nop_onvif_map_backend_t 
 
     s = onvif_session_begin(be, ch);
     if (!s)
-        return NOP_ERR_IO;
+        return ONVIF_MAP_FAIL;
 
     /* Bind to THIS source's VideoSourceConfiguration; clear only this source's
      * masks (§10 — must not wipe other sources' privacy zones). */
@@ -158,7 +161,7 @@ nop_status_t onvif_map_X_NightOwl_setChannelPrivacyZone(nop_onvif_map_backend_t 
         /* No config token -> cannot create; report failure rather than a silent
          * "privacy cleared" (the delete-all above already ran). */
         onvif_session_end(be);
-        return NOP_ERR_IO;
+        return ONVIF_MAP_FAIL;
     }
 
     /* Each group is one rectangle -> one axis-aligned Mask. Empty list == all
@@ -188,7 +191,7 @@ nop_status_t onvif_map_X_NightOwl_setChannelPrivacyZone(nop_onvif_map_backend_t 
             if (nop_onvif_media2_create_mask(onvif_session_dev(s), config_token,
                                              xs, ys, 4, 1, "Color",
                                              tok, sizeof(tok)) != 0) {
-                rc = NOP_ERR_IO;
+                rc = ONVIF_MAP_FAIL;
                 continue;
             }
             if (ncreated < PRIV_MAX_ZONES) {

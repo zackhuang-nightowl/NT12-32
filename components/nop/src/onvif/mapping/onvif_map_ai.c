@@ -3,9 +3,10 @@
  * @brief §9 Smart AI handlers — NOP AI_*ChannelLineCrossDetect /
  *        *FieldIntrusionDetect <-> ONVIF Analytics Line/Field rules.
  *
- *   get: GetRules → rules[]（Enabled 缺省 true；几何 ONVIF [-1,1] → NOP 千分位）
+ *   get: GetRules → rules[]（Enabled 缺省 true；几何 ONVIF [-1,1] → NOP 千分位；
+ *        各点均为 (-1,1) 或未配置 → line/area 回 []，见 nop_coord_*_unconfigured）
  *   set: 按 Name ModifyRules（写 Enabled/ClassFilter/几何）；没有则 Create。
- *        不 DeleteRules。空 line/area → 全幅 [-1,1]。
+ *        不 DeleteRules。空 line/area → 各点 (-1,1)（nop_coord_fill_unconfigured）。
  *
  * ClassFilter <-> triggers uses the single table below (also used by §8). The
  * geometry transform is onvif_coord.*; values otherwise pass straight through.
@@ -126,18 +127,8 @@ static nop_json_t *csv_to_triggers(const char *csv)
 
 static void default_fullframe_geom(nop_onvif_rule_t *r, int is_line)
 {
-    /* NOPMappingONVIF.md §9：空 line/area → 几何落到 ONVIF 归一化 [-1,1] 全幅。 */
-    if (is_line) {
-        r->x[0] = -1.0f; r->y[0] =  1.0f;
-        r->x[1] =  1.0f; r->y[1] = -1.0f;
-        r->point_count = 2;
-    } else {
-        r->x[0] = -1.0f; r->y[0] =  1.0f;
-        r->x[1] =  1.0f; r->y[1] =  1.0f;
-        r->x[2] =  1.0f; r->y[2] = -1.0f;
-        r->x[3] = -1.0f; r->y[3] = -1.0f;
-        r->point_count = 4;
-    }
+    r->point_count = is_line ? 2 : 4;
+    nop_coord_fill_unconfigured(r->x, r->y, r->point_count);
 }
 
 static int find_rule_by_name(const nop_onvif_rule_t *rules, int n, const char *name)
@@ -161,61 +152,36 @@ static nop_status_t ai_get_rules(nop_onvif_map_backend_t *be, int ch,
     char             cfg[100];
     nop_json_t      *arr;
     int              n, i, k;
-    int              is_line = (strcmp(onvif_type, "LineDetector") == 0);
 
     s = onvif_session_begin(be, ch);
-    if (!s) return NOP_ERR_IO;
+    if (!s) return ONVIF_MAP_FAIL;
     if (onvif_session_analytics_cfg(s, cfg, sizeof(cfg)) != 0) {
-        onvif_session_end(be); return NOP_ERR_IO;
+        onvif_session_end(be); return ONVIF_MAP_FAIL;
     }
     n = nop_onvif_analytics_get_rules(onvif_session_dev(s), cfg, onvif_type,
                                       rules, AI_MAX_RULES);
-    /* @fixed=false 且 GetRules 为空：预创建 maxInstances 条（Enabled=false，全幅几何）。
-     * fixed=true 时 Create 会失败，保持空列表。 */
-    if (n == 0) {
-        nop_onvif_ai_caps_t caps;
-        int ncreate = 0;
-        if (nop_onvif_analytics_get_ai_caps(onvif_session_dev(s), cfg, &caps) == 0) {
-            if (is_line && caps.line_present)
-                ncreate = caps.line_max_instances > 0 ? caps.line_max_instances : 1;
-            else if (!is_line && caps.field_present)
-                ncreate = caps.field_max_instances > 0 ? caps.field_max_instances : 1;
-        }
-        if (ncreate > AI_MAX_RULES) ncreate = AI_MAX_RULES;
-        for (i = 0; i < ncreate; i++) {
-            nop_onvif_rule_t r;
-            memset(&r, 0, sizeof(r));
-            snprintf(r.name, sizeof(r.name), "%s_%d",
-                     is_line ? "LineCross" : "FieldIntrusion", i + 1);
-            snprintf(r.type, sizeof(r.type), "%s", onvif_type);
-            r.enabled = 0;
-            if (is_line)
-                snprintf(r.direction, sizeof(r.direction), "%s", "Any");
-            default_fullframe_geom(&r, is_line);
-            nop_onvif_analytics_create_rule(onvif_session_dev(s), cfg, &r);
-        }
-        if (ncreate > 0)
-            n = nop_onvif_analytics_get_rules(onvif_session_dev(s), cfg, onvif_type,
-                                              rules, AI_MAX_RULES);
-    }
     onvif_session_end(be);
-    if (n < 0) return NOP_ERR_IO;
+    if (n < 0) return ONVIF_MAP_FAIL;
 
     arr = nop_json_arr();
     for (i = 0; i < n; i++) {
         nop_json_t *e = nop_json_obj();
-        nop_json_t *pts = nop_json_arr();
         nop_json_add_bool(e, "enable", rules[i].enabled != 0);
         nop_json_add_str(e, "name", rules[i].name);
-        for (k = 0; k < rules[i].point_count; k++) {
-            nop_json_t *pt = nop_json_obj();
-            int nx, ny;
-            nop_coord_norm_to_thousandths(rules[i].x[k], rules[i].y[k], &nx, &ny);
-            nop_json_add_int(pt, "x", nx);
-            nop_json_add_int(pt, "y", ny);
-            nop_json_arr_push(pts, pt);
+        if (nop_coord_norm_points_unconfigured(rules[i].x, rules[i].y, rules[i].point_count)) {
+            nop_json_add(e, points_key, nop_json_arr());
+        } else {
+            nop_json_t *pts = nop_json_arr();
+            for (k = 0; k < rules[i].point_count; k++) {
+                nop_json_t *pt = nop_json_obj();
+                int nx, ny;
+                nop_coord_norm_to_thousandths(rules[i].x[k], rules[i].y[k], &nx, &ny);
+                nop_json_add_int(pt, "x", nx);
+                nop_json_add_int(pt, "y", ny);
+                nop_json_arr_push(pts, pt);
+            }
+            nop_json_add(e, points_key, pts);
         }
-        nop_json_add(e, points_key, pts);
         if (rules[i].direction[0])
             nop_json_add_str(e, "direction", onvif_dir_to_nop(rules[i].direction));
         nop_json_add(e, "triggers", csv_to_triggers(rules[i].class_filter));
@@ -280,9 +246,9 @@ static nop_status_t ai_set_rules(nop_onvif_map_backend_t *be, int ch,
         return NOP_ERR_PARAM;
 
     s = onvif_session_begin(be, ch);
-    if (!s) return NOP_ERR_IO;
+    if (!s) return ONVIF_MAP_FAIL;
     if (onvif_session_analytics_cfg(s, cfg, sizeof(cfg)) != 0) {
-        onvif_session_end(be); return NOP_ERR_IO;
+        onvif_session_end(be); return ONVIF_MAP_FAIL;
     }
 
     n = nop_onvif_analytics_get_rules(onvif_session_dev(s), cfg, onvif_type,
@@ -307,10 +273,10 @@ static nop_status_t ai_set_rules(nop_onvif_map_backend_t *be, int ch,
         if (found >= 0) {
             touched[found] = 1;
             if (nop_onvif_analytics_modify_rule(onvif_session_dev(s), cfg, &rule) != 0)
-                rc = NOP_ERR_IO;
+                rc = ONVIF_MAP_FAIL;
         } else {
             if (nop_onvif_analytics_create_rule(onvif_session_dev(s), cfg, &rule) != 0)
-                rc = NOP_ERR_IO;
+                rc = ONVIF_MAP_FAIL;
         }
     }
     /* 请求未点名的已有规则：只关 Enabled，不删。 */
@@ -318,7 +284,7 @@ static nop_status_t ai_set_rules(nop_onvif_map_backend_t *be, int ch,
         if (touched[i]) continue;
         existing[i].enabled = 0;
         if (nop_onvif_analytics_modify_rule(onvif_session_dev(s), cfg, &existing[i]) != 0)
-            rc = NOP_ERR_IO;
+            rc = ONVIF_MAP_FAIL;
     }
     onvif_session_end(be);
 
@@ -379,7 +345,7 @@ nop_status_t onvif_map_getChannelSensorConfig(nop_onvif_map_backend_t *be, int c
     (void)req;
 
     s = onvif_session_begin(be, ch);
-    if (!s) return NOP_ERR_IO;
+    if (!s) return ONVIF_MAP_FAIL;
     /* NOPMappingONVIF.md「sensor 靠 getSupportRules 去映射」:sensor 清单必须按设备真实能力构建。
      * GetSupportedRules/AnalyticsModules 无 CellMotion → 不列 motion;无 ObjectDetection → 不列
      * human/vehicle/animal/face。enable 再按 GetRules 的 ClassFilter 判定。
@@ -451,9 +417,9 @@ nop_status_t onvif_map_setChannelSensorConfig(nop_onvif_map_backend_t *be, int c
         return NOP_ERR_PARAM;
 
     s = onvif_session_begin(be, ch);
-    if (!s) return NOP_ERR_IO;
+    if (!s) return ONVIF_MAP_FAIL;
     if (onvif_session_analytics_cfg(s, cfg, sizeof(cfg)) != 0) {
-        onvif_session_end(be); return NOP_ERR_IO;
+        onvif_session_end(be); return ONVIF_MAP_FAIL;
     }
     n = nop_onvif_analytics_get_rules(onvif_session_dev(s), cfg, "ObjectDetection",
                                       existing, AI_MAX_RULES);
@@ -478,7 +444,7 @@ nop_status_t onvif_map_setChannelSensorConfig(nop_onvif_map_backend_t *be, int c
             existing[found].enabled = enable;
             if (nop_onvif_analytics_modify_rule(onvif_session_dev(s), cfg,
                                                 &existing[found]) != 0)
-                rc = NOP_ERR_IO;
+                rc = ONVIF_MAP_FAIL;
         } else if (enable) {
             nop_onvif_rule_t r;
             memset(&r, 0, sizeof(r));
@@ -487,7 +453,7 @@ nop_status_t onvif_map_setChannelSensorConfig(nop_onvif_map_backend_t *be, int c
             snprintf(r.class_filter, sizeof(r.class_filter), "%s", cls);
             r.enabled = 1;
             if (nop_onvif_analytics_create_rule(onvif_session_dev(s), cfg, &r) != 0)
-                rc = NOP_ERR_IO;
+                rc = ONVIF_MAP_FAIL;
         }
     }
     onvif_session_end(be);
@@ -568,13 +534,13 @@ nop_status_t onvif_map_AI_getChannelAICapabilities(nop_onvif_map_backend_t *be, 
     (void)req;
 
     s = onvif_session_begin(be, ch);
-    if (!s) return NOP_ERR_IO;
+    if (!s) return ONVIF_MAP_FAIL;
     if (onvif_session_analytics_cfg(s, cfg, sizeof(cfg)) != 0) {
-        onvif_session_end(be); return NOP_ERR_IO;
+        onvif_session_end(be); return ONVIF_MAP_FAIL;
     }
     rc = nop_onvif_analytics_get_ai_caps(onvif_session_dev(s), cfg, &caps);
     onvif_session_end(be);
-    if (rc != 0) return NOP_ERR_IO;
+    if (rc != 0) return ONVIF_MAP_FAIL;
 
     resp->content = nop_json_obj();
     if (!resp->content) return NOP_ERR_NOMEM;
@@ -624,7 +590,7 @@ nop_status_t onvif_map_X_NightOwl_getDeviceCapabilities(nop_onvif_map_backend_t 
     (void)req;
 
     s = onvif_session_begin(be, ch);
-    if (!s) return NOP_ERR_IO;
+    if (!s) return ONVIF_MAP_FAIL;
     dev  = onvif_session_dev(s);
     /* 源列表用连接时缓存，不再 GetVideoSources/GetProfiles。 */
     nsrc = nop_onvif_device_cached_nsrc(dev);
