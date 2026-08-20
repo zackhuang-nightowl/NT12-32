@@ -28,6 +28,7 @@ typedef struct {
     uint8_t  *data;
     uint32_t  len;
     uint32_t  ts;
+    uint32_t  wall_time;   /* 采集时刻(秒); 预录 flush 到录像队列时透传 */
     uint8_t   is_key;
     uint8_t   codec;
     uint8_t   frame_type;
@@ -78,6 +79,8 @@ typedef struct stream_pull {
     unsigned         rec_last_gen;
     volatile int     rec_gap_pending;   /* puller 置位; worker 写 gap 标记后清 */
     stream_record_q_t rec_q;
+    int              rec_drop_until_key; /* 1=队列曾满, 正按 GOP 丢弃到下个关键帧(避免写半截 GOP) */
+    uint32_t         rec_seg_start_wall; /* 当前录像段起始采集时刻(秒); worker 用于定时切片(IDR 对齐) */
 
     /* 事件预录环(本路独占;主/子 puller 各写各的,无跨线程争用) */
     stream_pre_frame_t *pre_frames;

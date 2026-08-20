@@ -25,6 +25,14 @@ RSDK_API void       rsdk_rec_set_stream(rsdk_writer_t *w, int stream);
 RSDK_API rsdk_err_t rsdk_rec_write_frame(rsdk_writer_t *w, const rsdk_frame_t *f);
 /* 切换录像类型(常录↔事件), 会闭合当前段并开新段 */
 RSDK_API rsdk_err_t rsdk_rec_change_type(rsdk_writer_t *w, int rectype);
+/* 主动切段(同类型): 闭合当前段 + 开新段。供上层"定时切片"用——到达目标时长后, 在下一个 IDR 帧
+ * 之前调用, 使新段从 IDR 起(回放段界无缝)。当前段无帧则为空操作。 */
+RSDK_API rsdk_err_t rsdk_rec_rotate(rsdk_writer_t *w);
+/* 当前段已写帧数(供上层判断"是否已有帧, 可安全切段") */
+RSDK_API uint32_t   rsdk_rec_frame_count(rsdk_writer_t *w);
+/* 把本盘缓冲的数据刷到介质(fdatasync 级): 供上层周期调用, 把掉电丢失窗口压到调用间隔内。
+ * 不改 SB/SysTab(那是 rsdk_dev_flush 的职责), 只 fsync 裸设备。 */
+RSDK_API rsdk_err_t rsdk_rec_datasync(rsdk_writer_t *w);
 /* 闭合段并写入索引 */
 RSDK_API rsdk_err_t rsdk_rec_close(rsdk_writer_t *w);
 /* 当前段 id / chunk(供元数据/抓拍 seg_ref 绑定) */

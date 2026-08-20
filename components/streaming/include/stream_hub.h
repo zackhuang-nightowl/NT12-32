@@ -51,8 +51,8 @@ typedef enum {
     STREAM_REC_RECORDING       /* 连续写, disc/gen 只打 gap 标记 */
 } stream_rec_state_t;
 
-#define STREAM_RECORD_Q_CAP      96
-#define STREAM_RECORD_Q_HIGH_WM  64   /* 超过则 stall 告警(不丢帧) */
+#define STREAM_RECORD_Q_CAP      256  /* 加大缓冲: 磁盘抖动/回收时先积压不丢帧(仅真正跟不上才 GOP 丢) */
+#define STREAM_RECORD_Q_HIGH_WM  192  /* 超过则 stall 告警 */
 
 #define STREAM_REC_MEDIA_VIDEO   0
 #define STREAM_REC_MEDIA_AUDIO   1
@@ -61,6 +61,7 @@ typedef struct {
     uint8_t  *data;
     uint32_t  len;
     uint32_t  ts;
+    uint32_t  wall_time;      /* 采集时刻(puller 入队时打, 秒); worker 写盘用它而非 time(NULL) */
     uint8_t   is_key;
     uint8_t   is_param;
     uint8_t   frame_type;
@@ -79,9 +80,9 @@ typedef struct {
 
 void stream_record_q_init(stream_record_q_t *q);
 void stream_record_q_flush(stream_record_q_t *q);
-/* 拷贝入队; 满返回 -1(调用方须先 drain, 不丢帧)。 */
+/* 拷贝入队; 满返回 -1(调用方按 GOP 丢弃到下个关键帧并打 gap, 不丢单帧)。wall_time=采集时刻(秒)。 */
 int  stream_record_q_push(stream_record_q_t *q, const uint8_t *data, uint32_t len,
-                          uint32_t ts, int is_key, int is_param,
+                          uint32_t ts, uint32_t wall_time, int is_key, int is_param,
                           uint8_t frame_type, uint8_t codec, uint8_t media);
 const stream_record_slot_t *stream_record_q_peek(const stream_record_q_t *q);
 void stream_record_q_pop(stream_record_q_t *q);

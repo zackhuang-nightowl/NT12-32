@@ -58,6 +58,13 @@ rsdk_err_t rsdk_play_next_frame(rsdk_player_t *p, rsdk_frame_hdr_t *hdr,
         if (!cr) return RSDK_E_CRYPTO;              /* 加密帧但无密钥(需加密固件/正确SN) */
         rsdk_crypto_xcrypt(cr, h.seg_id, h.frame_seq, 0, p->buf, h.payload_len);
     }
+    /* v2: 校验明文载荷 CRC(掉电/坏块撕裂 → 头 CRC 过但载荷坏 → 此处拦截, 不把坏帧喂解码器)。
+     * v1 盘该字段为旧 nonce 尾字节, 不校验。 */
+    if (rsdk_dev_version(p->d) >= 2 && h.rec_kind == RSDK_RK_FRAME &&
+        rsdk_crc32(p->buf, h.payload_len) != h.payload_crc32) {
+        p->cur_off = (uint32_t)rsdk_align_up(p->cur_off + 64 + h.payload_len, RSDK_FRAME_ALIGN);
+        return RSDK_E_CORRUPT;                      /* 跳过坏载荷帧 */
+    }
     *hdr = h; *data = p->buf; *len = h.payload_len;
     p->cur_off = (uint32_t)rsdk_align_up(p->cur_off + 64 + h.payload_len, RSDK_FRAME_ALIGN);
     return RSDK_OK;

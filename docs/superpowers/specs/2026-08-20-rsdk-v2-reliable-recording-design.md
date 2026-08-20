@@ -153,3 +153,23 @@ Puller(只入队,采集时刻打 wall_time)
 - `components/streaming/src/stream_hub.{c,h}` — 队列增大、GOP 丢弃策略
 - `components/streaming/src/stream_router.c` — writer open/close 投递、采集时刻 wall_time、Time Mapper
 - `components/storage/src/storage_disk.c` — v1/v2 版本判定
+
+---
+
+## 13. 实际落地与偏差(2026-08-20 实现)
+
+已按 P0–P3 全部实现。相对上文设计,有两处有意偏差(降风险、去冗余):
+
+**偏差 1 — 线程模型:采用"单把盘组共享递归锁 + 数据路径无锁",而非 §3 的 per-disk worker 线程池。**
+- 实现:`rsdk_dev`/`rsdk_group` 共享一把递归锁,保护全部元数据(sb/st/index/badmap/balance);数据区 `pread`/`pwrite`(写者独占偏移)**不加锁**。streaming 侧**保留原单 record worker**。
+- 理由:单锁无锁序/死锁,正确性最稳;数据路径无锁 → 多盘数据写仍可并行(锁只串行元数据小操作)。per-disk worker 线程拆分属**吞吐优化**(仅在多机械盘时提升),留作后续,不影响正确性与本次目标(消除录像断/数据损坏)。
+- 影响:多盘写入的并行度受单 worker 限制;单盘无影响。若后续需要多盘写并行,再按 §3 Model B 拆 per-disk worker(锁与数据路径已为此铺好)。
+
+**偏差 2 — 段收尾:以 fsync 的索引槽(VALID)为权威关段记录,未额外写数据区 SEG_CLOSE 标记。**
+- 理由:索引槽已含 `end_time/frame_count/total_bytes` 且 fsync 落盘,足以判段完整;数据区 SEG_CLOSE 与之冗余,增加写放大与代码面。扫描重建仍可用帧头自描述。留作可选增强。
+
+**已落地清单**:
+- P0 线程安全(R1/R2/R3):`rsdk_storgedev.c`/`rsdk_balance.c`/`rsdk_index.c`/`rsdk_rec.c` 加锁,数据路径无锁。
+- P1 O(1) 回收 + 真实容量:`rsdk_dev` 内存 `chunk→slot` 反查表(开盘顺序扫建立,失败回退全扫描)。
+- P2 format v2:帧载荷 CRC(复用冗余 `iv_nonce` 尾4字节,偏移不变)、回放校验、v1 只读兼容、`storage_disk` v1/v2 识别、`rsdk_rec_datasync` 周期 fsync API。
+- P3 streaming:采集时刻 `wall_time` 透传、IDR 对齐定时切片(`rsdk_rec_rotate`,默认 60s)、不丢帧 GOP 背压(队列 96→256,满则丢到下个 IDR + gap)、worker 周期 fsync(掉电窗口 ≤1s)。

@@ -50,7 +50,9 @@ nvr_disk_state_t nvr_storage_identify(const char *path, nvr_disk_t *info,
     rsdk_superblock_t sb;
     nvr_disk_state_t st = NVR_DISK_BLANK;
     if (rsdk_rawdev_pread(raw, RSDK_SEC, &sb, sizeof(sb)) == RSDK_OK) {
-        if (memcmp(sb.magic, RSDK_SB_MAGIC, 8) == 0 && sb.version == RSDK_FORMAT_VERSION) {
+        /* 版本兼容: 1..RSDK_FORMAT_VERSION 均识别为本系统盘(v1 只读兼容; 更高未知版本不认领, 避免误装配)。 */
+        if (memcmp(sb.magic, RSDK_SB_MAGIC, 8) == 0 &&
+            sb.version >= 1u && sb.version <= RSDK_FORMAT_VERSION) {
             /* 是 RSDK 盘 */
             if (info) {
                 memcpy(info->group_uuid, sb.group_uuid, 16);

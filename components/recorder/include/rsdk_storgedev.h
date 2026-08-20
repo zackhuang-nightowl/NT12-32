@@ -86,6 +86,7 @@ RSDK_API rsdk_err_t rsdk_dev_alloc_chunk(rsdk_dev_t *d, uint64_t *chunk, uint64_
  * 供元数据 Tier-2 大文档 与 抓拍 PIC blob 共用。 */
 RSDK_API rsdk_err_t rsdk_dev_meta_alloc(rsdk_dev_t *d, uint64_t size, uint64_t *abs_off);
 RSDK_API uint16_t   rsdk_dev_index(rsdk_dev_t *d);   /* 本盘在盘组内序号 */
+RSDK_API uint32_t   rsdk_dev_version(rsdk_dev_t *d); /* 盘上格式版本(>=2 回放校验载荷 CRC) */
 RSDK_API int        rsdk_dev_is_wrapped(rsdk_dev_t *d); /* 是否已绕盘至少一圈(覆盖模式) */
 
 /* 坏 chunk 处理(设计 §4.3 / 坏块): 标记/查询/计数。位图落 bitmap 区(主+备+CRC), 分配自动跳坏。 */

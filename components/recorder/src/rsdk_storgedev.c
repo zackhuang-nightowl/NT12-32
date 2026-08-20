@@ -276,6 +276,8 @@ rsdk_err_t rsdk_dev_open(const char *path, rsdk_dev_t **out)
     }
     { rsdk_superblock_t t = d->sb; t.sb_crc32 = 0;
       if (rsdk_crc32(&t, sizeof t) != d->sb.sb_crc32) { rsdk_dev_close(d); return RSDK_E_CORRUPT; } }
+    /* 版本兼容: v1/v2 均可开(v1 只读兼容, 不校验载荷 CRC); 更高的未知格式拒绝, 避免误读新布局。 */
+    if (d->sb.version > RSDK_FORMAT_VERSION) { rsdk_dev_close(d); return RSDK_E_FORMAT; }
     rsdk_rawdev_pread(raw, ST_MAIN_SEC*RSDK_SEC, &d->st, sizeof d->st);
     if (d->st.magic != 0x42415453u)
         rsdk_rawdev_pread(raw, ST_BAK_SEC*RSDK_SEC, &d->st, sizeof d->st);
@@ -432,6 +434,7 @@ rsdk_err_t rsdk_dev_meta_alloc(rsdk_dev_t *d, uint64_t size, uint64_t *abs_off)
 }
 
 uint16_t rsdk_dev_index(rsdk_dev_t *d) { return d ? d->sb.group_disk_index : 0; }
+uint32_t rsdk_dev_version(rsdk_dev_t *d) { return d ? d->sb.version : 0; }   /* 盘上格式版本(v2 起校验载荷CRC) */
 
 rsdk_err_t rsdk_dev_rekey(rsdk_dev_t *d)
 {

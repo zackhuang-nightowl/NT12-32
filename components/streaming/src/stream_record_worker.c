@@ -12,6 +12,8 @@
 #define REC_WORKER_BYTE_BUDGET  (512 * 1024)  /* 每路每轮最多写 512KB */
 #define REC_WORKER_IDLE_MS      50
 #define REC_WORKER_FLUSH_MS     5000
+#define REC_SEG_SECONDS         60             /* 定时切片目标时长(秒); 到点后在下个 IDR 切新段 */
+#define REC_DATASYNC_SECONDS    1              /* 周期 fdatasync 间隔(秒): 掉电丢失窗口上界 */
 
 static struct {
     pthread_t       th;
@@ -22,6 +24,7 @@ static struct {
     volatile int    flush_req;
     volatile int    flush_done;
     int             rr;           /* 公平轮询起点 */
+    time_t          last_sync;    /* 上次周期 fsync 的墙钟秒 */
 } g_w;
 
 #define STREAM_REC_GAP_TYPE_MASK  0x80000000u
@@ -81,10 +84,14 @@ static int worker_write_slot(stream_chan_t *c, stream_pull_t *p,
 {
     rsdk_writer_t *wrec;
     rsdk_frame_t f;
+    uint32_t wt;
 
     if (!s || !s->data || s->len == 0) return 0;
     worker_apply_event_tags(c);
     worker_handle_gap(c, p);
+
+    /* 采集时刻优先; 兜底当前墙钟(仅极早期无 wall 的帧)。录像时间轴用它, 不受写盘滞后影响。 */
+    wt = s->wall_time ? s->wall_time : (uint32_t)time(NULL);
 
     if (s->media == STREAM_REC_MEDIA_AUDIO) {
         if (!c->writer_main || !c->rec_gated_main) return 0;
@@ -95,7 +102,7 @@ static int worker_write_slot(stream_chan_t *c, stream_pull_t *p,
         f.codec = RSDK_CODEC_AAC;
         f.frame_type = RSDK_FRAME_AUDIO;
         f.pts = (uint64_t)s->ts;
-        f.wall_time = (uint64_t)time(NULL);
+        f.wall_time = (uint64_t)wt;
         f.data = s->data;
         f.len = s->len;
         return rsdk_rec_write_frame(wrec, &f) == RSDK_OK ? (int)s->len : 0;
@@ -106,8 +113,14 @@ static int worker_write_slot(stream_chan_t *c, stream_pull_t *p,
     if (p->rec_state == STREAM_REC_WAIT_IDR) {
         if (!s->is_key) return 0;
         p->rec_state = STREAM_REC_RECORDING;
+        p->rec_seg_start_wall = wt;                 /* 新段起始(用于定时切片计时) */
         if (p->stream == NVR_STREAM_SUB) c->rec_gated_sub = 1;
         else c->rec_gated_main = 1;
+    }
+    /* ★ 定时切片(IDR 对齐): 到达目标时长后, 在下一个关键帧处切新段 → 新段从 IDR 起, 回放段界无缝。 */
+    if (s->is_key && p->rec_seg_start_wall &&
+        (uint32_t)(wt - p->rec_seg_start_wall) >= REC_SEG_SECONDS) {
+        if (rsdk_rec_rotate(wrec) == RSDK_OK) p->rec_seg_start_wall = wt;
     }
     memset(&f, 0, sizeof(f));
     f.chn = (uint16_t)c->cfg.chn;
@@ -115,7 +128,7 @@ static int worker_write_slot(stream_chan_t *c, stream_pull_t *p,
     f.codec = (uint8_t)p->codec;
     f.frame_type = s->frame_type;
     f.pts = (uint64_t)s->ts;
-    f.wall_time = (uint64_t)time(NULL);
+    f.wall_time = (uint64_t)wt;
     f.data = s->data;
     f.len = s->len;
     return rsdk_rec_write_frame(wrec, &f) == RSDK_OK ? (int)s->len : 0;
@@ -175,6 +188,22 @@ static int worker_drain_pull(stream_chan_t *c, stream_pull_t *p, int byte_budget
     return written;
 }
 
+/* 周期把已写数据 fdatasync 到介质: 把掉电丢失窗口压到 REC_DATASYNC_SECONDS 内。
+ * best-effort(与现有 worker 读 writer 同生命周期假设一致; 彻底消除 writer UAF 需 writer 归属重构)。 */
+static void worker_periodic_sync(nvr_stream_mgr_t *m)
+{
+    time_t now = time(NULL);
+    if (now - g_w.last_sync < REC_DATASYNC_SECONDS) return;
+    g_w.last_sync = now;
+    for (int i = 0; i < NVR_MAX_CH; i++) {
+        stream_chan_t *c;
+        if (!m->used[i]) continue;
+        c = &m->ch[i];
+        if (c->writer_main) rsdk_rec_datasync(c->writer_main);
+        if (c->writer_sub)  rsdk_rec_datasync(c->writer_sub);
+    }
+}
+
 static int any_queue_pending(nvr_stream_mgr_t *m)
 {
     int i;
@@ -221,6 +250,7 @@ static void *record_worker_thread(void *arg)
     NVR_LOGI("record", "Record Worker 启动(单线程串行 rsdk 写盘)");
     while (g_w.running) {
         worker_round(g_w.mgr);
+        worker_periodic_sync(g_w.mgr);   /* 周期 fdatasync: 掉电窗口 ≤ REC_DATASYNC_SECONDS */
         if (!g_w.running) break;
         if (!any_queue_pending(g_w.mgr) && !g_w.flush_req) {
             struct timespec ts;

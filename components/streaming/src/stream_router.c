@@ -85,7 +85,7 @@ static int stream_pre_ensure(stream_pull_t *p, int pre_s)
 }
 
 static void stream_pre_push(stream_pull_t *p, const uint8_t *data, int len,
-                            uint32_t ts, int is_key, int codec, int frame_type)
+                            uint32_t ts, uint32_t wall, int is_key, int codec, int frame_type)
 {
     stream_pre_frame_t *slot;
     uint8_t *copy;
@@ -99,6 +99,7 @@ static void stream_pre_push(stream_pull_t *p, const uint8_t *data, int len,
     slot->data = copy;
     slot->len = (uint32_t)len;
     slot->ts = ts;
+    slot->wall_time = wall;
     slot->is_key = is_key ? 1 : 0;
     slot->codec = (uint8_t)codec;
     slot->frame_type = (uint8_t)frame_type;
@@ -127,7 +128,7 @@ static void stream_pre_flush(stream_chan_t *c, stream_pull_t *p)
             p->rec_state = STREAM_REC_RECORDING;
             *gated = 1;
         }
-        if (stream_record_q_push(&p->rec_q, b->data, b->len, b->ts,
+        if (stream_record_q_push(&p->rec_q, b->data, b->len, b->ts, b->wall_time,
                                  b->is_key, 0, b->frame_type, b->codec,
                                  STREAM_REC_MEDIA_VIDEO) != 0)
             NVR_LOGW("record", "ch%d[%s] 预录 flush 入队失败", c->cfg.chn,
@@ -177,31 +178,41 @@ static void stream_apply_event_tags_puller(stream_chan_t *c)
 
 static int stream_record_enqueue(stream_chan_t *c, stream_pull_t *p,
                                  const uint8_t *data, int len, uint32_t ts,
-                                 const nal_class_t *nc)
+                                 uint32_t wall, const nal_class_t *nc)
 {
     int rc;
     (void)c;
     if (!data || len <= 0 || !nc || nc->is_param) return 0;
-    rc = stream_record_q_push(&p->rec_q, data, (uint32_t)len, ts,
+    /* GOP 丢弃中: 非关键帧直接丢(不写半截 GOP), 等下个 IDR 再尝试恢复 → 续录从 IDR 起, 可解码。 */
+    if (p->rec_drop_until_key && !nc->is_key) return -1;
+    rc = stream_record_q_push(&p->rec_q, data, (uint32_t)len, ts, wall,
                               nc->is_key, nc->is_param, (uint8_t)nc->frame_type,
                               (uint8_t)p->codec, STREAM_REC_MEDIA_VIDEO);
     if (rc != 0) {
+        /* 队列满(磁盘真跟不上): 进入 GOP 丢弃 + 打 gap, 待磁盘追上从下个 IDR 无缝续录。 */
+        p->rec_drop_until_key = 1;
+        p->rec_gap_pending = 1;
         if (p->rec_q.stall_cnt <= 20 || (p->rec_q.stall_cnt % 50) == 0)
-            NVR_LOGE("record", "ch%d[%s] RecordQueue 满 len=%d (stall=%u)",
+            NVR_LOGE("record", "ch%d[%s] RecordQueue 满 len=%d (stall=%u) → 丢至下个IDR+gap",
                      p->owner->cfg.chn, p->stream == NVR_STREAM_SUB ? "子" : "主",
                      len, p->rec_q.stall_cnt);
         return rc;
+    }
+    if (p->rec_drop_until_key) {   /* 成功入队了一个关键帧 → GOP 恢复续录 */
+        p->rec_drop_until_key = 0;
+        NVR_LOGW("record", "ch%d[%s] RecordQueue 恢复→从 IDR 续录",
+                 p->owner->cfg.chn, p->stream == NVR_STREAM_SUB ? "子" : "主");
     }
     stream_record_worker_poke();
     return 0;
 }
 
 static int stream_record_enqueue_audio(stream_pull_t *p,
-                                       const uint8_t *data, int len, uint32_t ts)
+                                       const uint8_t *data, int len, uint32_t ts, uint32_t wall)
 {
     int rc;
     if (!p || !p->owner || !data || len <= 0) return 0;
-    rc = stream_record_q_push(&p->rec_q, data, (uint32_t)len, ts,
+    rc = stream_record_q_push(&p->rec_q, data, (uint32_t)len, ts, wall,
                               0, 0, RSDK_FRAME_AUDIO, RSDK_CODEC_AAC,
                               STREAM_REC_MEDIA_AUDIO);
     if (rc != 0) return rc;
@@ -409,6 +420,7 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
     nal_class_t nc;
     nal_classify(data, len, p->codec, &nc);
     mono_ms = stream_hub_mono_ms();
+    uint32_t wall = (uint32_t)time(NULL);   /* 采集时刻: on_video 帧到即为采集时点(录像时间轴按此, 不受写盘滞后影响) */
 
     /* --- Continuity Inspect: 只 mark disc / 供 gen 比对, 不在此跳帧。 --- */
     if (!nc.is_param) {
@@ -507,7 +519,7 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
     if (c->cfg.record) {
         stream_apply_event_tags_puller(c);
         if (!nc.is_param)
-            (void)stream_record_enqueue(c, p, data, len, ts, &nc);
+            (void)stream_record_enqueue(c, p, data, len, ts, wall, &nc);
     } else if (c->event_arm) {
         if (!c->event_clip && p->stream == NVR_STREAM_MAIN &&
             (c->writer_main || c->writer_sub))
@@ -523,11 +535,11 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
                     p->pre_flushed = 1;
                 }
                 if (!nc.is_param)
-                    (void)stream_record_enqueue(c, p, data, len, ts, &nc);
+                    (void)stream_record_enqueue(c, p, data, len, ts, wall, &nc);
             }
         } else if (!nc.is_param && c->pre_record_s > 0) {
             if (stream_pre_ensure(p, c->pre_record_s) == 0)
-                stream_pre_push(p, data, len, ts, nc.is_key, p->codec, nc.frame_type);
+                stream_pre_push(p, data, len, ts, wall, nc.is_key, p->codec, nc.frame_type);
         }
     } else if (!c->event_clip && (c->pmain.pre_frames || c->psub.pre_frames)) {
         stream_pre_free_chan(c);
@@ -547,7 +559,7 @@ void stream_route_audio(stream_pull_t *p, const uint8_t *data, int len, uint32_t
     /* 音频录像:挂主流 writer,stream=2/codec=AAC。仅主路带音频。 */
     int writing = c->cfg.record || c->event_clip;
     if (writing && c->writer_main && c->rec_gated_main && data && len > 0)
-        (void)stream_record_enqueue_audio(&c->pmain, data, len, ts);
+        (void)stream_record_enqueue_audio(&c->pmain, data, len, ts, (uint32_t)time(NULL));
 }
 
 void stream_close_writer_noflush(stream_chan_t *c)
@@ -560,6 +572,8 @@ void stream_close_writer_noflush(stream_chan_t *c)
     stream_record_q_flush(&c->psub.rec_q);
     c->pmain.rec_state = c->psub.rec_state = STREAM_REC_WAIT_IDR;
     c->rec_gated_main = 0; c->rec_gated_sub = 0;
+    c->pmain.rec_drop_until_key = c->psub.rec_drop_until_key = 0;
+    c->pmain.rec_seg_start_wall = c->psub.rec_seg_start_wall = 0;
     NVR_LOGI("stream", "chn%d 录像开关关→停录(关双 writer)", c->cfg.chn);
 }
 

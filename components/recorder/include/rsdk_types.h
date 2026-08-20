@@ -20,7 +20,7 @@ extern "C" {
 #define RSDK_SB_MAGIC         "RSDK01\0\0"
 #define RSDK_FRAME_MAGIC      "rsdkfrm\0"
 #define RSDK_FRAME_ALIGN      128u
-#define RSDK_FORMAT_VERSION   1u
+#define RSDK_FORMAT_VERSION   2u   /* v2: 帧载荷 CRC(复用冗余 iv_nonce 尾4字节, 偏移不变); v1 只读兼容 */
 #define RSDK_DEFAULT_SN       "NT12-32"   /* 无工厂区 SN 时的默认(format/open/rekey 须一致) */
 
 /* ---- 返回码 ---- */
@@ -138,7 +138,9 @@ typedef struct __attribute__((packed)) {
     uint32_t frame_seq;
     uint64_t pts;
     uint64_t wall_time;          /* 掉索引自解析用 */
-    uint8_t  iv_nonce[8];
+    uint8_t  iv_nonce[4];        /* 0x2C: v1 兼容占位(解密不依赖它, 用 seg_id+frame_seq 派生) */
+    uint32_t payload_crc32;      /* 0x30: v2 明文载荷 CRC32(FRAME 有效; marker=0)。v1 盘此处为旧 nonce
+                                  * 尾字节, 仅当盘 version>=2 时校验。被 hdr_crc32 覆盖保护。 */
     uint32_t hdr_crc32;
     uint64_t event_id;           /* 0x38: 0=无;连续帧被事件命中则打该 id;事件段帧自带 */
 } rsdk_frame_hdr_t;

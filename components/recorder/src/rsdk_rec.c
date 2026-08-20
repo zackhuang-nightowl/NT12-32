@@ -159,7 +159,8 @@ rsdk_err_t rsdk_rec_write_frame(rsdk_writer_t *w, const rsdk_frame_t *f) {
         h.event_id = w->cur_event_id;               /* 事件标签(连续轨命中/事件段;0=无) */
         h.payload_len = f->len; h.seg_id = w->seg_id; h.frame_seq = w->frame_seq;
         h.pts = f->pts; h.wall_time = f->wall_time;
-        for (int i = 0; i < 8; i++) h.iv_nonce[i] = (uint8_t)(w->frame_seq >> ((i & 3) * 8));
+        for (int i = 0; i < 4; i++) h.iv_nonce[i] = (uint8_t)(w->frame_seq >> (i * 8));
+        h.payload_crc32 = rsdk_crc32(f->data, f->len);   /* v2: 明文载荷 CRC(掉电/坏块撕裂可检出) */
 
         struct rsdk_crypto *cr = rsdk_dev_crypto(w->d);
         if (f->len > w->pcap) { w->pbuf = realloc(w->pbuf, f->len); w->pcap = f->len; if (!w->pbuf) return RSDK_E_IO; }
@@ -241,6 +242,20 @@ rsdk_err_t rsdk_rec_change_type(rsdk_writer_t *w, int rectype) {
     rsdk_err_t rc = finalize_seg(w); if (rc) return rc;
     w->rectype = rectype;
     return start_seg(w);
+}
+
+rsdk_err_t rsdk_rec_rotate(rsdk_writer_t *w) {
+    if (!w) return RSDK_E_PARAM;
+    if (w->frame_count == 0) return RSDK_OK;     /* 空段无需切(避免切出 0 帧段) */
+    rsdk_err_t rc = finalize_seg(w); if (rc) return rc;
+    return start_seg(w);                          /* 同 rectype 开新段; 上层保证下一帧是 IDR */
+}
+
+uint32_t rsdk_rec_frame_count(rsdk_writer_t *w) { return w ? w->frame_count : 0; }
+
+rsdk_err_t rsdk_rec_datasync(rsdk_writer_t *w) {
+    if (!w || !w->d) return RSDK_E_PARAM;
+    return rsdk_rawdev_sync(rsdk_dev_raw(w->d));  /* 只 fsync 裸设备, 不动 SB/SysTab */
 }
 
 rsdk_err_t rsdk_rec_close(rsdk_writer_t *w) {

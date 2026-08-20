@@ -137,7 +137,7 @@ int stream_record_q_count(const stream_record_q_t *q)
 }
 
 int stream_record_q_push(stream_record_q_t *q, const uint8_t *data, uint32_t len,
-                         uint32_t ts, int is_key, int is_param,
+                         uint32_t ts, uint32_t wall_time, int is_key, int is_param,
                          uint8_t frame_type, uint8_t codec, uint8_t media)
 {
     stream_record_slot_t *s;
@@ -157,6 +157,7 @@ int stream_record_q_push(stream_record_q_t *q, const uint8_t *data, uint32_t len
         s->data = copy;
         s->len = len;
         s->ts = ts;
+        s->wall_time = wall_time;
         s->is_key = is_key ? 1 : 0;
         s->is_param = is_param ? 1 : 0;
         s->frame_type = frame_type;
