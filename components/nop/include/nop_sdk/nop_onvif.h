@@ -90,6 +90,8 @@ void nop_onvif_device_drop(const char *host, int port);
 int  nop_onvif_device_connect(nop_onvif_device_t *device,
                               const char *username, const char *password);
 int  nop_onvif_device_connected(const nop_onvif_device_t *device);
+/** 401/NotAuthorized（digest 重试耗尽）后由 ONVIF 栈置位。 */
+int  nop_onvif_device_auth_failed(const nop_onvif_device_t *device);
 void nop_onvif_device_lock(nop_onvif_device_t *device);
 void nop_onvif_device_unlock(nop_onvif_device_t *device);
 /** 连接后取已缓存主/子 URI。vsrc 空=首源。0=ok。 */

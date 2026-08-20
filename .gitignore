@@ -31,3 +31,4 @@ third_party/ffmpeg/
 *~
 .vscode/
 .idea/
+.cursor/

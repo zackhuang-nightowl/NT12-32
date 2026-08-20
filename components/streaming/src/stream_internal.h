@@ -22,8 +22,10 @@ extern "C" {
 #define NVR_MAX_CH 32   /* 整机通道:16 PoE + 16 LAN(与 app nvr_channel.h / mhal MHAL_MAX_CH 一致) */
 
 /* 预录环一帧(拥有编码码流拷贝);仅事件待命模式用。主/子各一环。 */
-#define NVR_PRE_FPS_ASSUME   15
-#define NVR_PRE_FRAMES_MAX   450   /* 30s×15fps 上限 */
+#define NVR_PRE_FPS_ASSUME   15    /* 真实帧率未知(刚连、还没估出)时的兜底 fps */
+#define NVR_PRE_FPS_MAX      30    /* 取容上限假设的最大帧率 */
+#define NVR_PRE_SEC_MAX      30    /* 预录最长秒数(取容上限) */
+#define NVR_PRE_FRAMES_MAX   (NVR_PRE_SEC_MAX * NVR_PRE_FPS_MAX)   /* =900 帧封顶(防 fps 误估爆内存) */
 typedef struct {
     uint8_t  *data;
     uint32_t  len;
@@ -64,6 +66,11 @@ typedef struct stream_pull {
     unsigned         vframes;
     unsigned long    vbytes;
     unsigned         last_idr_f;
+
+    /* 实时帧率估计(滚动 ~2s 窗):预录环按真实帧率取容,不再按固定 15fps 假设。 */
+    uint64_t         fps_win_ms;      /* 估计窗起点(CLOCK_MONOTONIC ms);0=未起 */
+    unsigned         fps_win_frames;  /* 窗内视频帧数 */
+    int              fps_est;         /* 估得的真实 fps;0=未估出(用 cfg.fps/假设兜底) */
 
     /* 码流连续性兜底(TCP 下少见;重连/相机跳帧仍可能断参考 → VPU GAPS_DROP)。
      * last_rtp_seq=上一完整 AU 末包 seq; h264_log2/fn 用于 frame_num 跳变检测。 */

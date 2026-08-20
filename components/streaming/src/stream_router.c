@@ -71,16 +71,37 @@ static void stream_pre_free_chan(stream_chan_t *c)
 
 static int stream_pre_ensure(stream_pull_t *p, int pre_s)
 {
-    int need;
+    int fps, need;
     if (!p || pre_s <= 0) { stream_pre_free(p); return 0; }
-    need = pre_s * NVR_PRE_FPS_ASSUME;
+    /* 按真实帧率取容:优先实测 fps_est,其次 ONVIF 回填的 cfg.fps,最后兜底假设。 */
+    fps = (p->fps_est > 0)                         ? p->fps_est
+        : (p->owner && p->owner->cfg.fps > 0)      ? p->owner->cfg.fps
+        :                                            NVR_PRE_FPS_ASSUME;
+    need = pre_s * fps;
     if (need > NVR_PRE_FRAMES_MAX) need = NVR_PRE_FRAMES_MAX;
     if (need < 1) need = 1;
-    if (p->pre_frames && p->pre_cap == need) return 0;
-    stream_pre_free(p);
-    p->pre_frames = (stream_pre_frame_t *)calloc((size_t)need, sizeof(stream_pre_frame_t));
-    if (!p->pre_frames) return -1;
-    p->pre_cap = need;
+    /* ★ 只扩容,不缩容:fps 实测每 2s 会 ±1 抖动,若按相等判定就会反复 free 整环 →
+     * 预录历史(事件前那几秒画面)被周期性清空。已够容量则保持,消除抖动清空。 */
+    if (p->pre_frames && p->pre_cap >= need) return 0;
+    /* 需扩容(真实 fps 高于当前容量):迁移已存帧到更大环,保留预录历史,不丢一帧、不拷帧数据。 */
+    {
+        stream_pre_frame_t *nf = (stream_pre_frame_t *)calloc((size_t)need, sizeof(stream_pre_frame_t));
+        int i, oldest, n = 0;
+        if (!nf) return -1;
+        if (p->pre_frames && p->pre_count > 0) {
+            oldest = (p->pre_head - p->pre_count + p->pre_cap) % p->pre_cap;
+            for (i = 0; i < p->pre_count; i++) {
+                int idx = (oldest + i) % p->pre_cap;
+                nf[n++] = p->pre_frames[idx];        /* 移交指针所有权 */
+                p->pre_frames[idx].data = NULL;
+            }
+        }
+        free(p->pre_frames);                          /* 只释放旧指针数组;帧数据已移交 nf */
+        p->pre_frames = nf;
+        p->pre_cap = need;
+        p->pre_count = n;
+        p->pre_head = n;                              /* n < need(扩容)→ 指向下一空槽 */
+    }
     return 0;
 }
 
@@ -421,6 +442,19 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
     nal_classify(data, len, p->codec, &nc);
     mono_ms = stream_hub_mono_ms();
     uint32_t wall = (uint32_t)time(NULL);   /* 采集时刻: on_video 帧到即为采集时点(录像时间轴按此, 不受写盘滞后影响) */
+
+    /* 实时帧率估计(滚动 2s 窗): 供预录环按真实帧率取容。只计视频帧(不含纯参数集 AU)。 */
+    if (!nc.is_param) {
+        if (p->fps_win_ms == 0) p->fps_win_ms = mono_ms;
+        p->fps_win_frames++;
+        uint64_t fdt = mono_ms - p->fps_win_ms;
+        if (fdt >= 2000) {
+            int est = (int)((p->fps_win_frames * 1000ull + fdt / 2) / fdt);
+            if (est >= 1 && est <= 120) p->fps_est = est;
+            p->fps_win_ms = mono_ms;
+            p->fps_win_frames = 0;
+        }
+    }
 
     /* --- Continuity Inspect: 只 mark disc / 供 gen 比对, 不在此跳帧。 --- */
     if (!nc.is_param) {

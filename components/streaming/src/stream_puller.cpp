@@ -71,6 +71,9 @@ static void pull_reset_continuity(stream_pull_t *p)
     p->kf_len = 0;
     p->par_len = 0;
     p->par_building = 0;
+    /* 重置 fps 估计窗(跨重连间隙的时长会算出错误 fps);保留 fps_est 作重连后的先验。 */
+    p->fps_win_ms = 0;
+    p->fps_win_frames = 0;
 }
 
 static void live_resync_if_decode(stream_pull_t *p)

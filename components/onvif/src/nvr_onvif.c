@@ -173,7 +173,22 @@ int nvr_onvif_connect(const char *ip, int port, const char *service_url,
     if (rc != 0)
         nop_onvif_device_drop(ip, p);
     NVR_ONVIF_LOG("[onvif] connect %s:%d path=%s -> %s", ip, p,
-                  path[0] ? path : "/onvif/device_service", rc == 0 ? "ok" : "FAIL");
+                  path[0] ? path : "/onvif/device_service",
+                  rc == 0 ? "ok" : (rc == NVR_ONVIF_AUTH ? "AUTH" : "FAIL"));
+    return rc;
+}
+
+int nvr_onvif_auth_failed(const char *ip, int port)
+{
+    nop_onvif_device_t *dev;
+    int p, rc = 0;
+    if (!ip || !ip[0]) return 0;
+    if (nvr_onvif_init() != 0) return 0;
+    p = port > 0 ? port : 80;
+    dev = nop_onvif_device_retain(ip, p, NULL, 0);
+    if (!dev) return 0;
+    rc = nop_onvif_device_auth_failed(dev) ? 1 : 0;
+    nop_onvif_device_drop(ip, p);
     return rc;
 }
 
@@ -251,9 +266,10 @@ int nvr_onvif_get_url(const char *ip, int port, const char *user, const char *pa
     nop_onvif_device_t *dev = nop_onvif_device_retain(ip, port > 0 ? port : 80, NULL, 0);
     if (!dev) return -1;
     if (!nop_onvif_device_connected(dev)) {
-        if (nvr_onvif_connect(ip, port, NULL, user, pass) != 0) {
+        int cr = nvr_onvif_connect(ip, port, NULL, user, pass);
+        if (cr != 0) {
             nop_onvif_device_drop(ip, port > 0 ? port : 80);
-            return -1;
+            return (cr == NVR_ONVIF_AUTH) ? NVR_ONVIF_AUTH : NVR_ONVIF_ERR;
         }
     } else {
         nop_onvif_device_set_auth(dev, user, pass);   /* 空密关 digest */
@@ -275,13 +291,15 @@ int nvr_onvif_get_url(const char *ip, int port, const char *user, const char *pa
             snprintf(scopes_out, scopes_cap, "%s", soap);
         nop_onvif_device_unlock(dev);
     }
+    if (rc != 0 && nop_onvif_device_auth_failed(dev))
+        rc = NVR_ONVIF_AUTH;
     nop_onvif_device_drop(ip, port > 0 ? port : 80);   /* 配对本次 retain；连接仍由通道持有 */
 
     NVR_ONVIF_LOG("[onvif] get_url %s:%d %s%s%s -> %s",
                   ip, port > 0 ? port : 80, want_sub ? "sub" : "main",
                   (vsrc_token && vsrc_token[0]) ? " src=" : "",
                   (vsrc_token && vsrc_token[0]) ? vsrc_token : "",
-                  rc == 0 ? out : "(FAIL)");
+                  rc == 0 ? out : (rc == NVR_ONVIF_AUTH ? "(AUTH)" : "(FAIL)"));
     return rc;
 }
 

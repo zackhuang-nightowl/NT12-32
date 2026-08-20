@@ -15,6 +15,10 @@
 extern "C" {
 #endif
 
+#define NVR_ONVIF_OK   0
+#define NVR_ONVIF_ERR -1   /* 网络/超时/无 profile 等非鉴权失败 */
+#define NVR_ONVIF_AUTH -2  /* 401/NotAuthorized，试完凭据可置 status 4 */
+
 /* 全局 init/cleanup（幂等；get_url 内部会惰性 init） */
 int  nvr_onvif_init(void);
 void nvr_onvif_cleanup(void);
@@ -36,6 +40,9 @@ int  nvr_onvif_get_mac(const char *ip, int port, const char *user, const char *p
 int  nvr_onvif_connect(const char *ip, int port, const char *service_url,
                        const char *user, const char *pass);
 void nvr_onvif_disconnect(const char *ip, int port);
+
+/** 借 retain 查该机 handle 是否刚发生 ONVIF 鉴权失败。 */
+int  nvr_onvif_auth_failed(const char *ip, int port);
 
 /* 对该 IP 做一次 WS-Discovery，取 scopes / device_service（无需账密）。
  * 未激活 nopOnvif 只保证 Discovery。命中填 scopes 返 0。 */

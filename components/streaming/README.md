@@ -68,6 +68,6 @@ nvr_stream_start(sm, 0);                 /* 起流 → 出图 + 录像 */
 ## 剩余 TODO（接平台/联调）
 
 - [x] **`platform/media_hal` 落地**：`mhal_vdec_*`/`mhal_vout_*` 已对接 na51090 `hd_videodec/videoproc/videoout`，对真实 hdal 头编译通过（见 `platform/README.md`）；剩板级内存池/时序 TODO。
-- [ ] **自动重连**：notify 已把 `NOSIGNAL/FAIL` 写进 `c->state`；补一个 supervisor（app tick 或线程）在掉线时 `stop→start` 重连。
+- [x] **自动重连**：已实现。notify 把 `NOSIGNAL/FAIL/NODATA` 写进 `c->state`，由 app 1Hz 供给器 `nvr_chan_tick`→`tick_slot`（`app/channel/nvr_channel.c`）在掉线时 `nvr_stream_stop`→`nvr_stream_start` 重连，**指数退避 5→30s**（成功即复位）。重连每次 `conn_gen++`，live 走 RESYNC、录像打 gap 标记。
 - [ ] **音频上屏/对讲**：`stream_route_audio` 现只做录像旁路；预览音频输出与 ONVIF backchannel 对讲另接。
 - [ ] **PTS 对齐**：现用 RTP `ts` 作 pts + 墙钟 epoch 作 wall_time；跨相机时钟漂移/丢包补偿可在 router 增强。

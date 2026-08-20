@@ -563,6 +563,10 @@ int nop_onvif_device_connect(nop_onvif_device_t *device,
         n2 = -1;
         if (n1 <= 0)
             n2 = nop_onvif_get_profiles2(device);
+        if (n1 <= 0 && n2 <= 0) {
+            if (e && e->lock) osal_mutex_unlock(e->lock);
+            return device->dev.authFailed ? -2 : -1;
+        }
         if (e) {
             nop_onvif_profile_t p;
             e->media1_profile[0] = 0;
@@ -615,6 +619,13 @@ int nop_onvif_device_connected(const nop_onvif_device_t *device)
 {
     nop_onvif_pool_ent_t *e = pool_find_dev(device);
     return (e && e->connected) ? 1 : 0;
+}
+
+int nop_onvif_device_auth_failed(const nop_onvif_device_t *device)
+{
+    if (!device)
+        return 0;
+    return device->dev.authFailed ? 1 : 0;
 }
 
 void nop_onvif_device_lock(nop_onvif_device_t *device)

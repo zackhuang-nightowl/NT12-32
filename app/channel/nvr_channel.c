@@ -1036,6 +1036,7 @@ static int resolve_stream_url(nvr_chan_mgr_t *m, slot_t *s, int stream)
 
     CM_UNLOCK(m);
     int grc = -1;
+    int auth_seen = 0;
     if (need_auth) {
         char scopes_disc[1024];
         char svc_disc[128];
@@ -1079,6 +1080,8 @@ static int resolve_stream_url(nvr_chan_mgr_t *m, slot_t *s, int stream)
             grc = nvr_onvif_get_url(ip, port, user, pass, st, url, sizeof(url),
                                     scopes, sizeof(scopes), vst);
             if (grc == 0) break;
+            if (grc == NVR_ONVIF_AUTH || nvr_onvif_auth_failed(ip, port))
+                auth_seen = 1;
         }
     } else {
         nvr_onvif_connect(ip, port, svc[0] ? svc : NULL, user, pass);
@@ -1098,6 +1101,8 @@ static int resolve_stream_url(nvr_chan_mgr_t *m, slot_t *s, int stream)
                                     scopes, sizeof(scopes), vst);
         }
     }
+    if (grc != 0 && (grc == NVR_ONVIF_AUTH || nvr_onvif_auth_failed(ip, port)))
+        auth_seen = 1;
     /* discovery 无 mac：连上后再取。ARP 权威；没有再 GetNetworkInterfaces。 */
     if (grc == 0) {
         arp_mac_of_ip(ip, amac, sizeof(amac));
@@ -1115,12 +1120,13 @@ static int resolve_stream_url(nvr_chan_mgr_t *m, slot_t *s, int stream)
             snprintf(s->d.enh_random, sizeof(s->d.enh_random), "%s", snap.enh_random);
             if (chg) persist_camera(m, &s->d);
         }
-        /* 试完凭据仍失败 = 鉴权失败(等用户密码)，status 4；已 auth_ready 的重连失败走 3。 */
-        if (need_auth && s->in_use && s->d.chn == chn && !s->sub.auth_fail) {
+        /* 试完凭据仍失败且为鉴权错误 → status 4；网络/超时等保持 3。未激活 nopOnvif 仍报 7。 */
+        if (need_auth && auth_seen && !sub.inactive &&
+            s->in_use && s->d.chn == chn && !s->sub.auth_fail) {
             s->sub.auth_fail = 1;
             chan_notify(m, chn);
         }
-        return -1;
+        return auth_seen ? NVR_ONVIF_AUTH : NVR_ONVIF_ERR;
     }
     if (!s->in_use || s->d.chn != chn) return -1;   /* 解析期间 slot 被增删/换设备 → 丢弃结果 */
     snprintf(s->d.user, sizeof(s->d.user), "%s", user);
@@ -1196,13 +1202,16 @@ static void tick_slot(nvr_chan_mgr_t *m, slot_t *s, time_t now, int *resolve_bud
             if (stream == NVR_STREAM_SUB) persist_camera(m, &s->d);
         } else if (s->first_add) {
             s->url_next = now + 86400 * 365;
-            s->sub.auth_fail = 1;
-            /* 通用 ONVIF/用户密试失败 → 库里空密码。已恢复的 P_enh 或已激活 P_act 保留。 */
-            if (s->d.kind != NVR_DEV_KIND_NOPONVIF && !s->d.enh_random[0])
-                s->d.pass[0] = 0;
-            persist_camera(m, &s->d);
+            if (rr == NVR_ONVIF_AUTH) {
+                /* 通用 ONVIF/用户密试失败 → 库里空密码。已恢复的 P_enh 或已激活 P_act 保留。 */
+                if (s->d.kind != NVR_DEV_KIND_NOPONVIF && !s->d.enh_random[0])
+                    s->d.pass[0] = 0;
+                persist_camera(m, &s->d);
+                NVR_LOGW("chan", "ch%d 首次取流失败(鉴权)，等待用户输入密码", s->d.chn);
+            } else {
+                NVR_LOGW("chan", "ch%d 首次取流失败(非鉴权)，保持连接中", s->d.chn);
+            }
             chan_notify(m, s->d.chn);
-            NVR_LOGW("chan", "ch%d 首次取流失败(鉴权)，等待用户输入密码", s->d.chn);
         } else {
             int back = 30 * s->url_tries;
             s->url_next = now + back;
