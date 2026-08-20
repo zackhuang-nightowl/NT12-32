@@ -393,7 +393,8 @@ int nvr_onvif_probe(const char *ip, int port, const char *user, const char *pass
     return 0;
 }
 
-int nvr_onvif_set_time_now(const char *ip, int port, const char *user, const char *pass)
+int nvr_onvif_set_time_now(const char *ip, int port, const char *user, const char *pass,
+                           const nvr_onvif_time_cfg_t *tz_cfg)
 {
     if (!ip) return -1;
     if (nvr_onvif_init() != 0) return -1;
@@ -401,7 +402,11 @@ int nvr_onvif_set_time_now(const char *ip, int port, const char *user, const cha
     nop_onvif_device_t *dev = nop_onvif_device_retain(ip, port > 0 ? port : 80, NULL, 0);
     if (!dev) return -1;
     nop_onvif_device_lock(dev);
-    int rc = nop_onvif_set_system_datetime_now(dev);
+    int rc;
+    if (tz_cfg && tz_cfg->tz_posix[0])
+        rc = nop_onvif_set_system_datetime_cfg(dev, tz_cfg->tz_posix, tz_cfg->daylight);
+    else
+        rc = nop_onvif_set_system_datetime_now(dev);
     nop_onvif_device_unlock(dev);
     nop_onvif_device_drop(ip, port > 0 ? port : 80);
     return rc == 0 ? 0 : -1;

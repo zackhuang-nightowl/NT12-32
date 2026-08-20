@@ -125,6 +125,9 @@ typedef struct nop_onvif_datetime {
 int nop_onvif_get_system_datetime(nop_onvif_device_t *device, nop_onvif_datetime_t *out);
 /** Set the device clock to the host's current UTC time. */
 int nop_onvif_set_system_datetime_now(nop_onvif_device_t *device);
+/** Set UTC + POSIX TimeZone + DaylightSavings (ONVIF §SetSystemDateAndTime). */
+int nop_onvif_set_system_datetime_cfg(nop_onvif_device_t *device,
+                                      const char *tz_posix, int daylight_savings);
 
 int nop_onvif_reboot(nop_onvif_device_t *device);
 /** @p hard: non-zero = factory hard reset, 0 = soft. */

@@ -1061,6 +1061,34 @@ int nop_onvif_set_system_datetime_now(nop_onvif_device_t *device)
     return SetSystemDateAndTime(&device->dev) ? 0 : -2;
 }
 
+int nop_onvif_set_system_datetime_cfg(nop_onvif_device_t *device,
+                                      const char *tz_posix, int daylight_savings)
+{
+    tds_SetSystemDateAndTime_REQ req;
+    time_t nowtime;
+    struct tm gm;
+
+    if (!device || !tz_posix || !tz_posix[0]) return -1;
+    memset(&req, 0, sizeof(req));
+    nowtime = time(NULL);
+    gmtime_r(&nowtime, &gm);
+
+    req.SystemDateTime.DateTimeType = SetDateTimeType_Manual;
+    req.SystemDateTime.DaylightSavings = daylight_savings ? TRUE : FALSE;
+    snprintf(req.SystemDateTime.TimeZone.TZ, sizeof(req.SystemDateTime.TimeZone.TZ),
+             "%s", tz_posix);
+    req.SystemDateTime.TimeZoneFlag = 1;
+    req.UTCDateTimeFlag = 1;
+    req.UTCDateTime.Date.Year   = gm.tm_year + 1900;
+    req.UTCDateTime.Date.Month  = gm.tm_mon + 1;
+    req.UTCDateTime.Date.Day    = gm.tm_mday;
+    req.UTCDateTime.Time.Hour   = gm.tm_hour;
+    req.UTCDateTime.Time.Minute = gm.tm_min;
+    req.UTCDateTime.Time.Second = gm.tm_sec;
+
+    return onvif_tds_SetSystemDateAndTime(&device->dev, &req, NULL) ? 0 : -2;
+}
+
 int nop_onvif_reboot(nop_onvif_device_t *device)
 {
     if (!device) return -1;

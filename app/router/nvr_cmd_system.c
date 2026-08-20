@@ -98,6 +98,14 @@ char *cmd_X_NightOwl_setTimezone(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     const char *tz  = nvr_jstr(a, "timezone", "");
     const char *dst = nvr_jstr(a, "tz_dst",   "");
+    int vrc;
+
+    vrc = nvr_tz_validate_set(tz, dst);
+    if (vrc == -1)
+        return nvr_resp_err("invalid_tz_dst");
+    if (vrc == -2)
+        return nvr_resp_err("dst_not_supported");
+
     if (dst[0]) {
         nvr_settings_set_str(c->settings, "system.tz_dst", dst);
         if (tz[0]) nvr_settings_set_str(c->settings, "system.timezone", tz);

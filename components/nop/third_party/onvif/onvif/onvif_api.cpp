@@ -108,7 +108,8 @@ HT_API BOOL SetSystemDateAndTime(ONVIF_DEVICE * p_dev)
     localtime_r(&nowtime, &lt);   /* 本进程已按 NVR 时区(/etc/localtime)→ 取相机应随的时区 */
 
     req.SystemDateTime.DateTimeType = SetDateTimeType_Manual;
-    req.SystemDateTime.DaylightSavings = FALSE;   /* 用当前有效偏移(已含 DST),不让相机再叠加 */
+    /* 默认: 固定偏移、不启用夏令(DST 规则由 NVR 经 nop_onvif_set_system_datetime_cfg 下发)。 */
+    req.SystemDateTime.DaylightSavings = FALSE;
     /* ★ 补 TimeZone(POSIX):否则相机保留自身时区,即便 UTC 已设,本地显示时间仍与 NVR 不一致
      * (=用户报的"改系统时间没同步 IPC 时间")。tm_gmtoff=UTC 以东秒;POSIX 符号相反(UTC+8→"GMT-8")。 */
     {

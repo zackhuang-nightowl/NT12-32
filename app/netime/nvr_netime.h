@@ -10,6 +10,7 @@
 #define NVR_NETIME_H
 
 #include "nvr_settings.h"
+#include "nvr_onvif.h"   /* nvr_onvif_time_cfg_t */
 
 #ifdef __cplusplus
 extern "C" {
@@ -74,8 +75,24 @@ int  nvr_time_apply(nvr_settings_t *s);
  * 软链 + 本进程 tzset。供 setTimezone 命令即时生效(GUI 与 nvr_app 两进程都读 /etc/localtime)。 */
 int  nvr_tz_install(nvr_settings_t *s);
 
+/* 解析 "GMT ±H:MM" → 显示偏移分钟(东为正,如 UTC+8 → 480)。失败返回 -1。 */
+int  nvr_tz_parse_gmt_offset_min(const char *timezone);
+
+/* 该标准时区偏移是否允许开启夏令(GUI 24 区中观测 DST 的区域)。 */
+int  nvr_tz_offset_supports_dst(int offset_min);
+
+/* setTimezone 校验: 0=通过; -1=tz_dst 格式非法; -2=该时区不支持夏令。 */
+int  nvr_tz_validate_set(const char *timezone, const char *tz_dst);
+
+/* 按 NVR 设置填充 ONVIF 授时用的 TimeZone/DaylightSavings。 */
+void nvr_time_build_onvif_cfg(nvr_settings_t *s, nvr_onvif_time_cfg_t *cfg);
+
 /* 把 NVR 当前时间经 ONVIF 下发所有已添加相机（后台异步，不阻塞）。 */
 int  nvr_time_push_cameras(nvr_settings_t *s);
+
+/* 单台相机授时(出图/新添加时立刻推;后台异步,不阻塞 tick)。 */
+int  nvr_time_push_device(nvr_settings_t *s, const char *ip, int port,
+                          const char *user, const char *pass);
 
 /* NVR 时钟/时区(含夏令)有效状态变化 → 立即推 IPC 一次(内部 5s debounce)。 */
 void nvr_time_notify_changed(nvr_settings_t *s, const char *reason);

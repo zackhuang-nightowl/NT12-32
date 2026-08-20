@@ -81,7 +81,14 @@ typedef struct {
 int  nvr_onvif_probe(const char *ip, int port, const char *user, const char *pass, nvr_onvif_info_t *out);
 
 /* 仅把 NVR 当前时间经 ONVIF 下发到指定相机(供命令触发的显式校时)。成功返 0。 */
-int  nvr_onvif_set_time_now(const char *ip, int port, const char *user, const char *pass);
+/* ONVIF SetSystemDateAndTime 时区/DST(与 NVR system.timezone/tz_dst 对齐)。 */
+typedef struct {
+    char tz_posix[128];   /* TimeZone.TZ: 无夏令=固定 GMT 偏移; 有夏令=完整 tz_dst POSIX */
+    int  daylight;        /* DaylightSavings: 0=关(忽略 TZ 内 DST 规则); 1=开(启用规则) */
+} nvr_onvif_time_cfg_t;
+
+int  nvr_onvif_set_time_now(const char *ip, int port, const char *user, const char *pass,
+                            const nvr_onvif_time_cfg_t *tz_cfg);
 
 /* 事件抓拍：借一机一 handle 做 GetSnapshot。成功时 *out 由 nop_onvif_free_buffer 释放。
  * vsrc_token 空=首源。超时约数秒；失败返 -1 且 *out=NULL。 */

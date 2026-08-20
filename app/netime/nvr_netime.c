@@ -693,6 +693,113 @@ static int write_min_tzif(const char *posix, const char *path)
     return 0;
 }
 
+/* 把 system.timezone("GMT ±H:MM") 转成 POSIX 固定偏移串(不含夏令规则)。 */
+static void gmt_str_to_posix(const char *gmt_tz, char *out, int cap)
+{
+    const char *p = gmt_tz ? gmt_tz : "";
+    if (strncmp(p, "GMT", 3) == 0) p += 3;
+    while (*p == ' ') p++;
+    int sign = 1;
+    if      (*p == '+') p++;
+    else if (*p == '-') { sign = -1; p++; }
+    int H = 0, M = 0;
+    sscanf(p, "%d:%d", &H, &M);
+    int posix_min = -(sign * (H * 60 + M));
+    int ah = (posix_min < 0 ? -posix_min : posix_min) / 60;
+    int am = (posix_min < 0 ? -posix_min : posix_min) % 60;
+    snprintf(out, cap, "GMT%s%d:%02d", posix_min < 0 ? "-" : "", ah, am);
+}
+
+int nvr_tz_parse_gmt_offset_min(const char *timezone)
+{
+    const char *p = timezone ? timezone : "";
+    if (strncmp(p, "GMT", 3) == 0) p += 3;
+    while (*p == ' ') p++;
+    int sign = 1;
+    if      (*p == '+') p++;
+    else if (*p == '-') { sign = -1; p++; }
+    else if (*p == '\0') return -1;
+    int H = 0, M = 0;
+    if (sscanf(p, "%d:%d", &H, &M) < 1) return -1;
+    return sign * (H * 60 + M);
+}
+
+/* GUI SystemInfo 24 区中实际有夏令切换的 UTC 偏移(分钟,东为正)。 */
+int nvr_tz_offset_supports_dst(int offset_min)
+{
+    static const int k[] = {
+        -720,-660,-600,-570,-540,-510,-480,-420,-390,-360,-330,-300,-270,-240,-210,-180,-120,-60,
+        0, 60, 120, 180, 210, 570, 600, 720, 780
+    };
+    for (size_t i = 0; i < sizeof(k)/sizeof(k[0]); i++)
+        if (k[i] == offset_min) return 1;
+    return 0;
+}
+
+/* 从 POSIX tz_dst 串解析标准偏移(显示分钟,东为正)。 */
+static int posix_std_offset_display_min(const char *posix)
+{
+    const char *p = posix ? posix : "";
+    while (*p && ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z'))) p++;
+    if (!*p) return -9999;
+    int sign = 1;
+    if      (*p == '+') p++;
+    else if (*p == '-') { sign = -1; p++; }
+    else return -9999;
+    int H = 0, M = 0;
+    if (sscanf(p, "%d:%d", &H, &M) < 1) return -9999;
+    return -(sign * (H * 60 + M));
+}
+
+int nvr_tz_validate_set(const char *timezone, const char *tz_dst)
+{
+    int off;
+    if (!tz_dst || !tz_dst[0]) return 0;
+    if (!strchr(tz_dst, ',')) return -1;
+    if (timezone && timezone[0]) {
+        off = nvr_tz_parse_gmt_offset_min(timezone);
+    } else {
+        off = posix_std_offset_display_min(tz_dst);
+    }
+    if (off == -9999) return -1;
+    if (!nvr_tz_offset_supports_dst(off)) return -2;
+    return 0;
+}
+
+void nvr_time_build_onvif_cfg(nvr_settings_t *s, nvr_onvif_time_cfg_t *cfg)
+{
+    char dst[80] = {0}, tz[64];
+    if (!cfg) return;
+    memset(cfg, 0, sizeof(*cfg));
+    if (s) {
+        nvr_settings_get_str(s, "system.tz_dst", dst, sizeof(dst), "");
+        nvr_settings_get_str(s, "system.timezone", tz, sizeof(tz), NVR_DEF_TIMEZONE);
+    }
+    if (dst[0]) {
+        snprintf(cfg->tz_posix, sizeof(cfg->tz_posix), "%s", dst);
+        cfg->daylight = 1;
+    } else {
+        char posix[96];
+        if (tz[0]) gmt_str_to_posix(tz, posix, sizeof(posix));
+        else {
+            time_t now = time(NULL);
+            struct tm lt;
+            localtime_r(&now, &lt);
+            long off = lt.tm_gmtoff;
+            int sign = (off < 0) ? -1 : 1;
+            long a = (off < 0) ? -off : off;
+            int hh = (int)(a / 3600), mm = (int)((a % 3600) / 60);
+            int posix_min = -(sign * (hh * 60 + mm));
+            int ah = (posix_min < 0 ? -posix_min : posix_min) / 60;
+            int am = (posix_min < 0 ? -posix_min : posix_min) % 60;
+            snprintf(posix, sizeof(posix), "GMT%s%d:%02d",
+                     posix_min < 0 ? "-" : "", ah, am);
+        }
+        snprintf(cfg->tz_posix, sizeof(cfg->tz_posix), "%s", posix);
+        cfg->daylight = 0;
+    }
+}
+
 /* 把 system.timezone("GMT ±H:MM")/ system.tz_dst(POSIX DST 串) 转成合法 POSIX TZ 串。
  * tz_dst 若非空按协议优先(已是 POSIX,原样用);否则由 GMT 偏移换算(注意 POSIX 符号相反:
  * 显示 UTC-5 → POSIX 偏移 +5 → "GMT5";显示 UTC+8 → "GMT-8")。 */
@@ -703,17 +810,7 @@ static void build_posix_tz(nvr_settings_t *s, char *out, int cap)
     if (dst[0]) { snprintf(out, cap, "%s", dst); return; }
 
     char tz[64]; nvr_settings_get_str(s, "system.timezone", tz, sizeof(tz), NVR_DEF_TIMEZONE);
-    const char *p = tz;
-    if (strncmp(p, "GMT", 3) == 0) p += 3;
-    while (*p == ' ') p++;
-    int sign = 1;
-    if      (*p == '+') p++;
-    else if (*p == '-') { sign = -1; p++; }
-    int H = 0, M = 0; sscanf(p, "%d:%d", &H, &M);
-    int posix_min = -(sign * (H * 60 + M));       /* POSIX 偏移符号与显示相反 */
-    int ah = (posix_min < 0 ? -posix_min : posix_min) / 60;
-    int am = (posix_min < 0 ? -posix_min : posix_min) % 60;
-    snprintf(out, cap, "GMT%s%d:%02d", posix_min < 0 ? "-" : "", ah, am);
+    gmt_str_to_posix(tz, out, cap);
 }
 
 /* 安装时区(不含 NTP):构造 POSIX → 生成 TZif → 软链 /etc/localtime → 本进程 tzset。
@@ -738,30 +835,98 @@ int nvr_tz_install(nvr_settings_t *s)
 
 /* ---- 相机 ONVIF 授时:把 NVR 当前时间下发所有已添加相机(改时区/改时间时触发) ---- */
 #define NVR_TZ_CAM_CAP 64   /* 相机快照上限(=最大通道数) */
-typedef struct { int n; nvr_camera_row_t rows[NVR_TZ_CAM_CAP]; } cam_push_ctx_t;
+typedef struct {
+    nvr_camera_row_t row;
+    nvr_onvif_time_cfg_t tz_cfg;
+} cam_push_one_ctx_t;
+
+typedef struct {
+    int n;
+    nvr_camera_row_t rows[NVR_TZ_CAM_CAP];
+    nvr_onvif_time_cfg_t tz_cfg;
+} cam_push_ctx_t;
+
+static int cam_push_one_try(const nvr_camera_row_t *r, const nvr_onvif_time_cfg_t *tz)
+{
+    int port, attempt, ok = 0;
+    if (!r || !r->ip[0] || !tz) return 0;
+    port = r->onvif_port > 0 ? r->onvif_port : 80;
+    for (attempt = 1; attempt <= 3; attempt++) {
+        if (nvr_onvif_set_time_now(r->ip, port, r->username, r->password, tz) == 0) {
+            ok = 1;
+            break;
+        }
+        NVR_LOGW("time", "相机授时失败(第%d/3次) ip=%s port=%d", attempt, r->ip, port);
+        if (attempt < 3) sleep(2);
+    }
+    if (ok)
+        NVR_LOGI("time", "相机授时 OK ip=%s port=%d (dst=%s tz=%s)",
+                 r->ip, port, tz->daylight ? "on" : "off", tz->tz_posix);
+    else
+        NVR_LOGW("time", "相机授时最终失败 ip=%s port=%d", r->ip, port);
+    return ok;
+}
+
+static void *cam_push_one_thread(void *arg)
+{
+    cam_push_one_ctx_t *c = (cam_push_one_ctx_t *)arg;
+    if (c) {
+        (void)cam_push_one_try(&c->row, &c->tz_cfg);
+        free(c);
+    }
+    return NULL;
+}
+
+static int cam_push_one_async(nvr_settings_t *s, const nvr_camera_row_t *row)
+{
+    cam_push_one_ctx_t *ctx;
+    pthread_t th;
+    pthread_attr_t at;
+
+    if (!s || !row || !row->ip[0]) return -1;
+    ctx = (cam_push_one_ctx_t *)calloc(1, sizeof(*ctx));
+    if (!ctx) return -1;
+    ctx->row = *row;
+    nvr_time_build_onvif_cfg(s, &ctx->tz_cfg);
+    pthread_attr_init(&at);
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&th, &at, cam_push_one_thread, ctx) != 0) {
+        pthread_attr_destroy(&at);
+        free(ctx);
+        return -1;
+    }
+    pthread_attr_destroy(&at);
+    NVR_LOGI("time", "相机 ONVIF 授时: 后台下发 ip=%s", row->ip);
+    return 0;
+}
+
+int nvr_time_push_device(nvr_settings_t *s, const char *ip, int port,
+                         const char *user, const char *pass)
+{
+    nvr_camera_row_t row;
+    if (!s || !ip || !ip[0]) return -1;
+    memset(&row, 0, sizeof(row));
+    snprintf(row.ip, sizeof(row.ip), "%s", ip);
+    row.onvif_port = port > 0 ? port : 80;
+    row.enabled = 1;
+    if (user) snprintf(row.username, sizeof(row.username), "%s", user);
+    if (pass) snprintf(row.password, sizeof(row.password), "%s", pass);
+    return cam_push_one_async(s, &row);
+}
 
 static void *cam_push_thread(void *arg)
 {
     cam_push_ctx_t *c = (cam_push_ctx_t *)arg;
-    int ok = 0, attempted = 0;
-    for (int i = 0; i < c->n; i++) {
+    int ok = 0, attempted = 0, i;
+    if (!c) return NULL;
+    for (i = 0; i < c->n; i++) {
         nvr_camera_row_t *r = &c->rows[i];
         if (!r->enabled || !r->ip[0]) continue;
         attempted++;
-        /* 统一走 ONVIF SetSystemDateAndTime(含 NOP 设备——其亦支持 ONVIF;service_url=NULL 时
-         * nvr_onvif_connect 内部 WS-Discovery 会纠正真实 ONVIF 端点)。授时含 UTC 时间 + 时区
-         * (见 onvif_api.cpp SetSystemDateAndTime:补了 TimeZone,否则相机时区不随 NVR→显示不同步)。 */
-        int port = r->onvif_port > 0 ? r->onvif_port : 80;
-        int done = 0;
-        for (int attempt = 1; attempt <= 3; attempt++) {   /* 失败重试 3 次(含发现,偶发超时) */
-            if (nvr_onvif_set_time_now(r->ip, port, r->username, r->password) == 0) { done = 1; break; }
-            NVR_LOGW("time", "相机授时失败(第%d/3次) ip=%s port=%d backend=%d", attempt, r->ip, port, r->backend);
-            if (attempt < 3) sleep(2);   /* 退避后重试 */
-        }
-        if (done) ok++;
-        else NVR_LOGW("time", "相机授时最终失败(已重试3次) ip=%s port=%d", r->ip, port);
+        if (cam_push_one_try(r, &c->tz_cfg)) ok++;
     }
-    NVR_LOGI("time", "相机 ONVIF 授时完成: %d/%d 成功", ok, attempted);
+    NVR_LOGI("time", "相机 ONVIF 授时完成: %d/%d (dst=%s tz=%s)",
+             ok, attempted, c->tz_cfg.daylight ? "on" : "off", c->tz_cfg.tz_posix);
     free(c);
     return NULL;
 }
@@ -775,6 +940,7 @@ int nvr_time_push_cameras(nvr_settings_t *s)
     if (!ctx) return -1;
     ctx->n = nvr_settings_camera_list(s, ctx->rows, NVR_TZ_CAM_CAP);
     if (ctx->n <= 0) { free(ctx); NVR_LOGI("time", "无已添加相机,跳过授时"); return 0; }
+    nvr_time_build_onvif_cfg(s, &ctx->tz_cfg);
     pthread_t th;
     pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
     if (pthread_create(&th, &at, cam_push_thread, ctx) != 0) { pthread_attr_destroy(&at); free(ctx); return -1; }
@@ -872,7 +1038,7 @@ int nvr_time_apply(nvr_settings_t *s)
     if (!s) return -1;
     nvr_tz_install(s);
     tz_snapshot_update();
-    nvr_time_notify_changed(s, "boot");
+    /* IPC 授时在通道首次出图时逐台推(nvr_time_push_device);此处不批量推(开机时多数未连上)。 */
     ntp_sync_async(s);
     return 0;
 }

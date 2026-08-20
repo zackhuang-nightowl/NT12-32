@@ -8,6 +8,7 @@
 #include "nvr_dev_classify.h" /* nvr_dev_classify */
 #include "nvr_chan_nop_sync.h"
 #include "nvr_chan_bind.h"
+#include "nvr_netime.h"
 #include "nvr_log.h"
 
 #include <stdio.h>
@@ -1246,6 +1247,12 @@ static void tick_slot(nvr_chan_mgr_t *m, slot_t *s, time_t now, int *resolve_bud
                 chan_notify(m, s->d.chn);   /* 通知 gui 该通道状态变(→CNN),重拉状态出图 */
                 NVR_LOGI("chan", "ch%d ONLINE 出图", s->d.chn);
                 if (m->cfg.on_online) m->cfg.on_online(m->cfg.user, s->d.chn);
+                /* 出图即授时:开机重连 / 新添加设备首次连上,立刻同步 NVR 时间到 IPC */
+                if (m->cfg.settings && s->d.onvif_ip[0]) {
+                    (void)nvr_time_push_device(m->cfg.settings, s->d.onvif_ip,
+                        s->d.onvif_port > 0 ? s->d.onvif_port : 80,
+                        s->d.user, s->d.pass);
+                }
             }
             /* discovery 无 mac：连上后 ARP 表才有项。ARP 一旦出现即以它覆盖，供 IP 变更找回。 */
             {
