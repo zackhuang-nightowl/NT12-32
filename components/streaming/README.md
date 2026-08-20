@@ -35,19 +35,19 @@ components/onvif ── GetStreamUri ──► rtsp://198.18.N.100/main
 ## 关键实现点
 
 1. **每通道一个 `CRtspClient`**（16 路 → 16 实例，`stream_mgr` 用 chn 作槽位）。
-2. **裸帧 → Frame Hub**：`video_cb` → CI(只 mark disc/gen) → **HUB fanout** → BS旁路 / **RecordQueue** / **LiveQueue** → VDEC。
+2. **裸帧 → Frame Hub**：`video_cb` → CI → **Live 优先** → RecordQueue **push only** → Record Worker → rsdk。
 3. **通道关联**：`set_notify_cb(cb, chan_ctx)` → 各回调 userdata 即通道上下文（已验证 happytime 回调传的就是它）。
-4. **录像**：`WAIT_IDR→RECORDING` 状态机；disc/gen 打 gap 内联标记(`type_mask bit31`)；**RecordQueue(96)** 解耦磁盘抖动，满不丢帧、高水位告警。
-5. **Live**：`WAIT_IDR→SYNCED→RESYNC`；LiveQueue **双阈值**(8 帧 + 500ms)；RESYNC 立即注入 bootstrap IDR。
+4. **录像**：puller **只入队**；**Record Worker** 单线程串行 `rsdk_rec_write_frame`(RSDK 无 mutex,安全); 音视频同队列(主流)。
+5. **Live**：`WAIT_IDR→SYNCED→RESYNC`；LiveQueue 双阈值；与写盘完全解耦。
 6. **codec 自适应**：`NVR_CODEC_AUTO` 时用 `CRtspClient::video_codec()`（SDP 探测）→ 映射 rsdk codec。
 7. **主/子码流**：`nvr_stream_switch_stream` 换 url 重连；预览大画面主码流、分屏子码流。
 8. **强制 RTP over TCP**（TCP 重传保证主/子录像不丢包；拉流层忽略 over_tcp=0）。
 
 ```text
-RTSP/TCP → AU → CI(mark disc/gen)
-              → HUB ─┬─ BS(旁路: par+IDR AU)
-                     ├─ RecordQueue → REC(WAIT_IDR|RECORDING) → rsdk
-                     └─ LiveQueue(8帧+500ms) → LIVE SM → VDEC
+RTSP/TCP → AU → CI(mark)
+              → LiveQueue → VDEC
+              → RecordQueue(push) ──► Record Worker ──► rsdk/Disk
+              BS(旁路 par+IDR)
 ```
 
 ## app 侧用法

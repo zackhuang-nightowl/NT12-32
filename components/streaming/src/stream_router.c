@@ -9,6 +9,7 @@
 #include "stream_internal.h"
 #include "stream_nal.h"
 #include "stream_hub.h"
+#include "stream_record_worker.h"
 #include "mhal_vout.h"
 #include "nvr_log.h"
 #include <stdlib.h>
@@ -104,23 +105,19 @@ static void stream_pre_push(stream_pull_t *p, const uint8_t *data, int len,
     p->pre_head = (p->pre_head + 1) % p->pre_cap;
 }
 
-/* 把本路预录环 flush 到对应 writer(从最早关键帧起)。 */
+/* 把本路预录环 flush 到主流 RecordQueue( worker 写盘)。 */
 static void stream_pre_flush(stream_chan_t *c, stream_pull_t *p)
 {
-    rsdk_writer_t *w;
     int i, idx, oldest, started = 0;
     int *gated;
-    if (!c || !p) return;
-    w = writer_of(c, p->stream);
-    gated = (p->stream == NVR_STREAM_SUB) ? &c->rec_gated_sub : &c->rec_gated_main;
-    if (!w || !p->pre_frames || p->pre_count <= 0) {
+    if (!c || !p || !p->pre_frames || p->pre_count <= 0) {
         stream_pre_clear(p);
         return;
     }
+    gated = (p->stream == NVR_STREAM_SUB) ? &c->rec_gated_sub : &c->rec_gated_main;
     oldest = (p->pre_head - p->pre_count + p->pre_cap) % p->pre_cap;
     for (i = 0; i < p->pre_count; i++) {
         stream_pre_frame_t *b;
-        rsdk_frame_t f;
         idx = (oldest + i) % p->pre_cap;
         b = &p->pre_frames[idx];
         if (!b->data || b->len == 0) continue;
@@ -130,18 +127,14 @@ static void stream_pre_flush(stream_chan_t *c, stream_pull_t *p)
             p->rec_state = STREAM_REC_RECORDING;
             *gated = 1;
         }
-        memset(&f, 0, sizeof(f));
-        f.chn = (uint16_t)c->cfg.chn;
-        f.stream = (uint8_t)p->stream;
-        f.codec = b->codec;
-        f.frame_type = b->frame_type;
-        f.pts = (uint64_t)b->ts;
-        f.wall_time = (uint64_t)time(NULL);
-        f.data = b->data;
-        f.len = b->len;
-        rsdk_rec_write_frame(w, &f);
+        if (stream_record_q_push(&p->rec_q, b->data, b->len, b->ts,
+                                 b->is_key, 0, b->frame_type, b->codec,
+                                 STREAM_REC_MEDIA_VIDEO) != 0)
+            NVR_LOGW("record", "ch%d[%s] 预录 flush 入队失败", c->cfg.chn,
+                     p->stream == NVR_STREAM_SUB ? "子" : "主");
     }
     stream_pre_clear(p);
+    stream_record_worker_poke();
 }
 
 /* puller 线程:事件片段开始时补开 writer(owns writer,可 open)。 */
@@ -168,102 +161,17 @@ static void stream_event_writers_open(stream_chan_t *c)
     stream_rec_mask_poke(c);
 }
 
-static void stream_apply_event_tags(stream_chan_t *c)
+static void stream_apply_event_tags_puller(stream_chan_t *c)
 {
-    uint64_t pend = c->pend_event_id;
-    if (pend != c->applied_event_id) {
-        if (c->writer_main) {
-            rsdk_rec_set_event(c->writer_main, pend);
-            if (pend)
-                rsdk_rec_mark_event(c->writer_main, pend, c->pend_event_rectype,
-                                    c->pend_event_start, c->pend_event_end,
-                                    (uint32_t)(1u << (c->pend_event_rectype & 31)), 0);
-        }
-        if (c->writer_sub) rsdk_rec_set_event(c->writer_sub, pend);
-        c->applied_event_id = pend;
-    } else if (c->applied_event_id && c->pend_event_end &&
-               (uint32_t)time(NULL) > c->pend_event_end) {
-        if (c->writer_main) rsdk_rec_set_event(c->writer_main, 0);
-        if (c->writer_sub)  rsdk_rec_set_event(c->writer_sub, 0);
-        c->applied_event_id = 0; c->pend_event_id = 0;
-        if (c->event_clip) {
-            /* 事件窗结束:停写并关 writer,回到预录待命 */
-            stream_close_writer(c);
-            c->event_clip = 0;
-            c->pmain.pre_flushed = 0;
-            c->psub.pre_flushed = 0;
-            stream_rec_mask_poke(c);
-        }
-    }
-}
-
-static void stream_write_rec_frame(stream_chan_t *c, stream_pull_t *p,
-                                   const uint8_t *data, int len, uint32_t ts,
-                                   const nal_class_t *nc)
-{
-    rsdk_writer_t *wrec = writer_of(c, p->stream);
-    rsdk_frame_t f;
-    if (!wrec || !data || len <= 0 || !nc) return;
-
-    if (p->rec_state == STREAM_REC_WAIT_IDR) {
-        if (!nc->is_key) return;
-        p->rec_state = STREAM_REC_RECORDING;
-        if (p->stream == NVR_STREAM_SUB) c->rec_gated_sub = 1;
-        else c->rec_gated_main = 1;
-    }
-    memset(&f, 0, sizeof(f));
-    f.chn = (uint16_t)c->cfg.chn;
-    f.stream = (uint8_t)p->stream;
-    f.codec = (uint8_t)p->codec;
-    f.frame_type = (uint8_t)nc->frame_type;
-    f.pts = (uint64_t)ts;
-    f.wall_time = (uint64_t)time(NULL);
-    f.data = data;
-    f.len = (uint32_t)len;
-    rsdk_rec_write_frame(wrec, &f);
-}
-
-/* 录像索引 gap 标记(type_mask bit31 = 码流不连续/重连边界) */
-#define STREAM_REC_GAP_TYPE_MASK  0x80000000u
-
-static void stream_rec_mark_gap(stream_chan_t *c, stream_pull_t *p, const char *reason)
-{
-    rsdk_writer_t *wrec = writer_of(c, p->stream);
-    if (!wrec) return;
-    rsdk_rec_mark_event(wrec, 0, RSDK_REC_CONTINUOUS, (uint32_t)time(NULL), 0,
-                          STREAM_REC_GAP_TYPE_MASK, 0);
-    NVR_LOGW("record", "ch%d[%s] gap: %s gen=%u",
-             c->cfg.chn, p->stream == NVR_STREAM_SUB ? "子" : "主",
-             reason ? reason : "disc", p->conn_gen);
-}
-
-/* 消费 RecordQueue → rsdk(同 puller 线程, owns writer) */
-static void stream_record_drain(stream_chan_t *c, stream_pull_t *p, int budget)
-{
-    rsdk_writer_t *wrec;
-    int n = 0;
-    if (!c || !p) return;
-    wrec = writer_of(c, p->stream);
-    if (!wrec) {
-        stream_record_q_flush(&p->rec_q);
-        return;
-    }
-    if (p->rec_q.stall_logged && p->rec_q.count >= STREAM_RECORD_Q_HIGH_WM)
-        NVR_LOGW("record", "ch%d[%s] RecordQueue 高水位 %d/%d (stall=%u)",
-                 c->cfg.chn, p->stream == NVR_STREAM_SUB ? "子" : "主",
-                 p->rec_q.count, STREAM_RECORD_Q_CAP, p->rec_q.stall_cnt);
-
-    while (p->rec_q.count > 0 && (budget <= 0 || n < budget)) {
-        const stream_record_slot_t *s = stream_record_q_peek(&p->rec_q);
-        nal_class_t nc;
-        if (!s || !s->data || s->len == 0) { stream_record_q_pop(&p->rec_q); continue; }
-        memset(&nc, 0, sizeof(nc));
-        nc.is_key = s->is_key;
-        nc.is_param = s->is_param;
-        nc.frame_type = s->frame_type;
-        stream_write_rec_frame(c, p, s->data, (int)s->len, s->ts, &nc);
-        stream_record_q_pop(&p->rec_q);
-        n++;
+    /* 事件窗结束需 puller 侧关 writer(会 flush); 其余标签由 worker 应用 */
+    if (!c) return;
+    if (c->applied_event_id && c->pend_event_end &&
+        (uint32_t)time(NULL) > c->pend_event_end && c->event_clip) {
+        stream_close_writer(c);
+        c->event_clip = 0;
+        c->pmain.pre_flushed = 0;
+        c->psub.pre_flushed = 0;
+        stream_rec_mask_poke(c);
     }
 }
 
@@ -272,32 +180,43 @@ static int stream_record_enqueue(stream_chan_t *c, stream_pull_t *p,
                                  const nal_class_t *nc)
 {
     int rc;
+    (void)c;
     if (!data || len <= 0 || !nc || nc->is_param) return 0;
     rc = stream_record_q_push(&p->rec_q, data, (uint32_t)len, ts,
                               nc->is_key, nc->is_param, (uint8_t)nc->frame_type,
-                              (uint8_t)p->codec);
-    if (rc == 0) return 0;
-    stream_record_drain(c, p, 0);
-    rc = stream_record_q_push(&p->rec_q, data, (uint32_t)len, ts,
-                              nc->is_key, nc->is_param, (uint8_t)nc->frame_type,
-                              (uint8_t)p->codec);
-    if (rc != 0)
-        NVR_LOGE("record", "ch%d[%s] RecordQueue 满且 drain 后仍无法入队 len=%d",
-                 c->cfg.chn, p->stream == NVR_STREAM_SUB ? "子" : "主", len);
-    return rc;
+                              (uint8_t)p->codec, STREAM_REC_MEDIA_VIDEO);
+    if (rc != 0) {
+        if (p->rec_q.stall_cnt <= 20 || (p->rec_q.stall_cnt % 50) == 0)
+            NVR_LOGE("record", "ch%d[%s] RecordQueue 满 len=%d (stall=%u)",
+                     p->owner->cfg.chn, p->stream == NVR_STREAM_SUB ? "子" : "主",
+                     len, p->rec_q.stall_cnt);
+        return rc;
+    }
+    stream_record_worker_poke();
+    return 0;
 }
 
-/* Recorder: 感知 conn_gen / disc(不丢帧, 只打 gap 标记) */
+static int stream_record_enqueue_audio(stream_pull_t *p,
+                                       const uint8_t *data, int len, uint32_t ts)
+{
+    int rc;
+    if (!p || !p->owner || !data || len <= 0) return 0;
+    rc = stream_record_q_push(&p->rec_q, data, (uint32_t)len, ts,
+                              0, 0, RSDK_FRAME_AUDIO, RSDK_CODEC_AAC,
+                              STREAM_REC_MEDIA_AUDIO);
+    if (rc != 0) return rc;
+    stream_record_worker_poke();
+    return 0;
+}
+
+/* Recorder: puller 只置 gap 标记; worker 写 rsdk 标记 */
 static void stream_rec_notify_disc(stream_chan_t *c, stream_pull_t *p)
 {
-    if (p->conn_gen != p->rec_last_gen) {
-        if (p->rec_state == STREAM_REC_RECORDING)
-            stream_rec_mark_gap(c, p, "generation_changed");
-        p->rec_last_gen = p->conn_gen;
-    }
+    (void)c;
+    if (p->conn_gen != p->rec_last_gen)
+        p->rec_gap_pending = 1;
     if (p->disc_mark) {
-        if (p->rec_state == STREAM_REC_RECORDING)
-            stream_rec_mark_gap(c, p, "continuity_disc");
+        p->rec_gap_pending = 1;
         p->disc_mark = 0;
     }
 }
@@ -462,23 +381,6 @@ void stream_open_writer(stream_chan_t *c, rsdk_group_t *grp)
     stream_rec_mask_poke(c);
 }
 
-/* 运行时关录像 writer(录像开关关闭时立即停录,拉流/解码不动)。 */
-void stream_close_writer(stream_chan_t *c)
-{
-    if (!c) return;
-    if (!c->writer_main && !c->writer_sub) { c->rec_gated_main = 0; c->rec_gated_sub = 0; return; }
-    stream_record_drain(c, &c->pmain, 0);
-    stream_record_drain(c, &c->psub, 0);
-    if (c->writer_main) { rsdk_rec_close(c->writer_main); c->writer_main = NULL; }
-    if (c->writer_sub)  { rsdk_rec_close(c->writer_sub);  c->writer_sub  = NULL; }
-    stream_record_q_flush(&c->pmain.rec_q);
-    stream_record_q_flush(&c->psub.rec_q);
-    c->pmain.rec_state = c->psub.rec_state = STREAM_REC_WAIT_IDR;
-    c->rec_gated_main = 0; c->rec_gated_sub = 0;
-    NVR_LOGI("stream", "chn%d 录像开关关→停录(关双 writer)", c->cfg.chn);
-    stream_rec_mask_poke(c);
-}
-
 /* 开主/子双 writer。可见则同时开解码。 */
 rsdk_err_t stream_router_open(stream_chan_t *c, rsdk_group_t *grp)
 {
@@ -577,42 +479,10 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
         }
     }
 
-    /* --- HUB fanout: disc/gen → Recorder; RecordQueue / LiveQueue --- */
+    /* --- HUB fanout: Live 优先(录像写盘不可阻塞 puller/on_video) --- */
     had_disc = p->disc_mark;
-    if (p->conn_gen != p->rec_last_gen || had_disc)
-        stream_rec_notify_disc(c, p);
 
-    /* --- Record 路径: RQ → drain → rsdk(不丢帧; WAIT_IDR→RECORDING) --- */
-    if (c->cfg.record) {
-        stream_apply_event_tags(c);
-        if (!nc.is_param)
-            (void)stream_record_enqueue(c, p, data, len, ts, &nc);
-    } else if (c->event_arm) {
-        if (!c->event_clip && p->stream == NVR_STREAM_MAIN &&
-            (c->writer_main || c->writer_sub))
-            stream_close_writer(c);
-        if (c->event_clip) {
-            if (p->stream == NVR_STREAM_MAIN) {
-                if (!c->writer_main && !c->writer_sub) stream_event_writers_open(c);
-                stream_apply_event_tags(c);
-            }
-            if (writer_of(c, p->stream)) {
-                if (!p->pre_flushed) {
-                    stream_pre_flush(c, p);
-                    p->pre_flushed = 1;
-                }
-                if (!nc.is_param)
-                    (void)stream_record_enqueue(c, p, data, len, ts, &nc);
-            }
-        } else if (!nc.is_param && c->pre_record_s > 0) {
-            if (stream_pre_ensure(p, c->pre_record_s) == 0)
-                stream_pre_push(p, data, len, ts, nc.is_key, p->codec, nc.frame_type);
-        }
-    } else if (!c->event_clip && (c->pmain.pre_frames || c->psub.pre_frames)) {
-        stream_pre_free_chan(c);
-    }
-
-    /* --- Live 路径: LQ(双阈值) → SM → VDEC --- */
+    /* --- Live 路径: LQ(双阈值) → SM → VDEC(必须在 Record 写盘之前) --- */
     if (c->vdec && p->stream == c->decode_stream && !nc.is_param) {
         if (p->conn_gen != c->live_gen) {
             c->live_gen = p->conn_gen;
@@ -630,7 +500,38 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
         }
     }
 
-    stream_record_drain(c, p, 4);
+    if (p->conn_gen != p->rec_last_gen || had_disc)
+        stream_rec_notify_disc(c, p);
+
+    /* --- Record 路径: 只入队 + poke worker; rsdk 写盘不在 puller 内 --- */
+    if (c->cfg.record) {
+        stream_apply_event_tags_puller(c);
+        if (!nc.is_param)
+            (void)stream_record_enqueue(c, p, data, len, ts, &nc);
+    } else if (c->event_arm) {
+        if (!c->event_clip && p->stream == NVR_STREAM_MAIN &&
+            (c->writer_main || c->writer_sub))
+            stream_close_writer(c);
+        if (c->event_clip) {
+            if (p->stream == NVR_STREAM_MAIN) {
+                if (!c->writer_main && !c->writer_sub) stream_event_writers_open(c);
+                stream_apply_event_tags_puller(c);
+            }
+            if (writer_of(c, p->stream)) {
+                if (!p->pre_flushed) {
+                    stream_pre_flush(c, p);
+                    p->pre_flushed = 1;
+                }
+                if (!nc.is_param)
+                    (void)stream_record_enqueue(c, p, data, len, ts, &nc);
+            }
+        } else if (!nc.is_param && c->pre_record_s > 0) {
+            if (stream_pre_ensure(p, c->pre_record_s) == 0)
+                stream_pre_push(p, data, len, ts, nc.is_key, p->codec, nc.frame_type);
+        }
+    } else if (!c->event_clip && (c->pmain.pre_frames || c->psub.pre_frames)) {
+        stream_pre_free_chan(c);
+    }
 
     if (tmp) free(tmp);
 
@@ -645,29 +546,36 @@ void stream_route_audio(stream_pull_t *p, const uint8_t *data, int len, uint32_t
         nvr_rtsp_live_feed_audio(c->cfg.chn, data, len, ts);
     /* 音频录像:挂主流 writer,stream=2/codec=AAC。仅主路带音频。 */
     int writing = c->cfg.record || c->event_clip;
-    if (!writing || !c->writer_main || !c->rec_gated_main || !data || len <= 0) return;
-    rsdk_frame_t f;
-    memset(&f, 0, sizeof(f));
-    f.chn        = (uint16_t)c->cfg.chn;
-    f.stream     = 2;
-    f.codec      = RSDK_CODEC_AAC;
-    f.frame_type = RSDK_FRAME_AUDIO;
-    f.pts        = (uint64_t)ts;
-    f.wall_time  = (uint64_t)time(NULL);
-    f.data       = data;
-    f.len        = (uint32_t)len;
-    rsdk_rec_write_frame(c->writer_main, &f);
+    if (writing && c->writer_main && c->rec_gated_main && data && len > 0)
+        (void)stream_record_enqueue_audio(&c->pmain, data, len, ts);
+}
+
+void stream_close_writer_noflush(stream_chan_t *c)
+{
+    if (!c) return;
+    if (!c->writer_main && !c->writer_sub) { c->rec_gated_main = 0; c->rec_gated_sub = 0; return; }
+    if (c->writer_main) { rsdk_rec_close(c->writer_main); c->writer_main = NULL; }
+    if (c->writer_sub)  { rsdk_rec_close(c->writer_sub);  c->writer_sub  = NULL; }
+    stream_record_q_flush(&c->pmain.rec_q);
+    stream_record_q_flush(&c->psub.rec_q);
+    c->pmain.rec_state = c->psub.rec_state = STREAM_REC_WAIT_IDR;
+    c->rec_gated_main = 0; c->rec_gated_sub = 0;
+    NVR_LOGI("stream", "chn%d 录像开关关→停录(关双 writer)", c->cfg.chn);
+}
+
+void stream_close_writer(stream_chan_t *c)
+{
+    if (!c) return;
+    stream_record_worker_flush_sync(5000);
+    stream_close_writer_noflush(c);
+    stream_rec_mask_poke(c);
 }
 
 void stream_router_close(stream_chan_t *c)
 {
     if (!c) return;
-    stream_record_drain(c, &c->pmain, 0);
-    stream_record_drain(c, &c->psub, 0);
-    if (c->writer_main) { rsdk_rec_close(c->writer_main); c->writer_main = NULL; }
-    if (c->writer_sub)  { rsdk_rec_close(c->writer_sub);  c->writer_sub  = NULL; }
-    stream_record_q_flush(&c->pmain.rec_q);
-    stream_record_q_flush(&c->psub.rec_q);
+    stream_record_worker_flush_sync(5000);
+    stream_close_writer_noflush(c);
     if (c->vdec)   { mhal_vdec_close(c->vdec);   c->vdec = NULL; }
     c->live_state = STREAM_LIVE_IDLE;
     stream_live_q_flush(&c->live_q);

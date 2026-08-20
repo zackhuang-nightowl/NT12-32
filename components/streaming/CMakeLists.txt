@@ -7,11 +7,15 @@ set(OCL ${CMAKE_CURRENT_SOURCE_DIR}/../../../NT12-SDK/OnvifClientLibrary)
 
 add_library(nvr_streaming STATIC
     src/stream_nal.c        # 纯 C：NAL 分类
-    src/stream_hub.c        # 纯 C：Live 队列
+    src/stream_hub.c        # 纯 C：Live/Record 队列
+    src/stream_record_worker.c  # 纯 C：Record Worker 写盘
     src/stream_router.c     # 纯 C：一帧 → hub → vdec + recorder
     src/stream_puller.cpp   # C++：CRtspClient 封装
     src/stream_mgr.cpp      # C++：16 路生命周期，实现 C API
 )
+
+find_package(Threads REQUIRED)
+target_link_libraries(nvr_streaming PUBLIC Threads::Threads)
 
 target_include_directories(nvr_streaming PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include

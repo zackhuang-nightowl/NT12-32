@@ -76,6 +76,7 @@ typedef struct stream_pull {
     /* Recorder 状态机 + 异步写盘队列(解耦磁盘抖动与 on_video) */
     stream_rec_state_t rec_state;
     unsigned         rec_last_gen;
+    volatile int     rec_gap_pending;   /* puller 置位; worker 写 gap 标记后清 */
     stream_record_q_t rec_q;
 
     /* 事件预录环(本路独占;主/子 puller 各写各的,无跨线程争用) */
@@ -129,10 +130,22 @@ typedef struct stream_chan {
     unsigned         live_gen;      /* 已对齐的 pull conn_gen;不一致则 RESYNC */
 } stream_chan_t;
 
+/* stream_mgr 完整定义(record worker 需遍历通道) */
+struct nvr_stream_mgr {
+    nvr_stream_mgr_cfg_t cfg;
+    stream_chan_t        ch[NVR_MAX_CH];
+    int                  used[NVR_MAX_CH];
+    int                  active[NVR_MAX_CH];
+    uint32_t             rec_mask_last;
+    void               (*lp_poke)(void *user);
+    void                *lp_poke_user;
+};
+
 /* ---- router (stream_router.c, 纯 C) ---- */
 rsdk_err_t stream_router_open (stream_chan_t *c, rsdk_group_t *grp);  /* 开 writer(+可见则解码) */
 void       stream_open_writer (stream_chan_t *c, rsdk_group_t *grp);  /* 仅补开 writer(格式化后重组装用) */
 void       stream_close_writer(stream_chan_t *c);                    /* 运行时关 writer(录像开关关) */
+void       stream_close_writer_noflush(stream_chan_t *c);            /* worker 内关 writer(已 drain) */
 void       stream_rec_mask_poke(stream_chan_t *c);                   /* 录像位图变化 → longPolling */
 void       stream_chan_get_dim(stream_chan_t *c, int stream, int *w, int *h, int *fps); /* 回放:取解码尺寸 */
 void       stream_decode_open (stream_chan_t *c, int win);           /* 开解码器绑到 win(用 decode_stream 那路的 codec/分辨率) */

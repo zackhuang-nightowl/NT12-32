@@ -6,28 +6,23 @@
  *  瞬时,不重连)。set_display 门控解码(可见才解)。
  ***************************************************************************************/
 #include "stream_internal.h"
-#include "mhal_vout.h"
+#include "stream_hub.h"
 #include "nvr_log.h"
-#include <cstdlib>
+#include <stdlib.h>
 #include <cstring>
 #include <cstdio>
 #include <unistd.h>   /* usleep:格式化暂停写盘的 drain */
+
+extern "C" {
+#include "stream_record_worker.h"
+}
 
 extern "C" int  stream_pull_start(stream_pull_t *p, int conn_to, int rx_to);
 extern "C" void stream_pull_stop (stream_pull_t *p);
 extern "C" int  puller_start(stream_chan_t *c, int conn_to, int rx_to, rsdk_group_t *grp);
 extern "C" void puller_stop (stream_chan_t *c);
 extern "C" void stream_close_writer(stream_chan_t *c);   /* stream_router.c:安全关闭 writer */
-
-struct nvr_stream_mgr {
-    nvr_stream_mgr_cfg_t cfg;
-    stream_chan_t        ch[NVR_MAX_CH];
-    int                  used[NVR_MAX_CH];
-    int                  active[NVR_MAX_CH];   /* 1=已 start(允许起 puller) */
-    uint32_t             rec_mask_last;        /* 上次 poke 时的录像位图(去重) */
-    void               (*lp_poke)(void *user);
-    void                *lp_poke_user;
-};
+extern "C" void stream_close_writer_noflush(stream_chan_t *c);
 
 static stream_chan_t *slot(nvr_stream_mgr_t *m, int chn)
 {
@@ -39,6 +34,8 @@ static stream_pull_t *pull_of(stream_chan_t *c, int stream)
     return (stream == NVR_STREAM_SUB) ? &c->psub : &c->pmain;
 }
 
+extern "C" void stream_close_writer_noflush(stream_chan_t *c);
+
 extern "C" rsdk_err_t nvr_stream_mgr_init(const nvr_stream_mgr_cfg_t *cfg, nvr_stream_mgr_t **out)
 {
     if (!cfg || !out) return RSDK_E_PARAM;
@@ -47,6 +44,10 @@ extern "C" rsdk_err_t nvr_stream_mgr_init(const nvr_stream_mgr_cfg_t *cfg, nvr_s
     m->cfg = *cfg;
     if (m->cfg.conn_timeout <= 0) m->cfg.conn_timeout = 5;
     if (m->cfg.rx_timeout   <= 0) m->cfg.rx_timeout   = 10;
+    if (stream_record_worker_start(m) != 0) {
+        free(m);
+        return RSDK_E_IO;
+    }
     *out = m;
     return RSDK_OK;
 }
@@ -55,6 +56,7 @@ extern "C" void nvr_stream_mgr_deinit(nvr_stream_mgr_t *m)
 {
     if (!m) return;
     nvr_stream_stop_all(m);
+    stream_record_worker_stop();
     free(m);
 }
 

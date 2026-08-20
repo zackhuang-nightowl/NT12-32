@@ -31,6 +31,8 @@
 
 static int g_synced = 0;
 static volatile int g_ntp_busy = 0;   /* 一次只跑一个 ntpd 线程,防堆积 */
+static long g_tz_gmtoff = -999999;    /* 上次 tick 本地偏移(秒),检测夏令自动切换 */
+static int  g_tz_isdst = -1;
 
 static int run(const char *fmt, ...)
 {
@@ -781,6 +783,33 @@ int nvr_time_push_cameras(nvr_settings_t *s)
     return 0;
 }
 
+void nvr_time_notify_changed(nvr_settings_t *s, const char *reason)
+{
+    time_t now;
+    int force = 0;
+    if (!s) return;
+    if (reason && (strcmp(reason, "ntp") == 0 || strcmp(reason, "set_clock") == 0))
+        force = 1;
+    now = time(NULL);
+    static time_t debounce_until;
+    if (!force && now < debounce_until) {
+        NVR_LOGI("time", "相机授时 debounce 跳过 (%s)", reason ? reason : "?");
+        return;
+    }
+    if (!force) debounce_until = now + 5;
+    NVR_LOGI("time", "时钟/时区变化 → 相机授时 (%s)", reason ? reason : "?");
+    nvr_time_push_cameras(s);
+}
+
+static void tz_snapshot_update(void)
+{
+    time_t now = time(NULL);
+    struct tm lt;
+    localtime_r(&now, &lt);
+    g_tz_gmtoff = lt.tm_gmtoff;
+    g_tz_isdst  = lt.tm_isdst;
+}
+
 /* ---- NTP 一次性授时(异步线程)----
  * 设备的 ntpd = **ISC ntpd 4.2.x**(非 busybox)。三个关键坑,旧代码全踩:
  *  ① 服务器是**位置参数**(命令行末尾),ISC 的 `-p` 是 **pidfile**;旧 `-p pool.ntp.org` 把服务器
@@ -792,59 +821,82 @@ int nvr_time_push_cameras(nvr_settings_t *s)
  *     开机/主循环 tick。
  * `-g` 允许首次大幅 step(开机 RTC 可能差数小时);`-q` 同步完成即退;`-n` 前台。
  * 成功(最小 conf 无本地时钟,rc==0 即真同步)→ `hwclock -w` 写回 RTC(下次开机/离线保留)+ g_synced。 */
+typedef struct { char ntp[128]; nvr_settings_t *settings; } ntp_sync_arg_t;
+
 static void *ntp_sync_thread(void *arg)
 {
-    char *ntp1 = (char *)arg;
+    ntp_sync_arg_t *a = (ntp_sync_arg_t *)arg;
+    if (!a) return NULL;
     FILE *f = fopen("/tmp/nvr_ntp.conf", "w");
     if (f) {
         fprintf(f, "server %s iburst\nserver %s iburst\nserver %s iburst\n",
-                ntp1, NVR_DEF_NTP2, NVR_DEF_NTP3);
+                a->ntp, NVR_DEF_NTP2, NVR_DEF_NTP3);
         fclose(f);
     }
     int rc = system("ntpd -gq -n -c /tmp/nvr_ntp.conf >/dev/null 2>&1");
     if (rc == 0) {
-        system("hwclock -w >/dev/null 2>&1");    /* 系统时(UTC)写回 RTC */
+        system("hwclock -w >/dev/null 2>&1");
         g_synced = 1;
         time_t now = time(NULL); struct tm lt; localtime_r(&now, &lt);
         NVR_LOGI("time", "NTP 同步成功 → 本地 %04d-%02d-%02d %02d:%02d:%02d (已写 RTC)",
                  lt.tm_year+1900, lt.tm_mon+1, lt.tm_mday, lt.tm_hour, lt.tm_min, lt.tm_sec);
+        tz_snapshot_update();
+        if (a->settings) nvr_time_notify_changed(a->settings, "ntp");
     } else {
         NVR_LOGW("time", "NTP 未成功(离线/服务器不可达?), 稍后重试");
     }
     g_ntp_busy = 0;
-    free(ntp1);
+    free(a);
     return NULL;
 }
 
 /* 触发一次异步 NTP 授时。门控:自动授时开关关(system.time_sync=0=手动)/已同步/已有线程在跑 → 跳过。 */
 static void ntp_sync_async(nvr_settings_t *s)
 {
+    ntp_sync_arg_t *a;
     if (!s || g_synced || g_ntp_busy) return;
-    if (!nvr_settings_get_int(s, "system.time_sync", 1)) return;   /* 手动模式:不跑 NTP,不覆盖手动时间 */
-    char *ntp1 = (char *)calloc(1, 128);
-    if (!ntp1) return;
-    nvr_settings_get_str(s, "system.ntp", ntp1, 128, NVR_DEF_NTP1);
+    if (!nvr_settings_get_int(s, "system.time_sync", 1)) return;
+    a = (ntp_sync_arg_t *)calloc(1, sizeof(*a));
+    if (!a) return;
+    a->settings = s;
+    nvr_settings_get_str(s, "system.ntp", a->ntp, sizeof(a->ntp), NVR_DEF_NTP1);
     g_ntp_busy = 1;
     pthread_t th; pthread_attr_t at;
     pthread_attr_init(&at); pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
-    if (pthread_create(&th, &at, ntp_sync_thread, ntp1) != 0) { g_ntp_busy = 0; free(ntp1); }
+    if (pthread_create(&th, &at, ntp_sync_thread, a) != 0) { g_ntp_busy = 0; free(a); }
     pthread_attr_destroy(&at);
 }
 
 int nvr_time_apply(nvr_settings_t *s)
 {
     if (!s) return -1;
-    nvr_tz_install(s);   /* 时区:合法 POSIX + TZif + /etc/localtime + tzset */
-    ntp_sync_async(s);   /* NTP:异步,绝不阻塞开机(受 time_sync 开关门控) */
+    nvr_tz_install(s);
+    tz_snapshot_update();
+    nvr_time_notify_changed(s, "boot");
+    ntp_sync_async(s);
     return 0;
 }
 
 void nvr_time_tick(nvr_settings_t *s)
 {
-    ntp_sync_async(s);   /* 未同步则再试(内部按 time_sync/g_synced/g_ntp_busy 门控) */
-    /* 每 10 分钟以 NVR 为主时间下发所有相机,纠正相机时钟漂移(本 tick 每 60s 调用一次 → 10 次=10min) */
+    time_t now;
+    struct tm lt;
+    if (!s) return;
+    ntp_sync_async(s);
+    now = time(NULL);
+    localtime_r(&now, &lt);
+    if (g_tz_gmtoff != -999999 &&
+        (lt.tm_gmtoff != g_tz_gmtoff || lt.tm_isdst != g_tz_isdst)) {
+        g_tz_gmtoff = lt.tm_gmtoff;
+        g_tz_isdst  = lt.tm_isdst;
+        nvr_time_notify_changed(s, "dst_auto");
+    }
+    /* 每 10 分钟兜底:纠正 IPC 时钟漂移(NVR 未变时也推) */
     static unsigned cam_push_min = 0;
-    if (++cam_push_min >= 10) { cam_push_min = 0; nvr_time_push_cameras(s); }
+    if (++cam_push_min >= 10) {
+        cam_push_min = 0;
+        nvr_time_push_cameras(s);
+    }
 }
 
 int nvr_time_synced(void) { return g_synced; }
@@ -861,7 +913,8 @@ int nvr_time_set_clock(nvr_settings_t *s, long long utc_epoch)
     time_t now = (time_t)utc_epoch; struct tm lt; localtime_r(&now, &lt);
     NVR_LOGI("time", "手动授时 → 本地 %04d-%02d-%02d %02d:%02d:%02d (已写 RTC)",
              lt.tm_year+1900, lt.tm_mon+1, lt.tm_mday, lt.tm_hour, lt.tm_min, lt.tm_sec);
-    if (s) nvr_time_push_cameras(s);           /* 以 NVR 为主时间下发相机 */
+    tz_snapshot_update();
+    if (s) nvr_time_notify_changed(s, "set_clock");
     return 0;
 }
 

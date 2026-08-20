@@ -5,6 +5,7 @@
 #define STREAM_HUB_H
 
 #include <stdint.h>
+#include <pthread.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -53,6 +54,9 @@ typedef enum {
 #define STREAM_RECORD_Q_CAP      96
 #define STREAM_RECORD_Q_HIGH_WM  64   /* 超过则 stall 告警(不丢帧) */
 
+#define STREAM_REC_MEDIA_VIDEO   0
+#define STREAM_REC_MEDIA_AUDIO   1
+
 typedef struct {
     uint8_t  *data;
     uint32_t  len;
@@ -61,14 +65,16 @@ typedef struct {
     uint8_t   is_param;
     uint8_t   frame_type;
     uint8_t   codec;
+    uint8_t   media;          /* STREAM_REC_MEDIA_* */
 } stream_record_slot_t;
 
 typedef struct {
     stream_record_slot_t slot[STREAM_RECORD_Q_CAP];
     int head;
     int count;
-    unsigned stall_cnt;        /* 触顶次数 */
-    int stall_logged;          /* 高水位告警 latch */
+    unsigned stall_cnt;
+    int stall_logged;
+    pthread_mutex_t mtx;
 } stream_record_q_t;
 
 void stream_record_q_init(stream_record_q_t *q);
@@ -76,10 +82,14 @@ void stream_record_q_flush(stream_record_q_t *q);
 /* 拷贝入队; 满返回 -1(调用方须先 drain, 不丢帧)。 */
 int  stream_record_q_push(stream_record_q_t *q, const uint8_t *data, uint32_t len,
                           uint32_t ts, int is_key, int is_param,
-                          uint8_t frame_type, uint8_t codec);
+                          uint8_t frame_type, uint8_t codec, uint8_t media);
 const stream_record_slot_t *stream_record_q_peek(const stream_record_q_t *q);
 void stream_record_q_pop(stream_record_q_t *q);
 int  stream_record_q_count(const stream_record_q_t *q);
+/* worker 内部: 已持锁 peek 后 pop */
+void stream_record_q_pop_locked(stream_record_q_t *q);
+void stream_record_q_lock(stream_record_q_t *q);
+void stream_record_q_unlock(stream_record_q_t *q);
 
 uint64_t stream_hub_mono_ms(void);
 

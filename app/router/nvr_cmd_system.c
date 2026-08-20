@@ -105,8 +105,8 @@ char *cmd_X_NightOwl_setTimezone(cJSON *a, const nvr_cmd_ctx_t *c)
         nvr_settings_set_str(c->settings, "system.tz_dst", "");                         /* 夏令关 */
         nvr_settings_set_str(c->settings, "system.timezone", tz[0] ? tz : NVR_DEF_TIMEZONE);
     }
-    nvr_tz_install(c->settings);          /* 即时生效(不等 60s tick) */
-    nvr_time_push_cameras(c->settings);   /* 相机 ONVIF 授时(后台) */
+    nvr_tz_install(c->settings);
+    nvr_time_notify_changed(c->settings, "setTimezone");
     NVR_LOGI("router", "setTimezone tz='%s' dst='%s'", tz, dst);
     return nvr_resp_ok();
 }
