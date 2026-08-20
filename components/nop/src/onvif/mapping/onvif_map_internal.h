@@ -36,6 +36,10 @@ nop_onvif_device_t *onvif_session_dev(onvif_session_t *session);
 /** Default Media1 profile token (used for PTZ / streaming). "" if none. */
 const char *onvif_session_profile(onvif_session_t *session);
 
+/** stderr: which profile token PTZ will use and whether it came from cache or fallback. */
+void onvif_session_log_profile(const onvif_session_t *session, int channel,
+                               const char *cmd);
+
 /** Default Media2 profile token (OSD / Mask / encoder); resolved lazily. "" if none. */
 const char *onvif_session_media2_profile(onvif_session_t *session);
 

@@ -200,6 +200,9 @@ static int session_ensure(nop_onvif_map_backend_t *be, onvif_session_t *s)
             snprintf(s->sub_venc, sizeof(s->sub_venc), "%s", st.sub_venc);
             if (st.source_token[0])
                 snprintf(s->video_source, sizeof(s->video_source), "%s", st.source_token);
+            fprintf(stderr, "[onvif_map] session_cache ch=%d bound_src=%s profile=%s "
+                            "vsc=%s (from connect resolve_source cache)\n",
+                    s->channel, s->bound_source, s->src_profile, s->vsc);
         }
         /* Latch only once we actually resolved a usable token. If the device is
          * connected but its connect-time map cache isn't built yet, everything
@@ -403,6 +406,20 @@ const char *onvif_session_profile(onvif_session_t *s)
 {
     if (!s) return "";
     return s->src_profile[0] ? s->src_profile : s->profile;
+}
+
+void onvif_session_log_profile(const onvif_session_t *s, int channel, const char *cmd)
+{
+    if (!s || !cmd)
+        return;
+    fprintf(stderr,
+            "[onvif_map] %s ch=%d profile=%s via=%s bound_src=%s "
+            "cached_profile=%s media1_fallback=%s\n",
+            cmd, channel, onvif_session_profile(s),
+            s->src_profile[0] ? "cached_src_profile" : "media1_index0",
+            s->bound_source[0] ? s->bound_source : "(first)",
+            s->src_profile[0] ? s->src_profile : "-",
+            s->profile[0] ? s->profile : "-");
 }
 const char *onvif_session_main_venc(onvif_session_t *s) { return s ? s->main_venc : ""; }
 const char *onvif_session_sub_venc(onvif_session_t *s) { return s ? s->sub_venc : ""; }

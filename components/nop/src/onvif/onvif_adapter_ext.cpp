@@ -1031,6 +1031,14 @@ static int resolve_from_media1_list(ONVIF_PROFILE *head, const char *source_toke
     return found ? 0 : -1;
 }
 
+static void resolve_source_log(const char *via, const char *req_src,
+                               const nop_onvif_source_tokens_t *out)
+{
+    fprintf(stderr, "[onvif] resolve via=%s req_src=%s src=%s profile=%s vsc=%s\n",
+            via, (req_src && req_src[0]) ? req_src : "(default)",
+            out->source_token, out->profile, out->vsc_token);
+}
+
 int nop_onvif_resolve_source(nop_onvif_device_t *device, const char *source_token,
                              nop_onvif_source_tokens_t *out)
 {
@@ -1039,11 +1047,15 @@ int nop_onvif_resolve_source(nop_onvif_device_t *device, const char *source_toke
     memset(out, 0, sizeof(*out));
 
     if (device->dev.media_profiles &&
-        resolve_from_media2_list(device->dev.media_profiles, source_token, out) == 0)
+        resolve_from_media2_list(device->dev.media_profiles, source_token, out) == 0) {
+        resolve_source_log("media2_cached", source_token, out);
         return 0;
+    }
     if (device->dev.profiles &&
-        resolve_from_media1_list(device->dev.profiles, source_token, out) == 0)
+        resolve_from_media1_list(device->dev.profiles, source_token, out) == 0) {
+        resolve_source_log("media1_cached", source_token, out);
         return 0;
+    }
 
     /* 连接前偶发调用：handle 上还没有 profiles 时才上线 GetProfiles。 */
     tr2_GetProfiles_REQ req;
@@ -1055,6 +1067,8 @@ int nop_onvif_resolve_source(nop_onvif_device_t *device, const char *source_toke
         return -2;
     rc = resolve_from_media2_list(res.Profiles, source_token, out);
     onvif_free_MediaProfiles(&res.Profiles);
+    if (rc == 0)
+        resolve_source_log("media2_live", source_token, out);
     return rc == 0 ? 0 : -3;
 }
 

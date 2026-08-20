@@ -180,6 +180,7 @@ nop_status_t onvif_map_getPtzPresets(nop_onvif_map_backend_t *be, int ch,
 
     s = onvif_session_begin(be, ch);
     if (!s) return ptz_ext_fail(resp, "onvif_not_connected");
+    onvif_session_log_profile(s, ch, "getPtzPresets");
     n = nop_onvif_ptz_get_presets(onvif_session_dev(s), onvif_session_profile(s),
                                   presets, PTZ_MAX_PRESETS);
     if (n < 0) {
@@ -362,6 +363,7 @@ nop_status_t onvif_map_getPtzPatrols(nop_onvif_map_backend_t *be, int ch,
 
     s = onvif_session_begin(be, ch);
     if (!s) return ptz_ext_fail(resp, "onvif_not_connected");
+    onvif_session_log_profile(s, ch, "getPtzPatrols");
     n = nop_onvif_ptz_get_tours(onvif_session_dev(s), onvif_session_profile(s),
                                 tours, PTZ_MAX_TOURS);
     if (n < 0) {
