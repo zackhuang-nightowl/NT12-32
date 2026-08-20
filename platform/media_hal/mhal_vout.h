@@ -23,11 +23,19 @@ typedef enum { MHAL_OUT_HDMI, MHAL_OUT_CVBS, MHAL_OUT_VGA } mhal_out_t;
 typedef enum { MHAL_LAYOUT_1, MHAL_LAYOUT_4, MHAL_LAYOUT_8, MHAL_LAYOUT_9,
                MHAL_LAYOUT_16, MHAL_LAYOUT_25, MHAL_LAYOUT_36 } mhal_layout_t;
 
+/* ★ 最大分屏页(枚举末项)。窗口几何/最大格数一律由它推导, 不写死 36。
+ * 实际可用格数受通道数 MHAL_MAX_CH 限(见 mhal_internal.h): 36 格页里最多 MHAL_MAX_CH 格有画面, 余格恒空。 */
+#define MHAL_LAYOUT_MAX  MHAL_LAYOUT_36
+int  mhal_layout_cell_count_of(mhal_layout_t layout);   /* 某布局的格数(1/4/8/9/16/25/36) */
+
 int  mhal_vout_init(mhal_out_t out, int width, int height);   /* 如 HDMI 3840x2160 */
 void mhal_vout_get_resolution(int *w, int *h);
 int  mhal_vout_set_resolution(int w, int h);
 int  mhal_vout_set_layout(mhal_layout_t layout);              /* 切分屏 */
-int  mhal_vout_commit(void);                                 /* 重建显示合成图(切布局后重排生效) */
+int  mhal_vout_commit(void);                                 /* 立即重建显示合成图(整屏 stop_list→start_list) */
+/* ★ 请求一次防抖合并的重建: 上层切布局/映射/悬浮块后调它, 由唯一显示线程在静默后**只重建一次**,
+ * 与各 puller 异步开/关解码器的重建合并 → 不再每次各自重建(消除 Apply 洪水/整屏黑闪)。 */
+void mhal_vout_request_commit(void);
 /* ★ 批量提交:begin/end 之间的解码器开/关不各自重成图,由 end 一次成图(9格一起出、只闪一次)。
  * 必须成对调用(可嵌套计数)。切宫格 set_mode 用它包住所有 open/close。 */
 void mhal_vout_defer_begin(void);

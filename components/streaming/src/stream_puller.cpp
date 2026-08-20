@@ -65,7 +65,12 @@ static void pull_reset_continuity(stream_pull_t *p)
     p->h264_prev_fn = -1;
     p->disc_mark = 0;
     p->conn_gen++;
-    /* 保留 h264_log2_fn / gap 计数:重连后 SPS 会再学,计数便于串口看累计 */
+    /* ★ 清 bootstrap 缓存:重连/相机改配后, 旧 kf/参数集可能是**上一代**的(profile/codec/分辨率不符),
+     * 喂给解码器 → VPU scan first header error / profile_idc 误解析。清空后等新的 SPS+IDR 再建。
+     * 保留 h264_log2_fn / gap 计数:重连后 SPS 会再学,计数便于串口看累计。 */
+    p->kf_len = 0;
+    p->par_len = 0;
+    p->par_building = 0;
 }
 
 static void live_resync_if_decode(stream_pull_t *p)

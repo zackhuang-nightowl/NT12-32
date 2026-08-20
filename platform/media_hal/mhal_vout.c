@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <pthread.h>
+#include <time.h>
 
 mhal_disp_t g_disp;
 
@@ -29,6 +30,98 @@ static void mhal_lock_init(void)
 void mhal_lock(void)   { if (!g_mhal_mtx_ready) mhal_lock_init(); pthread_mutex_lock(&g_mhal_mtx); }
 void mhal_unlock(void) { if (g_mhal_mtx_ready) pthread_mutex_unlock(&g_mhal_mtx); }
 
+/* ---- 防抖单次重建: 唯一 committer = commit 线程 ---- */
+static uint64_t mhal_now_ms(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
+}
+
+void mhal_vout_request_commit(void)
+{
+    if (!g_disp.commit_run) {           /* 线程未起(early/deinit): 兜底同步重建, 保证不丢 */
+        mhal_vout_commit();
+        return;
+    }
+    pthread_mutex_lock(&g_disp.commit_mtx);
+    uint64_t now = mhal_now_ms();
+    if (!g_disp.commit_pending) g_disp.commit_first_ms = now;   /* 本轮起点(最大窗基准) */
+    g_disp.commit_pending = 1;
+    g_disp.commit_req_ms = now;
+    pthread_cond_signal(&g_disp.commit_cv);
+    pthread_mutex_unlock(&g_disp.commit_mtx);
+}
+
+/* 单一显示线程: 等到"最后一次请求已静默 MHAL_COMMIT_DEBOUNCE_MS"再整屏重建一次。
+ * 突发的多路开/关(各 puller 线程)在窗内不断刷新 req_ms → 只在末尾合成一次(消除 Apply 洪水/黑闪)。 */
+static void *mhal_commit_thread(void *arg)
+{
+    (void)arg;
+    while (g_disp.commit_run) {
+        int do_commit = 0;
+        pthread_mutex_lock(&g_disp.commit_mtx);
+        if (!g_disp.commit_pending && g_disp.commit_run)
+            pthread_cond_wait(&g_disp.commit_cv, &g_disp.commit_mtx);
+        if (g_disp.commit_pending && g_disp.commit_run) {
+            uint64_t now = mhal_now_ms();
+            uint64_t age = now - g_disp.commit_req_ms;              /* 静默时长 */
+            uint64_t total = now - g_disp.commit_first_ms;         /* 本轮已合并时长 */
+            if (age >= MHAL_COMMIT_DEBOUNCE_MS || total >= MHAL_COMMIT_MAX_MS) {
+                g_disp.commit_pending = 0;
+                do_commit = 1;
+            } else {
+                struct timespec ts;
+                uint64_t rem_quiet = MHAL_COMMIT_DEBOUNCE_MS - age;
+                uint64_t rem_max   = (total < MHAL_COMMIT_MAX_MS) ? (MHAL_COMMIT_MAX_MS - total) : 0;
+                uint64_t wait_ms   = rem_quiet < rem_max ? rem_quiet : rem_max;   /* 取先到者 */
+                if (wait_ms == 0) wait_ms = 1;
+                clock_gettime(CLOCK_REALTIME, &ts);
+                ts.tv_sec  += (time_t)(wait_ms / 1000);
+                ts.tv_nsec += (long)(wait_ms % 1000) * 1000000L;
+                if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+                pthread_cond_timedwait(&g_disp.commit_cv, &g_disp.commit_mtx, &ts);
+            }
+        }
+        pthread_mutex_unlock(&g_disp.commit_mtx);
+        if (do_commit) {
+            /* defer 批处理进行中 → 不抢着重建, 重新挂起等 defer_end 再触发(避免半套集合成图)。 */
+            mhal_lock();
+            int deferred = (g_disp.defer > 0);
+            mhal_unlock();
+            if (deferred) mhal_vout_request_commit();
+            else mhal_vout_commit();          /* 唯一整屏重建点 */
+        }
+    }
+    return NULL;
+}
+
+static void mhal_commit_thread_start(void)
+{
+    if (g_disp.commit_run) return;
+    pthread_mutex_init(&g_disp.commit_mtx, NULL);
+    pthread_cond_init(&g_disp.commit_cv, NULL);
+    g_disp.commit_run = 1;
+    g_disp.commit_pending = 0;
+    if (pthread_create(&g_disp.commit_th, NULL, mhal_commit_thread, NULL) != 0) {
+        g_disp.commit_run = 0;   /* 起线程失败 → request_commit 走同步兜底 */
+        pthread_cond_destroy(&g_disp.commit_cv);
+        pthread_mutex_destroy(&g_disp.commit_mtx);
+    }
+}
+
+static void mhal_commit_thread_stop(void)
+{
+    if (!g_disp.commit_run) return;
+    pthread_mutex_lock(&g_disp.commit_mtx);
+    g_disp.commit_run = 0;
+    pthread_cond_signal(&g_disp.commit_cv);
+    pthread_mutex_unlock(&g_disp.commit_mtx);
+    pthread_join(g_disp.commit_th, NULL);
+    pthread_cond_destroy(&g_disp.commit_cv);
+    pthread_mutex_destroy(&g_disp.commit_mtx);
+}
+
 /* 分屏几何：1/4/9/16 → 网格边长 1/2/3/4 */
 /* 当前布局的有效格子数（0..count-1 为屏内格；>=count 的窗号无对应格，须隐藏而非越界下发）。 */
 static int mhal_layout_cell_count(mhal_layout_t layout)
@@ -44,6 +137,9 @@ static int mhal_layout_cell_count(mhal_layout_t layout)
         default:             return 16;
     }
 }
+
+/* 公开版: 供上层按宏推导最大格数(如 mhal_layout_cell_count_of(MHAL_LAYOUT_MAX)=36), 不写死。 */
+int mhal_layout_cell_count_of(mhal_layout_t layout) { return mhal_layout_cell_count(layout); }
 
 void mhal_layout_rect(mhal_layout_t layout, int idx, int disp_w, int disp_h,
                       int *x, int *y, int *w, int *h)
@@ -160,7 +256,9 @@ void mhal_vout_defer_begin(void)
     mhal_unlock();
 }
 
-int mhal_vout_is_deferred(void) { return g_disp.defer > 0; }
+/* deferred 语义扩展: defer 批处理中, 或有防抖 commit 待执行(路径尚未 start_list)。
+ * 供 streaming 判断"解码器还没起流, 别急着喂 bootstrap 关键帧"(起流后由 WAIT_IDR 喂下个 IDR)。 */
+int mhal_vout_is_deferred(void) { return g_disp.defer > 0 || g_disp.commit_pending; }
 
 void mhal_vout_defer_end(void)
 {
@@ -168,7 +266,7 @@ void mhal_vout_defer_end(void)
     if (g_disp.defer > 0) g_disp.defer--;
     int doit = (g_disp.defer == 0);
     mhal_unlock();
-    if (doit) mhal_vout_commit();   /* 批量结束 → 一次成图(9格一起出、只闪一次) */
+    if (doit) mhal_vout_request_commit();   /* 批量结束 → 交防抖线程合并成一次成图 */
 }
 
 int mhal_vout_commit(void)
@@ -288,6 +386,7 @@ int mhal_vout_init(mhal_out_t out, int width, int height)
     apply_hdmi_resolution(width, height);
 
     g_disp.inited = 1;
+    mhal_commit_thread_start();   /* ★ 启动唯一显示重建线程(防抖合并 commit) */
     /* ★ 开机默认黑(LVGL 走 ARGB1555 逐像素 alpha 挖透明,视频层无信号时默认是绿 → 必须由 NVR 兜黑):
      *  ① setup_fb_alpha —— 关 OSD FB colorkey、走 ARGB1555 逐像素 alpha(与 GUI 一致)。
      *  ② AUTO_CLEARWIN(SDK liveview_with_clearwin.c 方式)—— 开启后驱动**自动**把"未起/已停 vo 路"
@@ -592,6 +691,7 @@ void mhal_vout_deinit(mhal_out_t out)
 {
     (void)out;
     if (!g_disp.inited) return;
+    mhal_commit_thread_stop();   /* 先停显示重建线程, 之后独占关路径 */
     if (g_disp.ctrl_path) hd_videoout_close(g_disp.ctrl_path);
     hd_videoout_uninit();
     hd_videoproc_uninit();

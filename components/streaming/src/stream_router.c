@@ -468,6 +468,14 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
         if (!p->par_building) { p->par_len = 0; p->par_building = 1; }
         if (p->par_len + len <= (int)sizeof(p->par)) {
             memcpy(p->par + p->par_len, data, len); p->par_len += len;
+        } else {
+            /* ★ 参数集超缓冲(>2048): 放弃这组(不留残缺 SPS → 免 VPU scan header 误解析)。等下组重收。 */
+            static unsigned par_of_cnt;
+            if (par_of_cnt++ < 20 || (par_of_cnt % 50) == 0)
+                NVR_LOGW("router", "ch%d[%s] 参数集超 %dB 缓冲(len=%d) → 弃用本组参数",
+                         c->cfg.chn, p->stream == NVR_STREAM_SUB ? "子" : "主",
+                         (int)sizeof(p->par), len);
+            p->par_len = 0; p->par_building = 0;
         }
     } else {
         p->par_building = 0;
@@ -479,7 +487,10 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
                 sbuf = tmp; slen = p->par_len + len;
             }
         }
-        if (nc.is_key && slen > 0) {
+        /* ★ 只缓存"含参数集"的关键 AU 作 bootstrap:自带 SPS/PPS(has_param)或成功拼回缓存参数(tmp)。
+         * param-less IDR(无 SPS)绝不当 bootstrap —— 喂给 VPU 会 scan first header error / 花屏。 */
+        int have_params = nc.is_key && (nc.has_param || tmp != NULL);
+        if (have_params && slen > 0) {
             if (p->kf_cap < slen) {
                 uint8_t *nk = (uint8_t *)realloc(p->kf, (size_t)slen);
                 if (nk) { p->kf = nk; p->kf_cap = slen; }

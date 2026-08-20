@@ -213,13 +213,12 @@ int mhal_vdec_open(int chn, mhal_codec_t codec, int w, int h, int fps,
     /* ZoomPan 可能在解码器 open 之前就到了：把暂存的 IN_CROP 写上，随后 start_list 带着裁剪起。 */
     mhal_crop_apply_pending(d);
     if (bind_vout_win >= 0) {
-        /* ★ 批量提交中(defer>0):只登记,不各自成图;由 mhal_vout_defer_end 一次 start_list 起全部。
-         * 否则(单独开)立即成图。 */
-        if (g_disp.defer == 0) {
-            if (mhal_vout_commit() != 0) { ret = -1; goto fail; }
-        }
+        /* ★ 在显路径:只登记(g_disp.ch[chn]=d 已在上面), 不在此各自成图。
+         * defer 批处理由 defer_end 触发; 否则 request_commit → 唯一显示线程防抖后**合并成一次**整屏重建
+         * (真机验证运行中只能整屏重建, 不能单路 start)。→ 消除 32 路异步各自重建的 Apply 洪水/黑闪。 */
+        if (g_disp.defer == 0) mhal_vout_request_commit();
     } else {
-        if ((ret = hd_videodec_start(d->dec_path)) != HD_OK) goto fail;
+        if ((ret = hd_videodec_start(d->dec_path)) != HD_OK) goto fail;   /* 离屏解码器:独立 start, 不碰显示合成图 */
     }
 
     *out = d;
@@ -237,7 +236,7 @@ fail:
     if (d->vout_path) hd_videoout_close(d->vout_path);
     if (d->proc_path) hd_videoproc_close(d->proc_path);
     if (d->dec_path)  hd_videodec_close(d->dec_path);
-    if (g_disp.inited) mhal_vout_commit();      /* 摘除失败路，重建其余在显窗口(递归锁) */
+    if (g_disp.inited) mhal_vout_request_commit();  /* 摘除失败路，防抖线程重建其余在显窗口 */
     mhal_unlock();
     mhal_budget_release(d->w, d->h, d->fps);     /* 归还预算 */
     free(d);
@@ -352,19 +351,22 @@ void mhal_vdec_close(mhal_vdec_t *d)
     /* 先从在显集合摘除本路。 */
     if (chn >= 0 && chn < MHAL_MAX_CH) g_disp.ch[chn] = NULL;
 
-    /* ★ 批量提交中(defer>0)且是在显路径:不各自 commit,挂到 pending,由 defer_end 的一次 commit
-     * 统一 stop_list(含本路)后再 teardown。一次切宫格只重成图 1 次。 */
-    if (g_disp.defer > 0 && was_display) {
-        if (g_disp.pending_n < MHAL_MAX_CH) g_disp.pending_free[g_disp.pending_n++] = d;
-        else { /* 兜底:pending 满则就地(先 commit 停)处理 */ mhal_vout_commit(); mhal_vdec_teardown(d); }
+    /* ★ 在显路径关闭:不在此同步 commit/teardown。挂到 pending_free, request_commit → 唯一显示线程
+     * 防抖后一次 stop_list(含本路)→ start_list(不含本路)→ 释放 pending(teardown)。defer 与非 defer 同一路径。
+     * (真机验证运行中只能整屏重建; 合并避免"每关一路各重建一次"的黑闪。) */
+    if (was_display) {
+        if (g_disp.pending_n < MHAL_MAX_CH) {
+            g_disp.pending_free[g_disp.pending_n++] = d;
+            mhal_vout_request_commit();
+        } else {                                    /* pending 满兜底: 就地同步重建+释放 */
+            mhal_vout_commit();
+            mhal_vdec_teardown(d);
+        }
         mhal_unlock();
         return;
     }
 
-    if (was_display) {
-        mhal_vout_commit();                         /* 停旧集合(含本路)+起其余;本路路径随之停 */
-        mhal_vdec_teardown(d);
-    } else if (d->opened) {
+    if (d->opened) {
         hd_videodec_stop(d->dec_path);              /* 离屏解码器：独立停 */
         mhal_vdec_teardown(d);
     } else {

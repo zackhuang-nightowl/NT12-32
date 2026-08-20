@@ -433,8 +433,8 @@ int nvr_preview_set_mode(nvr_preview_t *p, int mode, int page)
             nvr_chan_set_stream(p->cfg.cm, p->win2chn[w], st);
     for (int w = 0; w < wc; w++)
         if (p->win2chn[w] >= 0)
-            nvr_stream_set_display(p->cfg.sm, p->win2chn[w], w);   /* 可见:按 decode_stream 开解码(内部各自成图 + 喂缓存关键帧秒出) */
-    mhal_vout_commit();   /* 兜底再成图一次(确保窗口矩形/可见性生效) */
+            nvr_stream_set_display(p->cfg.sm, p->win2chn[w], w);   /* 可见:按 decode_stream 开解码(异步 request_commit 合并成一次成图) */
+    mhal_vout_request_commit();   /* 兜底:与各路异步开解码合并成一次重建(不再逐路各自重建) */
 
     pthread_mutex_unlock(&p->lock);
     return 0;
@@ -516,7 +516,7 @@ int nvr_preview_set_ext(nvr_preview_t *p, const nvr_pv_ext_t *b, int n)
     p->ext_n = 0;
 
     if (n == 0) {
-        mhal_vout_commit();
+        mhal_vout_request_commit();
         pthread_mutex_unlock(&p->lock);
         return 0;
     }
@@ -538,7 +538,7 @@ int nvr_preview_set_ext(nvr_preview_t *p, const nvr_pv_ext_t *b, int n)
     nvr_preview_wait_ready(p, NVR_DEF_WAIT_READY_MS);
     pthread_mutex_lock(&p->lock);
     for (int i = 0; i < p->ext_n; i++) ext_place(p, &p->ext[i]);
-    mhal_vout_commit();
+    mhal_vout_request_commit();
     int denied = 0;
     for (int i = 0; i < p->ext_n; i++)
         if (nvr_stream_decode_denied(p->cfg.sm, p->ext[i].chn0)) denied = 1;

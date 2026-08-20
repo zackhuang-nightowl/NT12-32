@@ -46,8 +46,10 @@ typedef struct stream_pull {
     int              connected;     /* 1=CONNSUCC(codec 有效) */
 
     /* 参数集缓存:相机把 SPS/PPS(/VPS) 作为独立小帧发,IDR 关键帧不含参数集 → Novatek 硬解组不成
-     * 完整 AU(全黑)。缓存参数集,IDR 前拼回去。每路独立。 */
-    uint8_t          par[512];
+     * 完整 AU(全黑)。缓存参数集,IDR 前拼回去。每路独立。
+     * ★ 2048B:High profile 带 VUI 的 SPS、或 H.265 VPS+SPS+PPS 常 >512B,过小会**截断参数集**→
+     *   bootstrap 的 SPS 残缺 → VPU "scan first header error" / profile_idc 误解析。超限告警不静默截断。 */
+    uint8_t          par[2048];
     int              par_len;
     int              par_building;
 

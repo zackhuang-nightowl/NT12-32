@@ -11,8 +11,12 @@
 #include "hdal.h"                 /* hd_* 全量 API（BSP: code/hdal/include） */
 #include "mhal_vdec.h"
 #include "mhal_vout.h"
+#include <pthread.h>
+#include <stdint.h>
 
 #define MHAL_MAX_CH 32                   /* 32 路（分屏预览最多 32 解码器）*/
+#define MHAL_COMMIT_DEBOUNCE_MS 150      /* 防抖窗:变更静默此时长后才重建一次(合并突发开/关) */
+#define MHAL_COMMIT_MAX_MS      600      /* 最大合并窗:首次请求起最迟此时限必重建一次(防持续上线饿死) */
 
 /* 单通道解码路径 */
 struct mhal_vdec {
@@ -57,7 +61,23 @@ typedef struct {
      * 纯增量加窗(新设备上线落格)不清 → 避免把已有窗一起刷黑造成"整屏黑闪"。
      * 由 set_layout/set_resolution/init 置 1;commit 用后清 0(或按集合缩小自判)。 */
     int                 need_clear;
+
+    /* ★ 防抖单次重建(真机验证:运行中只能整体 stop_list→start_list 重建, 不能单路 start)。
+     * 各 puller 线程异步开/关解码器时只 mhal_vout_request_commit()(打 dirty+时戳), 不各自 commit;
+     * 单一显示线程 commit_th 在变更静默 MHAL_COMMIT_DEBOUNCE_MS 后**只重建一次** →
+     * 消除"每路各自重建"的 Apply 洪水与整屏黑闪。对齐 SDK 样例"建好后一次 start_list"的精神。 */
+    volatile int        commit_pending;
+    uint64_t            commit_req_ms;    /* 最近一次请求时戳(静默判定) */
+    uint64_t            commit_first_ms;  /* 本轮首次请求时戳(最大合并窗判定, 防饿死) */
+    pthread_t           commit_th;
+    volatile int        commit_run;
+    pthread_mutex_t     commit_mtx;
+    pthread_cond_t      commit_cv;
 } mhal_disp_t;
+
+/* 请求一次(防抖合并的)显示重建: 打 dirty + 时戳并唤醒 commit 线程。异步开/关解码器/切布局都用它,
+ * 不要直接调 mhal_vout_commit(那会每次都整屏重建 → 洪水/黑闪)。 */
+void mhal_vout_request_commit(void);
 
 /* 重建显示合成图：把当前所有在显通道 dec/proc/vout 路径一次 stop_list→start_list。
  * 通道开/关（增删窗口路径）后调用；纯改窗口矩形/可见性不需要（走 IN_WIN_ATTR，不重启）。 */
