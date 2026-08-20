@@ -75,6 +75,7 @@
 #define NVR_DEF_ZOOM_MIN    100         /* 数字变焦下限：接口 ZoomRatio 100=1.00x 原画 */
 #define NVR_DEF_ZOOM_MAX    1000        /* 数字变焦上限：接口 ZoomRatio 0~1000 */
 #define NVR_DEF_WAIT_READY_MS 2000      /* 切宫格/切码流后等图上限 */
+#define NVR_DEF_WAIT_EXT_MS   800       /* Ext 换 channel(有缓存 IDR)等图上限 */
 #define NVR_DEF_SETTLE_MS   150         /* 首格出图后再沉降,让帧真到面板 */
 #define NVR_DEF_CMD_TIMEOUT_S  8        /* 阻塞 GUI 的 set/动作：完成后或超时再回 */
 #define NVR_DEF_CMD_CONNECT_S  3        /* 透传/相机 HTTP 连接超时 */

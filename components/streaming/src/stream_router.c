@@ -287,6 +287,7 @@ void stream_decode_open(stream_chan_t *c, int win)
         c->vdec = NULL;
     }
     c->fed_since_open = 0;
+    c->bootstrap_pending = 0;
     stream_live_q_flush(&c->live_q);
     c->live_state = c->vdec ? STREAM_LIVE_WAIT_IDR : STREAM_LIVE_IDLE;
     c->live_gen = p->conn_gen;
@@ -296,8 +297,21 @@ void stream_decode_open(stream_chan_t *c, int win)
     p->disc_mark = 0;
     if (c->vdec) NVR_LOGI("stream", "chn%d ▶开解码 → 格%d (%s码流) state=WAIT_IDR",
                           c->cfg.chn, win, c->decode_stream == NVR_STREAM_SUB ? "子" : "主");
-    /* ★ 喂缓存 bootstrap 秒出图(不置 SYNCED:与后续实时 P 不连续,须等实时完整关键 AU)。 */
-    if (!mhal_vout_is_deferred()) stream_feed_keyframe(c);
+    /* ★ 喂 puller 缓存 IDR 秒出图;commit 未就绪(defer/pending)则延后到 puller 补喂,不等相机下一 GOP。 */
+    if (c->vdec) {
+        if (!mhal_vout_is_deferred())
+            stream_feed_keyframe(c);
+        else
+            c->bootstrap_pending = 1;
+    }
+}
+
+/* commit 完成后补喂缓存 IDR(bootstrap_pending);成功则清除 pending。 */
+static void stream_try_bootstrap(stream_chan_t *c)
+{
+    if (!c || !c->bootstrap_pending || !c->vdec || mhal_vout_is_deferred()) return;
+    stream_feed_keyframe(c);
+    if (c->fed_since_open > 0) c->bootstrap_pending = 0;
 }
 
 /* 给解码器喂 decode_stream 那路的缓存关键帧(解码器须已 start)→ 不等下个 IDR、瞬时出图。 */
@@ -320,6 +334,7 @@ void stream_decode_close(stream_chan_t *c)
     if (!c || !c->vdec) return;
     mhal_vdec_t *v = c->vdec;
     c->vdec = NULL;
+    c->bootstrap_pending = 0;
     c->live_state = STREAM_LIVE_IDLE;
     stream_live_q_flush(&c->live_q);
     mhal_vdec_close(v);
@@ -437,6 +452,7 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
         if (c->vdec) stream_decode_close(c);
         if (c->show_win >= 0) stream_decode_open(c, c->show_win);
     }
+    if (p->stream == c->decode_stream) stream_try_bootstrap(c);
 
     nal_class_t nc;
     nal_classify(data, len, p->codec, &nc);

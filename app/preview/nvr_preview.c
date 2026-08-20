@@ -399,8 +399,12 @@ int nvr_preview_set_mode(nvr_preview_t *p, int mode, int page)
         return 0;
     }
 
-    /* 回宫格：先清悬浮块，避免旧自由矩形残留 */
-    for (int i = 0; i < p->ext_n; i++) mhal_vout_unbind(p->ext[i].chn0);
+    /* 回宫格：先清悬浮块(须同步关 streaming 解码门控,否则 show_win 仍为 0→宫格格0 不重开) */
+    for (int i = 0; i < p->ext_n; i++) {
+        int chn = p->ext[i].chn0;
+        mhal_vout_unbind(chn);
+        nvr_stream_set_display(p->cfg.sm, chn, -1);
+    }
     p->ext_n = 0;
 
     int wc = 0;
@@ -463,13 +467,16 @@ int nvr_preview_wait_ready(nvr_preview_t *p, int timeout_ms)
     const int settle_ms = NVR_DEF_SETTLE_MS;
     int waited = 0, step = 20;
     while (waited < timeout_ms) {
-        for (int i = 0; i < nvis; i++)
+        for (int i = 0; i < nvis; i++) {
             if (nvr_stream_display_ready(p->cfg.sm, vis[i])) {
                 int extra = settle_ms;
                 if (waited + extra > timeout_ms) extra = timeout_ms - waited;   /* 不超总超时 */
                 if (extra > 0) usleep((useconds_t)extra * 1000);                /* 沉降:等真上屏 */
                 return 0;
             }
+            /* commit 完成后补喂 puller 缓存 IDR(不等相机下一 GOP) */
+            nvr_stream_feed_keyframe(p->cfg.sm, vis[i]);
+        }
         usleep((useconds_t)step * 1000);
         waited += step;
     }
@@ -498,6 +505,18 @@ static void ext_place(nvr_preview_t *p, const nvr_pv_ext_t *e)
     mhal_vout_bind_rect(e->chn0, x, y, w, h);
 }
 
+static int ext_rect_eq(const nvr_pv_ext_t *a, const nvr_pv_ext_t *b)
+{
+    return a->x == b->x && a->y == b->y && a->w == b->w && a->h == b->h;
+}
+
+static int ext_in_list(const nvr_pv_ext_t *arr, int n, int chn0, int stream)
+{
+    for (int i = 0; i < n; i++)
+        if (arr[i].chn0 == chn0 && arr[i].stream == stream) return 1;
+    return 0;
+}
+
 int nvr_preview_set_ext(nvr_preview_t *p, const nvr_pv_ext_t *b, int n)
 {
     if (!p) return -1;
@@ -507,38 +526,63 @@ int nvr_preview_set_ext(nvr_preview_t *p, const nvr_pv_ext_t *b, int n)
 
     pthread_mutex_lock(&p->lock);
 
-    /* 清旧块：解绑 + 关解码（拉流/录像不动） */
+    int need_decode_wait = 0;
+    int need_rect = 0;
+
+    /* 移除新列表中不存在的旧块 → 关解码(拉流/录像不动) */
     for (int i = 0; i < p->ext_n; i++) {
+        if (n > 0 && ext_in_list(b, n, p->ext[i].chn0, p->ext[i].stream)) continue;
         int chn = p->ext[i].chn0;
         mhal_vout_unbind(chn);
         nvr_stream_set_display(p->cfg.sm, chn, -1);
+        need_decode_wait = 1;
     }
-    p->ext_n = 0;
 
     if (n == 0) {
+        p->ext_n = 0;
         mhal_vout_request_commit();
         pthread_mutex_unlock(&p->lock);
         return 0;
     }
 
-    for (int i = 0; i < n; i++) {
-        if (b[i].chn0 < 0 || b[i].chn0 >= PV_MAX_CH) {
+    /* 增量：新开/换码流才动解码;同 channel+stream 仅改矩形则不关开 VPU */
+    for (int j = 0; j < n; j++) {
+        if (b[j].chn0 < 0 || b[j].chn0 >= PV_MAX_CH) {
             pthread_mutex_unlock(&p->lock);
             return -1;
         }
-        p->ext[p->ext_n++] = b[i];
-        if (p->cfg.cm) nvr_chan_set_stream(p->cfg.cm, b[i].chn0, b[i].stream);
-        /* win=0 只为把门控打开(vout 路径随 vdec_open 建好)，真正位置由 bind_rect 定。 */
-        nvr_stream_set_display(p->cfg.sm, b[i].chn0, 0);
-        ext_place(p, &p->ext[p->ext_n - 1]);
+        int oi = -1;
+        for (int i = 0; i < p->ext_n; i++) {
+            if (p->ext[i].chn0 == b[j].chn0 && p->ext[i].stream == b[j].stream) { oi = i; break; }
+        }
+        if (oi >= 0) {
+            if (!ext_rect_eq(&p->ext[oi], &b[j])) need_rect = 1;
+            continue;
+        }
+        if (p->cfg.cm) nvr_chan_set_stream(p->cfg.cm, b[j].chn0, b[j].stream);
+        nvr_stream_set_display(p->cfg.sm, b[j].chn0, 0);
+        need_decode_wait = 1;
     }
+
+    for (int j = 0; j < n; j++) p->ext[j] = b[j];
+    p->ext_n = n;
+
+    if (!need_decode_wait && !need_rect) {
+        pthread_mutex_unlock(&p->lock);
+        return 0;
+    }
+
     pthread_mutex_unlock(&p->lock);
 
-    /* 等解码器起来后再绑一次矩形（set_display 在 puller 线程兑现）。 */
-    nvr_preview_wait_ready(p, NVR_DEF_WAIT_READY_MS);
+    if (need_decode_wait)
+        nvr_preview_wait_ready(p, NVR_DEF_WAIT_EXT_MS);
+
+    /* ★ 所有 bind_rect 包在 defer 内 → 与 puller 侧 request_commit 合并成一次整屏重建 */
     pthread_mutex_lock(&p->lock);
+    mhal_vout_defer_begin();
     for (int i = 0; i < p->ext_n; i++) ext_place(p, &p->ext[i]);
-    mhal_vout_request_commit();
+    mhal_vout_defer_end();
+
     int denied = 0;
     for (int i = 0; i < p->ext_n; i++)
         if (nvr_stream_decode_denied(p->cfg.sm, p->ext[i].chn0)) denied = 1;

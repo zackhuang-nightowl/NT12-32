@@ -137,6 +137,7 @@ typedef struct stream_chan {
     uint32_t          pend_event_start, pend_event_end;
     int              router_open;   /* 1=已开 writer/就绪 */
     int              fed_since_open; /* 开解码后已喂给解码器的帧数(供"出图就绪"判定:切宫格阻塞回复用) */
+    int              bootstrap_pending; /* 1=open 时 commit 未就绪未喂 kf;commit 后在 puller 补喂缓存 IDR */
     stream_live_state_t live_state; /* Live 状态机(替代 live_synced bool) */
     stream_live_q_t  live_q;        /* 仅 decode 路入队;满丢旧追最新 */
     unsigned         live_gen;      /* 已对齐的 pull conn_gen;不一致则 RESYNC */
