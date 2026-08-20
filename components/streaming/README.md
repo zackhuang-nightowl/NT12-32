@@ -35,12 +35,20 @@ components/onvif ── GetStreamUri ──► rtsp://198.18.N.100/main
 ## 关键实现点
 
 1. **每通道一个 `CRtspClient`**（16 路 → 16 实例，`stream_mgr` 用 chn 作槽位）。
-2. **裸帧直喂硬解**：`video_cb` 收到 H.264/265 Annex-B，`mhal_vdec_send` 送 VPU，**不经 ffmpeg 软解**。
+2. **裸帧 → Frame Hub**：`video_cb` → CI(只 mark disc/gen) → **HUB fanout** → BS旁路 / **RecordQueue** / **LiveQueue** → VDEC。
 3. **通道关联**：`set_notify_cb(cb, chan_ctx)` → 各回调 userdata 即通道上下文（已验证 happytime 回调传的就是它）。
-4. **关键帧门控录像**：`stream_router.c` 用 `nal_classify` 判首个 IDR/参数集，**从关键帧起录**（否则回放花屏）；未闭合段由 recorder 索引标记。
-5. **codec 自适应**：`NVR_CODEC_AUTO` 时用 `CRtspClient::video_codec()`（SDP 探测）→ 映射 rsdk codec。
-6. **主/子码流**：`nvr_stream_switch_stream` 换 url 重连；预览大画面主码流、分屏子码流。
-7. **默认 RTP over TCP**（NVR 汇聚网更稳），可配 UDP。
+4. **录像**：`WAIT_IDR→RECORDING` 状态机；disc/gen 打 gap 内联标记(`type_mask bit31`)；**RecordQueue(96)** 解耦磁盘抖动，满不丢帧、高水位告警。
+5. **Live**：`WAIT_IDR→SYNCED→RESYNC`；LiveQueue **双阈值**(8 帧 + 500ms)；RESYNC 立即注入 bootstrap IDR。
+6. **codec 自适应**：`NVR_CODEC_AUTO` 时用 `CRtspClient::video_codec()`（SDP 探测）→ 映射 rsdk codec。
+7. **主/子码流**：`nvr_stream_switch_stream` 换 url 重连；预览大画面主码流、分屏子码流。
+8. **强制 RTP over TCP**（TCP 重传保证主/子录像不丢包；拉流层忽略 over_tcp=0）。
+
+```text
+RTSP/TCP → AU → CI(mark disc/gen)
+              → HUB ─┬─ BS(旁路: par+IDR AU)
+                     ├─ RecordQueue → REC(WAIT_IDR|RECORDING) → rsdk
+                     └─ LiveQueue(8帧+500ms) → LIVE SM → VDEC
+```
 
 ## app 侧用法
 

@@ -33,7 +33,7 @@ typedef struct {
     int   stream;              /* NVR_STREAM_MAIN / SUB */
     int   record;              /* 1=同时录像 */
     int   vout_win;            /* 预览分屏窗口索引；-1=只录不显 */
-    int   over_tcp;            /* 1=RTP over TCP(NVR 场景更稳，默认建议 1) */
+    int   over_tcp;            /* 保留字段;拉流层强制 RTP over TCP=1(录像不丢包) */
     int   enc_w, enc_h, fps;   /* 该码流实际分辨率/帧率（0=未知，供解码预算准入+动态分配）
                                 *   一般由 ONVIF GetVideoEncoderConfiguration 填；未知时按码流类型估 */
 } nvr_stream_chan_cfg_t;
@@ -78,6 +78,8 @@ uint32_t nvr_stream_mgr_pause_recording (nvr_stream_mgr_t *m);
 void     nvr_stream_mgr_resume_recording(nvr_stream_mgr_t *m, rsdk_group_t *group, uint32_t was);
 /* 录像中通道位图(bit chn=该通道正在写盘)。供 GUI_longPolling 的 RecordStatus。 */
 uint32_t   nvr_stream_recording_mask(nvr_stream_mgr_t *m);
+/* 录像位图变化时唤醒 GUI_longPolling(由 app 注入 nvr_chan_poke_longpoll)。 */
+void       nvr_stream_set_lp_poke(nvr_stream_mgr_t *m, void (*poke)(void *user), void *user);
 /* 回放:取某通道某码流(NVR_STREAM_MAIN/SUB)的解码尺寸。无该通道回退 1080p。返回 0/. */
 int        nvr_stream_dim(nvr_stream_mgr_t *m, int chn, int stream, int *w, int *h, int *fps);
 

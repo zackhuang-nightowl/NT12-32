@@ -185,9 +185,14 @@ char *cmd_X_NightOwl_getChannelStatus(cJSON *a, const nvr_cmd_ctx_t *c)
     cJSON *o = cJSON_CreateObject(); cJSON_AddNumberToObject(o, "status", code);
     return nvr_resp_content(o);
 }
-/* longPolling:有 ChannelStatusNotify / 事件位 / RecordStatus / APPNotifySetupStatus 变化则立刻回;
- * 否则挂起最多 25s。gui 收到 ChannelStatusNotify!=0 → 重拉 getChannelStatus。
- * APPNotifySetupStatus 是长期状态:App 向导 notify 后 GUI 据此切页。refresh:true 立即全量。 */
+/* longPolling:规范 — 仅回**相对进入本次等待前**有变化的字段;refresh:true 全量同步。
+ * 有 ChannelStatusNotify / 事件位 / RecordStatus / APPNotifySetupStatus 变化则立刻回;
+ * 否则挂起最多 25s(超时 content 可为空)。 */
+static void lp_add_u32_if(cJSON *o, const char *key, uint32_t val, int emit)
+{
+    if (emit) cJSON_AddNumberToObject(o, key, (double)val);
+}
+
 char *cmd_GUI_longPolling(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     int refresh = a ? nvr_jbool(a, "refresh", 0) : 0;
@@ -195,9 +200,11 @@ char *cmd_GUI_longPolling(cJSON *a, const nvr_cmd_ctx_t *c)
     uint32_t mo0 = 0, hu0 = 0, fa0 = 0, car0 = 0, rec0 = 0;
     uint32_t mo = 0, hu = 0, fa = 0, car = 0, rec = 0;
     int setup0 = nvr_gui_setup_gen();
+    int setup_has = 0, setup_now = 0;
 
     if (c->eh) nvr_evt_masks(c->eh, &mo0, &hu0, &fa0, &car0);
     rec0 = c->sm ? nvr_stream_recording_mask(c->sm) : 0;
+    setup_now = nvr_gui_get_setup_status(&setup_has);
 
     if (refresh) {
         int cap = c->settings ? nvr_settings_get_int(c->settings, "system.capacity", 32) : 32;
@@ -233,18 +240,26 @@ char *cmd_GUI_longPolling(cJSON *a, const nvr_cmd_ctx_t *c)
     }
     if (c->eh) nvr_evt_masks(c->eh, &mo, &hu, &fa, &car);
     rec = c->sm ? nvr_stream_recording_mask(c->sm) : 0;
+    setup_now = nvr_gui_get_setup_status(&setup_has);
 
     cJSON *o = cJSON_CreateObject();
-    cJSON_AddNumberToObject(o, "ChannelStatusNotify", (double)notify);
-    cJSON_AddNumberToObject(o, "MotionStatus", (double)mo);
-    cJSON_AddNumberToObject(o, "FaceStatus", (double)fa);
-    cJSON_AddNumberToObject(o, "HumanStatus", (double)hu);
-    cJSON_AddNumberToObject(o, "CarStatus", (double)car);
-    cJSON_AddNumberToObject(o, "RecordStatus", (double)rec);
-    {
-        int has = 0;
-        int st = nvr_gui_get_setup_status(&has);
-        if (has) cJSON_AddNumberToObject(o, "APPNotifySetupStatus", st);
+    if (refresh) {
+        lp_add_u32_if(o, "ChannelStatusNotify", notify, 1);
+        lp_add_u32_if(o, "MotionStatus", mo, 1);
+        lp_add_u32_if(o, "FaceStatus", fa, 1);
+        lp_add_u32_if(o, "HumanStatus", hu, 1);
+        lp_add_u32_if(o, "CarStatus", car, 1);
+        lp_add_u32_if(o, "RecordStatus", rec, 1);
+        if (setup_has) cJSON_AddNumberToObject(o, "APPNotifySetupStatus", setup_now);
+    } else {
+        lp_add_u32_if(o, "ChannelStatusNotify", notify, notify != 0);
+        lp_add_u32_if(o, "MotionStatus", mo, mo != mo0);
+        lp_add_u32_if(o, "FaceStatus", fa, fa != fa0);
+        lp_add_u32_if(o, "HumanStatus", hu, hu != hu0);
+        lp_add_u32_if(o, "CarStatus", car, car != car0);
+        lp_add_u32_if(o, "RecordStatus", rec, rec != rec0);
+        if (setup_has && nvr_gui_setup_gen() != setup0)
+            cJSON_AddNumberToObject(o, "APPNotifySetupStatus", setup_now);
     }
     return nvr_resp_content(o);
 }

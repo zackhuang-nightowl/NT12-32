@@ -42,10 +42,12 @@ static int run(const char *fmt, ...)
 
 #define NVR_ETH0 "eth0"
 #define NVR_ETH1 "eth1"
-#define NVR_UDHCPC_SCRIPT "/usr/share/udhcpc/default.script"
+#define NVR_UDHCPC_SCRIPT "/dvr/bin/nvr_udhcpc.script"
 /* eth0 上次成功 DHCP 的 IP(持久化在 /SYS ubifs;default.script 的 bound 钩子写)。
  * 下次开机 udhcpc 用 -r 请求它 → 默认复用旧 IP;被占用(ACD)才换。 */
 #define NVR_ETH0_LASTIP   "/SYS/dhcp_eth0.ip"
+/* NVR 配置的 DNS(apply_dns 写);udhcpc bound/renew 后由 nvr_udhcpc.script 覆盖 resolv.conf */
+#define NVR_DNS_FILE      "/SYS/nvr_dns.conf"
 
 static int is_dhcp_type(const char *network_type)
 {
@@ -154,14 +156,20 @@ static int read_default_gw(const char *ifname, char *gw, int cap)
     char line[256];
     if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
     while (fgets(line, sizeof(line), f)) {
-        char iface[32];
-        unsigned long dest = 0, gwh = 0;
-        if (sscanf(line, "%31s\t%lx\t%lx", iface, &dest, &gwh) < 3 || dest != 0 || gwh == 0)
+        char iface[32], dest[16], gwh[16];
+        if (sscanf(line, "%31s %15s %15s", iface, dest, gwh) < 3)
+            continue;
+        if (strcmp(dest, "00000000") != 0 || strcmp(gwh, "00000000") == 0)
             continue;
         if (ifname && ifname[0] && strcmp(iface, ifname) != 0)
             continue;
-        unsigned a = (gwh >> 24) & 0xff, b = (gwh >> 16) & 0xff, c = (gwh >> 8) & 0xff, d = gwh & 0xff;
-        snprintf(gw, (size_t)cap, "%u.%u.%u.%u", a, b, c, d);
+        /* /proc/net/route 网关为 hex __be32；直接赋 s_addr + inet_ntop(与 SDK util.cpp 一致) */
+        struct in_addr addr;
+        addr.s_addr = (in_addr_t)strtoul(gwh, NULL, 16);
+        if (!inet_ntop(AF_INET, &addr, gw, (socklen_t)cap)) {
+            fclose(f);
+            return -1;
+        }
         fclose(f);
         return 0;
     }
@@ -169,30 +177,19 @@ static int read_default_gw(const char *ifname, char *gw, int cap)
     return -1;
 }
 
-static void read_dns(char *dns1, int c1, char *dns2, int c2)
+static void write_resolv_conf(const char *path, const char *dns1, const char *dns2)
 {
-    if (dns1) dns1[0] = 0;
-    if (dns2) dns2[0] = 0;
-    FILE *f = fopen("/etc/resolv.conf", "r");
+    FILE *f = fopen(path, "w");
     if (!f) return;
-    char line[128];
-    while (fgets(line, sizeof(line), f)) {
-        char ns[64];
-        if (sscanf(line, " nameserver %63s", ns) != 1 && sscanf(line, "nameserver %63s", ns) != 1)
-            continue;
-        if (dns1 && !dns1[0] && c1 > 0) snprintf(dns1, (size_t)c1, "%s", ns);
-        else if (dns2 && !dns2[0] && c2 > 0) { snprintf(dns2, (size_t)c2, "%s", ns); break; }
-    }
+    if (dns1 && dns1[0]) fprintf(f, "nameserver %s\n", dns1);
+    if (dns2 && dns2[0]) fprintf(f, "nameserver %s\n", dns2);
     fclose(f);
 }
 
 static void apply_dns(const char *dns1, const char *dns2)
 {
-    FILE *f = fopen("/etc/resolv.conf", "w");
-    if (!f) return;
-    if (dns1 && dns1[0]) fprintf(f, "nameserver %s\n", dns1);
-    if (dns2 && dns2[0]) fprintf(f, "nameserver %s\n", dns2);
-    fclose(f);
+    write_resolv_conf("/etc/resolv.conf", dns1, dns2);
+    write_resolv_conf(NVR_DNS_FILE, dns1, dns2);
 }
 
 static void local_link_from_eth0_kv(nvr_settings_t *s, nvr_local_link_t *lk)
@@ -312,7 +309,7 @@ int nvr_net_local_link_fill(nvr_settings_t *s, nvr_local_link_t *out)
     /* GET 以 Linux 实时状态为准(设置库仅作缺省/持久化) */
     read_iface_mac(NVR_ETH0, out->mac, sizeof(out->mac));
 
-    char lip[64], lmask[64], lgw[64], d1[64], d2[64];
+    char lip[64], lmask[64], lgw[64];
     if (read_iface_ipv4(NVR_ETH0, lip, sizeof(lip), lmask, sizeof(lmask)) == 0) {
         if (lip[0])  snprintf(out->ip, sizeof(out->ip), "%s", lip);
         if (lmask[0]) snprintf(out->subnet_mask, sizeof(out->subnet_mask), "%s", lmask);
@@ -320,9 +317,9 @@ int nvr_net_local_link_fill(nvr_settings_t *s, nvr_local_link_t *out)
     if (read_default_gw(NVR_ETH0, lgw, sizeof(lgw)) == 0 && lgw[0])
         snprintf(out->gateway, sizeof(out->gateway), "%s", lgw);
 
-    read_dns(d1, sizeof(d1), d2, sizeof(d2));
-    if (d1[0]) snprintf(out->dns1, sizeof(out->dns1), "%s", d1);
-    if (d2[0]) snprintf(out->dns2, sizeof(out->dns2), "%s", d2);
+    /* DNS 以 local_link 持久化配置为准(udhcpc 会改 resolv.conf,GET 不应被覆盖) */
+    if (!out->dns1[0]) snprintf(out->dns1, sizeof(out->dns1), "8.8.8.8");
+    if (!out->dns2[0]) snprintf(out->dns2, sizeof(out->dns2), "8.8.4.4");
 
     if (eth0_udhcpc_running())
         snprintf(out->network_type, sizeof(out->network_type), "DHCP");
@@ -338,6 +335,9 @@ int nvr_net_apply_eth0(nvr_settings_t *s)
     if (!s) return -1;
     nvr_local_link_t lk;
     nvr_net_local_link_fill(s, &lk);
+
+    /* 先写 DNS(含 /SYS/nvr_dns.conf),DHCP bound 后 udhcpc 脚本会再覆盖 resolv.conf */
+    apply_dns(lk.dns1, lk.dns2);
 
     if (is_dhcp_type(lk.network_type)) {
         run("killall udhcpc 2>/dev/null");
@@ -366,17 +366,18 @@ int nvr_net_apply_eth0(nvr_settings_t *s)
         }
         run("udhcpc -i %s -b -q %s%s-s %s 2>/dev/null &",
             NVR_ETH0, ropt, hopt, NVR_UDHCPC_SCRIPT);
-        NVR_LOGI("net", "%s = DHCP (udhcpc %s%s)", NVR_ETH0,
-                 ropt[0] ? ropt : "", hopt[0] ? hopt : "-x hostname:? ");
+        NVR_LOGI("net", "%s = DHCP (udhcpc %s%s, dns=%s/%s)", NVR_ETH0,
+                 ropt[0] ? ropt : "", hopt[0] ? hopt : "-x hostname:? ",
+                 lk.dns1, lk.dns2);
     } else {
         run("killall udhcpc 2>/dev/null");
         run("ifconfig %s %s netmask %s up 2>/dev/null", NVR_ETH0, lk.ip, lk.subnet_mask);
         flush_default_route(NVR_ETH0);
         if (lk.gateway[0])
             run("route add default gw %s dev %s 2>/dev/null", lk.gateway, NVR_ETH0);
-        NVR_LOGI("net", "%s = 静态 %s/%s gw=%s", NVR_ETH0, lk.ip, lk.subnet_mask, lk.gateway);
+        NVR_LOGI("net", "%s = 静态 %s/%s gw=%s dns=%s/%s", NVR_ETH0,
+                 lk.ip, lk.subnet_mask, lk.gateway, lk.dns1, lk.dns2);
     }
-    apply_dns(lk.dns1, lk.dns2);
     return 0;
 }
 

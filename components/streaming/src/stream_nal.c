@@ -47,3 +47,124 @@ void nal_classify(const uint8_t *data, int len, int codec, nal_class_t *out)
     out->is_key     = vcl_key || saw_param;
     out->frame_type = (vcl_key || saw_param || !saw_vcl) ? 0 /*I*/ : 1 /*P*/;
 }
+
+/* ---- 轻量 bit reader:只服务 SPS log2 / slice frame_num 连续性 ---- */
+typedef struct { const uint8_t *p; int n; int bit; } nal_br_t;
+
+static void br_init(nal_br_t *b, const uint8_t *p, int n) { b->p = p; b->n = n; b->bit = 0; }
+
+static int br_u(nal_br_t *b, int bits)
+{
+    int v = 0;
+    while (bits-- > 0) {
+        int bi = b->bit >> 3, bj = 7 - (b->bit & 7);
+        if (bi >= b->n) return 0;
+        v = (v << 1) | ((b->p[bi] >> bj) & 1);
+        b->bit++;
+    }
+    return v;
+}
+
+static unsigned br_ue(nal_br_t *b)
+{
+    int z = 0;
+    while (br_u(b, 1) == 0 && z < 31) z++;
+    if (z == 0) return 0;
+    return ((1u << z) - 1u) + (unsigned)br_u(b, z);
+}
+
+static int br_se(nal_br_t *b)
+{
+    unsigned c = br_ue(b);
+    if (c & 1) return (int)((c + 1) / 2);
+    return -(int)(c / 2);
+}
+
+/* 从 SPS RBSP(已跳过 NAL header)解析 log2_max_frame_num;失败返回 0。 */
+static int sps_log2_max_frame_num(const uint8_t *rbsp, int len)
+{
+    if (!rbsp || len < 4) return 0;
+    nal_br_t b; br_init(&b, rbsp, len);
+    int profile_idc = br_u(&b, 8);
+    br_u(&b, 1 + 1 + 1 + 5 + 8);          /* constraint + level */
+    (void)br_ue(&b);                      /* sps_id */
+    if (profile_idc == 100 || profile_idc == 110 || profile_idc == 122 ||
+        profile_idc == 244 || profile_idc == 44  || profile_idc == 83  ||
+        profile_idc == 86  || profile_idc == 118 || profile_idc == 128 ||
+        profile_idc == 138 || profile_idc == 139 || profile_idc == 134 ||
+        profile_idc == 135) {
+        unsigned chroma = br_ue(&b);
+        if (chroma == 3) br_u(&b, 1);
+        (void)br_ue(&b); (void)br_ue(&b);
+        br_u(&b, 1);
+        if (br_u(&b, 1)) {                /* scaling_matrix */
+            int i, j;
+            for (i = 0; i < 8; i++) {
+                if (!br_u(&b, 1)) continue;
+                int last = 8;
+                for (j = 0; j < (i < 6 ? 16 : 64); j++) {
+                    last = last + br_se(&b);
+                    if (last == 0) break;
+                }
+            }
+        }
+    }
+    int log2 = (int)br_ue(&b) + 4;
+    if (log2 < 4 || log2 > 16) return 0;
+    return log2;
+}
+
+/* 从 slice RBSP 读 frame_num;需要已知 log2。失败 -1。 */
+static int slice_frame_num(const uint8_t *rbsp, int len, int log2)
+{
+    if (!rbsp || len < 1 || log2 < 4 || log2 > 16) return -1;
+    nal_br_t b; br_init(&b, rbsp, len);
+    (void)br_ue(&b);                      /* first_mb */
+    (void)br_ue(&b);                      /* slice_type */
+    (void)br_ue(&b);                      /* pps_id */
+    return br_u(&b, log2);
+}
+
+int nal_h264_frame_num_gap(const uint8_t *data, int len, int is_idr,
+                           int *log2_io, int *prev_fn_io)
+{
+    if (!data || len < 5 || !log2_io || !prev_fn_io) return 0;
+
+    int sc = 0, off = next_nal(data, len, 0, &sc);
+    if (off < 0) off = 0;
+
+    int gap = 0;
+    while (off >= 0 && off < len) {
+        int t = data[off] & 0x1F;
+        const uint8_t *rbsp = data + off + 1;
+        int rlen = 0;
+        int nsc = 0, nx = next_nal(data, len, off + 1, &nsc);
+        if (nx > off + 1) rlen = nx - nsc - (off + 1);
+        else rlen = len - (off + 1);
+        if (rlen < 0) rlen = 0;
+
+        if (t == 7) {                     /* SPS → 学 log2 */
+            int lg = sps_log2_max_frame_num(rbsp, rlen);
+            if (lg > 0) *log2_io = lg;
+        } else if (t >= 1 && t <= 5) {
+            if (*log2_io <= 0) break;     /* 尚无 SPS,无法可靠比 */
+            int fn = slice_frame_num(rbsp, rlen, *log2_io);
+            if (fn < 0) break;
+            if (is_idr || t == 5) {
+                *prev_fn_io = fn;         /* IDR 重置参考,不判 gap */
+                break;
+            }
+            if (*prev_fn_io >= 0) {
+                int maxv = 1 << *log2_io;
+                int expect = (*prev_fn_io + 1) % maxv;
+                if (fn != expect) gap = 1;
+            }
+            *prev_fn_io = fn;
+            break;                        /* 只看首个 VCL */
+        }
+
+        if (nx < 0) break;
+        off = nx;
+    }
+    return gap;
+}

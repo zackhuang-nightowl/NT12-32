@@ -1,0 +1,24 @@
+#!/bin/sh
+# NVR eth0 udhcpc hook: 基座 default.script 处理 IP/路由/ACD；
+# DNS 以 nvr_app 写入的 /SYS/nvr_dns.conf 为准(覆盖 DHCP 下发的 resolv.conf)。
+BASE=/usr/share/udhcpc/default.script
+DNS=/SYS/nvr_dns.conf
+
+[ -n "$1" ] || { echo "Error: should be called from udhcpc"; exit 1; }
+
+if [ -x "$BASE" ]; then
+	"$BASE" "$@"
+else
+	echo "missing $BASE" >&2
+	exit 1
+fi
+
+case "$1" in
+renew|bound)
+	if [ -f "$DNS" ]; then
+		cp "$DNS" /etc/resolv.conf
+	fi
+	;;
+esac
+
+exit 0

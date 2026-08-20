@@ -57,6 +57,23 @@ static void pull_on_connected(stream_pull_t *p)
         stream_decode_open(c, c->show_win);
 }
 
+static void pull_reset_continuity(stream_pull_t *p)
+{
+    if (!p) return;
+    p->rtp_seq_valid = 0;
+    p->last_rtp_seq = 0;
+    p->h264_prev_fn = -1;
+    p->disc_mark = 0;
+    p->conn_gen++;
+    /* 保留 h264_log2_fn / gap 计数:重连后 SPS 会再学,计数便于串口看累计 */
+}
+
+static void live_resync_if_decode(stream_pull_t *p)
+{
+    if (!p || !p->owner) return;
+    stream_live_signal_resync(p->owner, p, "rtsp_reconnect");
+}
+
 /* ---------- 回调（ctx = stream_pull_t*） ---------- */
 static void on_video(const uint8_t *data, int len, uint32_t ts, uint16_t seq, void *ud)
 {
@@ -67,7 +84,9 @@ static void on_video(const uint8_t *data, int len, uint32_t ts, uint16_t seq, vo
         NVR_LOGI("puller", "ch%d[%s] 首帧! len=%d codec=%d", p->owner->cfg.chn, sname(p->stream), len, p->codec);
     p->vframes++; p->vbytes += (unsigned long)(len > 0 ? len : 0);
     if ((p->vframes % 200) == 0)
-        NVR_LOGI("puller", "ch%d[%s] 已收 %u 帧", p->owner->cfg.chn, sname(p->stream), p->vframes);
+        NVR_LOGI("puller", "ch%d[%s] 已收 %u 帧 (rtp_gap=%u fn_gap=%u live=%d)",
+                 p->owner->cfg.chn, sname(p->stream), p->vframes, p->rtp_gap_cnt, p->fn_gap_cnt,
+                 p->owner->live_state);
     stream_route_video(p, data, len, ts, seq);
 }
 
@@ -86,13 +105,37 @@ static void on_event(int event, void *ud)
     NVR_LOGI("puller", "ch%d[%s] RTSP事件: %s(%d)", c->cfg.chn, sname(p->stream), eve_name(event), event);
     switch (event) {
         case NOP_RTSP_EVE_CONNECTING: if (c->state == NVR_CH_IDLE) c->state = NVR_CH_CONNECTING; break;
-        case NOP_RTSP_EVE_CONNSUCC:   pull_on_connected(p); c->state = NVR_CH_PLAYING; break;
+        case NOP_RTSP_EVE_CONNSUCC:
+            pull_reset_continuity(p);
+            live_resync_if_decode(p);
+            pull_on_connected(p);
+            c->state = NVR_CH_PLAYING;
+            break;
         case NOP_RTSP_EVE_CONNFAIL:
-        case NOP_RTSP_EVE_AUTHFAILED: p->connected = 0; if (c->state != NVR_CH_PLAYING) c->state = NVR_CH_FAIL; break;
+        case NOP_RTSP_EVE_AUTHFAILED:
+            p->connected = 0;
+            pull_reset_continuity(p);
+            live_resync_if_decode(p);
+            if (c->state != NVR_CH_PLAYING) c->state = NVR_CH_FAIL;
+            break;
         case NOP_RTSP_EVE_NOSIGNAL:
-        case NOP_RTSP_EVE_NODATA:     p->connected = 0; c->state = NVR_CH_NOSIGNAL; break;  /* 供 mgr 重连 */
-        case NOP_RTSP_EVE_RESUME:     c->state = NVR_CH_PLAYING; break;
-        case NOP_RTSP_EVE_STOPPED:    p->connected = 0; break;
+        case NOP_RTSP_EVE_NODATA:
+            p->connected = 0;
+            pull_reset_continuity(p);
+            live_resync_if_decode(p);
+            c->state = NVR_CH_NOSIGNAL;
+            break;
+        case NOP_RTSP_EVE_RESUME:
+            pull_reset_continuity(p);
+            live_resync_if_decode(p);
+            NVR_LOGW("rtsp-gap", "ch%d[%s] RESUME gen=%u → live RESYNC", c->cfg.chn, sname(p->stream), p->conn_gen);
+            c->state = NVR_CH_PLAYING;
+            break;
+        case NOP_RTSP_EVE_STOPPED:
+            p->connected = 0;
+            pull_reset_continuity(p);
+            live_resync_if_decode(p);
+            break;
         default: break;
     }
 }
@@ -107,15 +150,21 @@ extern "C" int stream_pull_start(stream_pull_t *p, int conn_to, int rx_to)
     p->puller = cli;
     p->connected = 0; p->vframes = 0; p->vbytes = 0;
     p->par_len = 0; p->par_building = 0;
+    p->rtp_seq_valid = 0; p->last_rtp_seq = 0;
+    p->h264_log2_fn = 0; p->h264_prev_fn = -1;
+    p->rtp_gap_cnt = 0; p->fn_gap_cnt = 0;
+    p->disc_mark = 0; p->conn_gen = 1;
 
     cli->setEventCb(on_event, p);            /* ctx = 本路 */
     cli->setVideoCb(on_video, p);
     cli->setAudioCb(on_audio, p);
-    cli->setTransportTcp(c->cfg.over_tcp ? true : false);
+    /* 强制 TCP(忽略 cfg.over_tcp=0):交错 RTP 走 RTSP 连接,传输层重传 → 录像不丢包 */
+    c->cfg.over_tcp = 1;
+    cli->setTransportTcp(true);
     cli->setConnTimeout(conn_to > 0 ? conn_to : 5);
     cli->setRxTimeout  (rx_to   > 0 ? rx_to   : 10);
 
-    NVR_LOGI("puller", "ch%d[%s] 开始拉流: url=%s", c->cfg.chn, sname(p->stream), p->url);
+    NVR_LOGI("puller", "ch%d[%s] 开始拉流(RTP/TCP): url=%s", c->cfg.chn, sname(p->stream), p->url);
     if (!cli->open(p->url, c->cfg.user, c->cfg.pass)) {
         NVR_LOGE("puller", "ch%d[%s] open 失败", c->cfg.chn, sname(p->stream));
         delete cli; p->puller = NULL;

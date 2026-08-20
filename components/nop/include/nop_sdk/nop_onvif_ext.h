@@ -497,6 +497,7 @@ int nop_onvif_get_media_caps(nop_onvif_device_t *device, nop_onvif_media_caps_t 
  *   - ObjectDetection/ObjectInField/…Engine  → objectDetection(+ human/vehicle/animal/face) */
 typedef struct nop_onvif_analytics_caps {
     int motion;
+    int motion_pir;       /**< Analytics module name hints PIR (e.g. PIRDetector) */
     int objdet;
     int obj_human, obj_vehicle, obj_animal, obj_face;
     /* ruledDetection(AI_getChannelAICapabilities):越线/区域入侵 */

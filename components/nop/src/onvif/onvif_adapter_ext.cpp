@@ -1558,6 +1558,7 @@ static void analytics_scan_name(const char *name, nop_onvif_analytics_caps_t *o)
 {
     if (!name || !name[0]) return;
     if (strstr(name, "CellMotion") || strstr(name, "Motion"))                    o->motion = 1;
+    if (strstr(name, "PIR") || strstr(name, "Pir"))                              { o->motion = 1; o->motion_pir = 1; }
     if (strstr(name, "ObjectDetection") || strstr(name, "ObjectInField") ||
         strstr(name, "FieldDetector"))                                            o->objdet = 1;
     if (strstr(name, "Human") || strstr(name, "People") || strstr(name, "Person")) { o->objdet = 1; o->obj_human   = 1; }

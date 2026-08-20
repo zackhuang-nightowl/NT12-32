@@ -651,8 +651,11 @@ nop_status_t onvif_map_X_NightOwl_getDeviceCapabilities(nop_onvif_map_backend_t 
 
         /* ★ best-effort:探测失败也**照常加这条 channel**(至少 signal/videoSourceToken),
          * 能拿到的能力字段就带、拿不到就空 —— 而不是整条跳过导致 channels 空、GUI 能力集空。 */
+        nop_onvif_media_caps_t     mc;
         memset(&dc, 0, sizeof(dc));
+        memset(&mc, 0, sizeof(mc));
         nop_onvif_get_device_caps(dev, srcs[i], &dc);
+        nop_onvif_get_media_caps(dev, &mc);
         /* 分析 token 用连接缓存；不再 resolve_source（又一次 GetProfiles）。 */
         nop_onvif_analytics_caps_t supp;
         memset(&supp, 0, sizeof(supp));
@@ -679,19 +682,18 @@ nop_status_t onvif_map_X_NightOwl_getDeviceCapabilities(nop_onvif_map_backend_t 
         /* signal: ONVIF/IP 相机固定 IPC(规范 required,枚举 TVI/AHD/CVI/IPC)。 */
         nop_json_add_str(chan, "signal", "IPC");
 
-        /* capabilities[]: 规范(X_NightOwl_getDeviceCapabilities)是**字符串数组**(enum),
-         * 不是布尔对象。只推被支持的项;ONVIF 无法判定的(light/floodlight/audioAlert/
-         * accelerometer/cloudRecording)不发。映射见 NOPMappingONVIF.md §channels[].capabilities。 */
+        /* capabilities[]: 规范是字符串数组(enum)。light/audioAlert 由 nopOnvif 发现口
+         * GET 探测(nvr_channel.c);纯 ONVIF 无标准位。映射见 NOPMappingONVIF.md。 */
         caps = nop_json_arr();
-        if (dc.has_mic)                   nop_json_arr_push_str(caps, "mic");
-        if (dc.has_speaker)               nop_json_arr_push_str(caps, "speaker");
-        if (dc.has_mic && dc.has_speaker) nop_json_arr_push_str(caps, "full_duplex");
+        if (dc.has_mic || mc.mic)         nop_json_arr_push_str(caps, "mic");
+        if (mc.audio_out)                 nop_json_arr_push_str(caps, "speaker");
+        if ((dc.has_mic || mc.mic) && mc.audio_out && mc.audio_dec)
+            nop_json_arr_push_str(caps, "full_duplex");   /* 双向=mic+AudioOutput+AudioDecoder */
         if (dc.has_analytics)             nop_json_arr_push_str(caps, "sensor");
         if (dc.has_ptz)                   nop_json_arr_push_str(caps, "ptz");
         nop_json_add(chan, "capabilities", caps);
 
-        /* ptz[]: 规范枚举 = pan/tilt/zoom/nodes/patrol/hdTrack。
-         * nodes = SetPreset/GotoPreset(ptz_preset);`home` 非规范枚举,不发。 */
+        /* ptz[]: 规范枚举 pan/tilt/zoom/focus/nodes/preset/patrol/home/hdTrack。 */
         ptz = nop_json_arr();
         if (dc.ptz_pan)     nop_json_arr_push_str(ptz, "pan");
         if (dc.ptz_tilt)    nop_json_arr_push_str(ptz, "tilt");
@@ -699,12 +701,13 @@ nop_status_t onvif_map_X_NightOwl_getDeviceCapabilities(nop_onvif_map_backend_t 
         if (dc.ptz_zoom)    nop_json_arr_push_str(ptz, "zoom");
         if (dc.ptz_focus)   nop_json_arr_push_str(ptz, "focus");   /* Imaging 对焦 */
         if (dc.ptz_preset)  nop_json_arr_push_str(ptz, "nodes");
-        if (dc.ptz_preset)  nop_json_arr_push_str(ptz, "preset");   /* 规范枚举:支持预置位(SetPreset/GotoPreset) */
+        if (dc.ptz_preset)  nop_json_arr_push_str(ptz, "preset");
         if (dc.ptz_patrol)  nop_json_arr_push_str(ptz, "patrol");
+        if (dc.ptz_home)    nop_json_arr_push_str(ptz, "home");     /* GetNodes.HomeSupported */
         if (dc.ptz_hdtrack) nop_json_arr_push_str(ptz, "hdTrack");
         nop_json_add(chan, "ptz", ptz);
 
-        /* sensors[]: motion + objectDetection。tr2 get_ai_caps 优先,Media1 用 GetSupportedRules 兜底。 */
+        /* sensors[]: motion + objectDetection + schedule(continuous)。 */
         sensors = nop_json_arr();
         int has_motion = (have_ai && ai.motion_present) || (have_supp && supp.motion);
         int has_objdet = (have_ai && ai.object_present && ai.object_classes[0]) || (have_supp && supp.objdet);
@@ -713,6 +716,8 @@ nop_status_t onvif_map_X_NightOwl_getDeviceCapabilities(nop_onvif_map_backend_t 
             nop_json_t *modes = nop_json_arr();
             nop_json_add_str(e, "sensor", "motion");
             nop_json_arr_push_str(modes, "pixelChange");
+            if (have_supp && supp.motion_pir)
+                nop_json_arr_push_str(modes, "pir");
             nop_json_add(e, "modes", modes);
             nop_json_arr_push(sensors, e);
         }
@@ -729,6 +734,14 @@ nop_status_t onvif_map_X_NightOwl_getDeviceCapabilities(nop_onvif_map_backend_t 
                 if (supp.obj_animal)  nop_json_arr_push_str(modes, "animal");
                 if (supp.obj_face)    nop_json_arr_push_str(modes, "face");
             }
+            nop_json_add(e, "modes", modes);
+            nop_json_arr_push(sensors, e);
+        }
+        if (dc.has_analytics) {
+            nop_json_t *e = nop_json_obj();
+            nop_json_t *modes = nop_json_arr();
+            nop_json_add_str(e, "sensor", "schedule");
+            nop_json_arr_push_str(modes, "continuous");
             nop_json_add(e, "modes", modes);
             nop_json_arr_push(sensors, e);
         }

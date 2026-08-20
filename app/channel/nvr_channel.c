@@ -95,6 +95,23 @@ static int caps_arr_has(cJSON *arr, const char *s)
     return 0;
 }
 
+/* light 能力存在时补 light[];NOPMappingONVIF 默认至少 fixed。 */
+static void caps_ensure_light_modes(cJSON *e)
+{
+    cJSON *capsarr, *lightarr;
+    if (!e) return;
+    capsarr = cJSON_GetObjectItem(e, "capabilities");
+    if (!caps_arr_has(capsarr, "light")) return;
+    lightarr = cJSON_GetObjectItem(e, "light");
+    if (!lightarr) {
+        lightarr = cJSON_AddArrayToObject(e, "light");
+        cJSON_AddItemToArray(lightarr, cJSON_CreateString("fixed"));
+        return;
+    }
+    if (cJSON_IsArray(lightarr) && cJSON_GetArraySize(lightarr) == 0)
+        cJSON_AddItemToArray(lightarr, cJSON_CreateString("fixed"));
+}
+
 typedef struct {
     nvr_channel_t     d;          /* 通道描述（含 kind/backend/enabled） */
     int               in_use;
@@ -512,12 +529,9 @@ static int install_slot(nvr_chan_mgr_t *m, const nvr_channel_t *d)
     nvr_stream_chan_cfg_t cc; memset(&cc, 0, sizeof(cc));
     cc.chn = d->chn; cc.codec = d->codec; cc.stream = d->stream;
     cc.record = d->record; cc.vout_win = d->vout_win;
-    /* ★ 传输方式按网段选:PoE 段(198.18.x)是隔离无损内网 → 走 UDP(over_tcp=0),
-     * 去掉 TCP 重传/缓冲带来的秒级延迟,预览更实时;WAN/LAN(可能丢包) → 保留 TCP 更稳。 */
-    { int oa = 0, ob = 0, oc = 0, od = 0;
-      int poe = (sscanf(d->onvif_ip, "%d.%d.%d.%d", &oa, &ob, &oc, &od) == 4 &&
-                 oa == NVR_POE_NET_A && ob == NVR_POE_NET_B);
-      cc.over_tcp = poe ? 0 : 1; }
+    /* ★ 全通道强制 RTP over RTSP/TCP:TCP 自带丢包重传,主/子录像与 live 共用拉流,
+     * 避免 PoE UDP 丢包导致录像缺帧 + 硬解 GAPS_DROP。不再按网段切 UDP。 */
+    cc.over_tcp = 1;
     snprintf(cc.user, sizeof(cc.user), "%s", d->user);
     snprintf(cc.pass, sizeof(cc.pass), "%s", d->pass);
 
@@ -1428,6 +1442,7 @@ static void tick_slot(nvr_chan_mgr_t *m, slot_t *s, time_t now, int *resolve_bud
                             if (proot) cJSON_Delete(proot);
                             free(pout);
                         }
+                        caps_ensure_light_modes(e);
                     }
                     char *cj = cJSON_PrintUnformatted(e);
                     if (cj) {

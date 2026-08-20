@@ -54,6 +54,8 @@ struct nvr_evt_hub {
     pthread_t       meta_tid;
     int             meta_started;
     volatile int    meta_run;
+    void          (*lp_poke)(void *user);
+    void           *lp_poke_user;
 };
 
 /* 8012 事件中心数字 msgType → detect 类型(NightOwl 私有编号)。未知/0 → NOP_DETECT_TYPE_MAX。 */
@@ -126,6 +128,11 @@ static unsigned icon_of(nop_detect_type_t type)
 }
 
 /* 统一事件处理(nop_hub 发布线程回调):置状态位 + 事件录像触发 + 预览图标。 */
+static void evt_lp_poke(nvr_evt_hub_t *h)
+{
+    if (h && h->lp_poke) h->lp_poke(h->lp_poke_user);
+}
+
 static void evt_sink(void *sink_ctx, const nop_event_t *ev)
 {
     nvr_evt_hub_t *h = (nvr_evt_hub_t *)sink_ctx;
@@ -143,6 +150,7 @@ static void evt_sink(void *sink_ctx, const nop_event_t *ev)
         newbits = h->icon[chn].bits;
         pthread_mutex_unlock(&h->lock);
         if (h->cfg.on_icon) h->cfg.on_icon(h->cfg.user, chn, newbits);
+        evt_lp_poke(h);
     }
     if (rectype >= 0 && h->cfg.rs) {
         /* 事件录像周排程门控；无保存规则=不录(GET 仍可回 7×24 给 GUI) */
@@ -327,6 +335,13 @@ void nvr_evt_set_push(nvr_evt_hub_t *h,
     h->cfg.push_user = push_user;
 }
 
+void nvr_evt_set_longpoll_poke(nvr_evt_hub_t *h, void (*poke)(void *user), void *user)
+{
+    if (!h) return;
+    h->lp_poke      = poke;
+    h->lp_poke_user = user;
+}
+
 void nvr_evt_queue_meta_enable(nvr_evt_hub_t *h, int chn)
 {
     meta_job_t j;
@@ -406,6 +421,7 @@ void nvr_evt_tick(nvr_evt_hub_t *h)
             h->icon[i].bits = 0;
             pthread_mutex_unlock(&h->lock);
             if (h->cfg.on_icon) h->cfg.on_icon(h->cfg.user, i, 0);
+            evt_lp_poke(h);
             pthread_mutex_lock(&h->lock);
         }
     }

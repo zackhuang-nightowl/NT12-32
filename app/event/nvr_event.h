@@ -80,6 +80,9 @@ void nvr_evt_masks(nvr_evt_hub_t *h, uint32_t *motion, uint32_t *human, uint32_t
 /* 周期：图标衰减（一段时间无事件后清 motion/human/face 图标）。 */
 void nvr_evt_tick(nvr_evt_hub_t *h);
 
+/* 注入 longPolling 唤醒(事件到达/图标衰减时)。 */
+void nvr_evt_set_longpoll_poke(nvr_evt_hub_t *h, void (*poke)(void *user), void *user);
+
 /* nop_detect_type_t → RSDK_REC_*（供测试/复用）。返回 -1 表示不触发录像。 */
 int  nvr_evt_rectype_of(nop_detect_type_t type);
 /* 8012 事件中心数字 msgType → detect 类型;未知/0 → NOP_DETECT_TYPE_MAX。 */

@@ -94,6 +94,12 @@ struct nvr_app {
     volatile int      running;
 };
 
+static void app_poke_longpoll(void *user)
+{
+    nvr_app_t *app = (nvr_app_t *)user;
+    if (app && app->cm) nvr_chan_poke_longpoll(app->cm);
+}
+
 static int remote_access_effective(nvr_app_t *a);
 
 static void app_talk_enh(void *ud, int chn0, const char *random, const char *penh)
@@ -887,6 +893,8 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
                               .user = a, .on_online = on_chan_online, .on_offline = on_chan_offline };
     nvr_chan_mgr_init(&cc, &a->cm);
     nvr_preview_set_cm(a->pv, a->cm);     /* 迟绑：preview 按显示模式切通道主/子码流 */
+    nvr_stream_set_lp_poke(a->sm, app_poke_longpoll, a);
+    nvr_evt_set_longpoll_poke(a->eh, app_poke_longpoll, a);
     nvr_evt_set_snap(a->eh, app_on_snap, a);
     nvr_evt_set_meta(a->eh, app_on_meta_enable, app_on_meta_pull, a);
     {

@@ -24,6 +24,9 @@ struct nvr_stream_mgr {
     stream_chan_t        ch[NVR_MAX_CH];
     int                  used[NVR_MAX_CH];
     int                  active[NVR_MAX_CH];   /* 1=已 start(允许起 puller) */
+    uint32_t             rec_mask_last;        /* 上次 poke 时的录像位图(去重) */
+    void               (*lp_poke)(void *user);
+    void                *lp_poke_user;
 };
 
 static stream_chan_t *slot(nvr_stream_mgr_t *m, int chn)
@@ -67,6 +70,15 @@ extern "C" rsdk_err_t nvr_stream_add_channel(nvr_stream_mgr_t *m, const nvr_stre
     s->decode_stream = NVR_STREAM_SUB;/* 默认多宫格=子码流;单宫格时 preview 切主 */
     s->pmain.owner = s; s->pmain.stream = NVR_STREAM_MAIN; s->pmain.codec = -1;
     s->psub.owner  = s; s->psub.stream  = NVR_STREAM_SUB;  s->psub.codec  = -1;
+    s->pmain.h264_prev_fn = -1; s->psub.h264_prev_fn = -1;
+    s->pmain.conn_gen = 1; s->psub.conn_gen = 1;
+    s->pmain.rec_last_gen = 1; s->psub.rec_last_gen = 1;
+    s->pmain.rec_state = STREAM_REC_WAIT_IDR; s->psub.rec_state = STREAM_REC_WAIT_IDR;
+    stream_record_q_init(&s->pmain.rec_q);
+    stream_record_q_init(&s->psub.rec_q);
+    s->cfg.over_tcp = 1;              /* 与 puller 强制 TCP 一致 */
+    s->live_state = STREAM_LIVE_IDLE;
+    stream_live_q_init(&s->live_q);
     /* cfg.url(若给)按 cfg.stream 落到对应路;通常由 channel 层随后 set_url 提供主/子两条。 */
     if (c->url[0]) snprintf(pull_of(s, c->stream)->url, sizeof(s->pmain.url), "%s", c->url);
     m->used[c->chn] = 1;
@@ -182,6 +194,7 @@ extern "C" rsdk_err_t nvr_stream_set_event(nvr_stream_mgr_t *m, int chn, uint64_
     } else if (!event_id && c->event_arm) {
         /* 显式清事件:片段收尾由 puller 在写路径关 writer;此处仅允许自然过期 */
     }
+    stream_rec_mask_poke(c);
     return RSDK_OK;
 }
 
@@ -204,6 +217,7 @@ extern "C" rsdk_err_t nvr_stream_set_record(nvr_stream_mgr_t *m, int chn, int on
         if (!c->writer_main || !c->writer_sub) stream_open_writer(c, m->cfg.group);
         c->rec_gated_main = 0; c->rec_gated_sub = 0;
     }
+    stream_rec_mask_poke(c);
     return RSDK_OK;
 }
 
@@ -238,6 +252,26 @@ extern "C" uint32_t nvr_stream_recording_mask(nvr_stream_mgr_t *m)
     return mask;
 }
 
+extern "C" void nvr_stream_set_lp_poke(nvr_stream_mgr_t *m, void (*poke)(void *user), void *user)
+{
+    if (!m) return;
+    m->lp_poke      = poke;
+    m->lp_poke_user = user;
+    m->rec_mask_last = nvr_stream_recording_mask(m);
+}
+
+/* 录像位图相对上次 poke 有变 → 唤醒 GUI_longPolling。 */
+extern "C" void stream_rec_mask_poke(stream_chan_t *c)
+{
+    nvr_stream_mgr_t *m;
+    uint32_t now;
+    if (!c || !(m = c->mgr) || !m->lp_poke) return;
+    now = nvr_stream_recording_mask(m);
+    if (now == m->rec_mask_last) return;
+    m->rec_mask_last = now;
+    m->lp_poke(m->lp_poke_user);
+}
+
 /* 运行时更新录像盘组(格式化后重组装用):设新 group + 对所有录像通道补开 writer(免重启即录)。
  * 开机盘未格式化时 group=NULL、各通道 writer 没开;格式化+assemble 后调此,ch 立即开始写盘。 */
 extern "C" void stream_open_writer(stream_chan_t *c, rsdk_group_t *grp);   /* stream_router.c */
@@ -253,6 +287,13 @@ extern "C" rsdk_err_t nvr_stream_mgr_set_group(nvr_stream_mgr_t *m, rsdk_group_t
         if (group && c->cfg.record && (!c->writer_main || !c->writer_sub)) { stream_open_writer(c, group); opened++; }
     }
     NVR_LOGI("stream", "set_group: 更新录像盘组, 补开 %d 路 writer", opened);
+    if (m->lp_poke) {
+        uint32_t now = nvr_stream_recording_mask(m);
+        if (now != m->rec_mask_last) {
+            m->rec_mask_last = now;
+            m->lp_poke(m->lp_poke_user);
+        }
+    }
     return RSDK_OK;
 }
 
@@ -279,6 +320,10 @@ extern "C" uint32_t nvr_stream_mgr_pause_recording(nvr_stream_mgr_t *m)
         if (m->ch[i].writer_main || m->ch[i].writer_sub) { stream_close_writer(&m->ch[i]); closed++; }
     }
     NVR_LOGW("stream", "格式化暂停写盘:置 record=0 + 关闭 %d 路 writer(盘静默)", closed);
+    if (m->lp_poke) {
+        m->rec_mask_last = nvr_stream_recording_mask(m);
+        m->lp_poke(m->lp_poke_user);
+    }
     return was;
 }
 
@@ -292,6 +337,13 @@ extern "C" void nvr_stream_mgr_resume_recording(nvr_stream_mgr_t *m, rsdk_group_
     }
     nvr_stream_mgr_set_group(m, group);                 /* 对 record 通道在新组补开 writer */
     NVR_LOGW("stream", "格式化恢复写盘:恢复录像通道位图 0x%x", was);
+    if (m->lp_poke) {
+        uint32_t now = nvr_stream_recording_mask(m);
+        if (now != m->rec_mask_last) {
+            m->rec_mask_last = now;
+            m->lp_poke(m->lp_poke_user);
+        }
+    }
 }
 
 /* 回放引擎:取某通道某码流的解码尺寸(内部封装 resolve_dim)。 */

@@ -16,6 +16,12 @@ typedef struct {
 /* codec: 0=H264 1=H265。扫描 Annex-B(00 00 01 / 00 00 00 01)首个有意义 NAL 分类。 */
 void nal_classify(const uint8_t *data, int len, int codec, nal_class_t *out);
 
+/* H.264 连续性(配合 live 起播门控):从 SPS 取 log2_max_frame_num,从 VCL 取 frame_num。
+ * 返回 1=相对 prev 发生 frame_num 跳变(参考链可能已断,应丢 P 等 IDR);0=连续/无法判定/IDR 重置。
+ * *log2_io:0=未知,解析到 SPS 时写入; *prev_fn_io:-1=无前帧。 */
+int nal_h264_frame_num_gap(const uint8_t *data, int len, int is_idr,
+                           int *log2_io, int *prev_fn_io);
+
 #ifdef __cplusplus
 }
 #endif

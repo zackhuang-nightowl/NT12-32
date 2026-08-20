@@ -13,6 +13,7 @@
 #include "nvr_streaming.h"
 #include "mhal_vdec.h"        /* platform: 硬解 */
 #include "rsdk.h"             /* recorder: 录像 */
+#include "stream_hub.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -61,6 +62,22 @@ typedef struct stream_pull {
     unsigned long    vbytes;
     unsigned         last_idr_f;
 
+    /* 码流连续性兜底(TCP 下少见;重连/相机跳帧仍可能断参考 → VPU GAPS_DROP)。
+     * last_rtp_seq=上一完整 AU 末包 seq; h264_log2/fn 用于 frame_num 跳变检测。 */
+    uint16_t         last_rtp_seq;
+    int              rtp_seq_valid;
+    int              h264_log2_fn;      /* 0=未从 SPS 学到;合法 4..16 */
+    int              h264_prev_fn;      /* -1=无 */
+    unsigned         rtp_gap_cnt;       /* 累计疑似 RTP 缺口次数(串口诊断) */
+    unsigned         fn_gap_cnt;        /* 累计 frame_num 跳变次数 */
+    int              disc_mark;         /* 1=本路检测到不连续(仅标记;live 自消化,不挡录像) */
+    unsigned         conn_gen;          /* RTSP 连接代数;重连++ */
+
+    /* Recorder 状态机 + 异步写盘队列(解耦磁盘抖动与 on_video) */
+    stream_rec_state_t rec_state;
+    unsigned         rec_last_gen;
+    stream_record_q_t rec_q;
+
     /* 事件预录环(本路独占;主/子 puller 各写各的,无跨线程争用) */
     stream_pre_frame_t *pre_frames;
     int              pre_cap;
@@ -107,19 +124,21 @@ typedef struct stream_chan {
     uint32_t          pend_event_start, pend_event_end;
     int              router_open;   /* 1=已开 writer/就绪 */
     int              fed_since_open; /* 开解码后已喂给解码器的帧数(供"出图就绪"判定:切宫格阻塞回复用) */
-    int              live_synced;    /* 1=已从一个"实时" IDR 干净起播(其后连续 P 帧参考链有效);
-                                        0=尚未 → 只喂关键帧、丢弃 P(避免参考链断裂花屏/卡旧图)。
-                                        长 GOP 8K 切回后靠它等到实时 IDR 再干净起播。 */
+    stream_live_state_t live_state; /* Live 状态机(替代 live_synced bool) */
+    stream_live_q_t  live_q;        /* 仅 decode 路入队;满丢旧追最新 */
+    unsigned         live_gen;      /* 已对齐的 pull conn_gen;不一致则 RESYNC */
 } stream_chan_t;
 
 /* ---- router (stream_router.c, 纯 C) ---- */
 rsdk_err_t stream_router_open (stream_chan_t *c, rsdk_group_t *grp);  /* 开 writer(+可见则解码) */
 void       stream_open_writer (stream_chan_t *c, rsdk_group_t *grp);  /* 仅补开 writer(格式化后重组装用) */
 void       stream_close_writer(stream_chan_t *c);                    /* 运行时关 writer(录像开关关) */
+void       stream_rec_mask_poke(stream_chan_t *c);                   /* 录像位图变化 → longPolling */
 void       stream_chan_get_dim(stream_chan_t *c, int stream, int *w, int *h, int *fps); /* 回放:取解码尺寸 */
 void       stream_decode_open (stream_chan_t *c, int win);           /* 开解码器绑到 win(用 decode_stream 那路的 codec/分辨率) */
 void       stream_decode_close(stream_chan_t *c);                    /* 关解码器(隐藏,不动拉流/录像) */
 void       stream_feed_keyframe(stream_chan_t *c);                   /* 喂缓存关键帧(解码器须已 start)→ 秒出图 */
+void       stream_live_signal_resync(stream_chan_t *c, stream_pull_t *p, const char *why);
 /* 一路码流来一帧:录像(标记 p->stream) +（若 p->stream==decode_stream 且可见)喂解码器。 */
 void       stream_route_video (stream_pull_t *p, const uint8_t *data, int len,
                                uint32_t ts, uint16_t seq);
