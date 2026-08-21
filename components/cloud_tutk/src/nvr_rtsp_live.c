@@ -22,6 +22,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
@@ -33,7 +34,7 @@
 #define RTP_EXT_WORDS  4          /* 16B AVTECH section */
 #define RTP_EXT_BYTES  (4 + RTP_EXT_WORDS * 4)
 #define PB_MAX_SEGS    512
-#define KEY_CACHE_MAX  (256 * 1024)
+#define KEY_CACHE_MAX  (1024 * 1024)   /* 高码率 H265 4K/8K IDR 可达数百KB(实测324KB),256KB 会被静默丢弃→无缓存关键帧→SDP fmtp 空 */
 
 enum { MODE_LIVE = 0, MODE_PB = 1 };
 
@@ -62,6 +63,7 @@ typedef struct rtsp_sess {
     uint32_t        seek_wall;
     volatile int    seek_pending;
     volatile int    flush;         /* Seek:丢掉未发帧 */
+    volatile int    drop_until_key;/* 背压:发送拥塞时丢整帧,直到下一关键帧再续(直播不卡 puller) */
     uint8_t        *key_copy;
     int             key_len, key_codec;
     pthread_t       pb_tid;
@@ -166,6 +168,17 @@ static int sess_send(rtsp_sess_t *s, const void *buf, size_t len)
     return rc;
 }
 
+/* 内核发送队列积压字节数 > 阈值 → 客户端(tunnel)吞吐跟不上,拥塞。用于直播背压丢帧,
+ * 避免 puller 线程阻塞在 send。阈值取略小于 SO_SNDBUF(1MB),给一个 IDR 的余量。 */
+#define RTSP_SND_HIWAT  (640 * 1024)
+static int sess_congested(rtsp_sess_t *s)
+{
+    int q = 0;
+    if (!s || s->fd < 0) return 0;
+    if (ioctl(s->fd, TIOCOUTQ, &q) != 0) return 0;
+    return q > RTSP_SND_HIWAT;
+}
+
 static void rtsp_reply(rtsp_sess_t *s, int cseq, int code, const char *reason,
                        const char *extra, const char *body)
 {
@@ -192,8 +205,17 @@ static int send_rtp(rtsp_sess_t *s, int chan, int pt, int marker,
     if (!s || s->fd < 0 || !pay || pay_len <= 0) return -1;
     if (s->flush) return 0;
 
+    (void)status; (void)utc;
+    /* ★ 标准 RTP(X=0,无扩展头):去掉 NightOwl/AVTECH 自定义扩展(FFFE000C status/utc)。
+     * 有些严格 depacketizer 会因该扩展丢包/不出图;先发标准 RTP 验证。RTP_USE_EXT=1 可恢复扩展。 */
+#define RTP_USE_EXT 0
+#if RTP_USE_EXT
+    const int ext_bytes = RTP_EXT_BYTES;
+#else
+    const int ext_bytes = 0;
+#endif
     uint8_t pkt[4 + RTP_HDR + RTP_EXT_BYTES + RTP_MTU];
-    int hdr = RTP_HDR + RTP_EXT_BYTES;
+    int hdr = RTP_HDR + ext_bytes;
     int max_pay = RTP_MTU - hdr;
     if (max_pay < 64) max_pay = 64;
     int ncopy = pay_len;
@@ -206,7 +228,7 @@ static int send_rtp(rtsp_sess_t *s, int chan, int pt, int marker,
     pkt[3] = (uint8_t)(rlen & 0xff);
 
     uint8_t *h = pkt + 4;
-    h[0] = 0x90; /* V=2 X=1 */
+    h[0] = RTP_USE_EXT ? 0x90 : 0x80; /* V=2; X=1(带扩展)/X=0(标准) */
     h[1] = (uint8_t)((marker ? 0x80 : 0) | (pt & 0x7f));
     h[2] = (uint8_t)(*seq >> 8);
     h[3] = (uint8_t)(*seq & 0xff);
@@ -219,7 +241,8 @@ static int send_rtp(rtsp_sess_t *s, int chan, int pt, int marker,
     h[9]  = (uint8_t)(s->ssrc >> 16);
     h[10] = (uint8_t)(s->ssrc >> 8);
     h[11] = (uint8_t)s->ssrc;
-    /* RFC 3550 ext hdr: profile 0, length=4 words */
+#if RTP_USE_EXT
+    /* RFC 3550 ext hdr: profile 0, length=4 words; AVTECH FFFE000C 0F23 | status | utc */
     h[12] = 0; h[13] = 0; h[14] = 0; h[15] = RTP_EXT_WORDS;
     h[16] = 0xFF; h[17] = 0xFE; h[18] = 0x00; h[19] = 0x0C;
     h[20] = 0x0F; h[21] = 0x23;
@@ -233,7 +256,8 @@ static int send_rtp(rtsp_sess_t *s, int chan, int pt, int marker,
     h[28] = (uint8_t)(ut >> 8);
     h[29] = (uint8_t)ut;
     h[30] = 0; h[31] = 0;
-    memcpy(h + RTP_EXT_BYTES, pay, (size_t)ncopy);
+#endif
+    memcpy(h + hdr, pay, (size_t)ncopy);
     return sess_send(s, pkt, (size_t)(4 + hdr + ncopy));
 }
 
@@ -682,6 +706,97 @@ static void ensure_session(rtsp_sess_t *s, const char *req)
                  (unsigned)((uint32_t)time(NULL) ^ (uint32_t)(uintptr_t)s));
 }
 
+/* base64 编码(标准表,带 '=' 填充)。返回写入长度(不含结尾 0)。 */
+static int b64enc(const uint8_t *in, int n, char *out, int cap)
+{
+    static const char T[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    int o = 0, i = 0;
+    if (cap <= 0) return 0;
+    while (i < n && o + 5 <= cap) {
+        int b0 = in[i++];
+        int b1 = (i < n) ? in[i++] : -1;
+        int b2 = (i < n) ? in[i++] : -1;
+        out[o++] = T[b0 >> 2];
+        out[o++] = T[((b0 & 3) << 4) | (b1 < 0 ? 0 : (b1 >> 4))];
+        out[o++] = (b1 < 0) ? '=' : T[((b1 & 15) << 2) | (b2 < 0 ? 0 : (b2 >> 6))];
+        out[o++] = (b2 < 0) ? '=' : T[b2 & 63];
+    }
+    out[o] = 0;
+    return o;
+}
+
+/* ★ 从**最近缓存关键帧**(g.live_key[ch][st],Annex-B,含参数集——与秒开/出图同一份,复用不新开)
+ * 取 SPS/PPS/(VPS) 拼 SDP video 的 fmtp:96 行。DXVA 等硬解需从 SDP 拿参数集初始化解码器,
+ * 缺 fmtp → "需要 DXVA 格式"。无缓存/无参数集 → out 置空(退回无 fmtp,不影响其他)。
+ * 只在锁内把小参数集 NAL 拷出(不整块拷 256K),锁外 base64。 */
+static void build_vfmtp(rtsp_sess_t *s, int hevc, char *out, int cap)
+{
+    out[0] = 0;
+    int ch = s->chn, st = s->stream < 0 ? 0 : s->stream;
+    if (ch < 0 || ch >= 32) return;
+
+    uint8_t sps[512], pps[512], vps[512];
+    int spsl = 0, ppsl = 0, vpsl = 0;
+
+    pthread_mutex_lock(&g.lock);
+    key_cache_t *k = &g.live_key[ch][st];
+    if ((!k->data || k->len <= 0) && st != 0) k = &g.live_key[ch][0];
+    if (k->data && k->len > 4) {
+        const uint8_t *d = k->data; int len = k->len, i = 0;
+        while (i < len - 3) {
+            int sc = (d[i] == 0 && d[i+1] == 0 && d[i+2] == 1) ? 3 :
+                     (i+3 < len && d[i] == 0 && d[i+1] == 0 && d[i+2] == 0 && d[i+3] == 1) ? 4 : 0;
+            if (!sc) { i++; continue; }
+            int start = i + sc, j = start;
+            while (j < len - 3) {
+                if (d[j] == 0 && d[j+1] == 0 && d[j+2] == 1) break;
+                if (j+3 < len && d[j] == 0 && d[j+1] == 0 && d[j+2] == 0 && d[j+3] == 1) break;
+                j++;
+            }
+            if (j >= len - 3) j = len;
+            int l = j - start;
+            if (l > 0) {
+                int t = hevc ? ((d[start] >> 1) & 0x3F) : (d[start] & 0x1F);
+                if (hevc) {
+                    if      (t == 32 && l <= (int)sizeof(vps)) { memcpy(vps, d+start, (size_t)l); vpsl = l; }
+                    else if (t == 33 && l <= (int)sizeof(sps)) { memcpy(sps, d+start, (size_t)l); spsl = l; }
+                    else if (t == 34 && l <= (int)sizeof(pps)) { memcpy(pps, d+start, (size_t)l); ppsl = l; }
+                } else {
+                    if      (t == 7 && l <= (int)sizeof(sps)) { memcpy(sps, d+start, (size_t)l); spsl = l; }
+                    else if (t == 8 && l <= (int)sizeof(pps)) { memcpy(pps, d+start, (size_t)l); ppsl = l; }
+                }
+            }
+            i = j;
+        }
+    }
+    pthread_mutex_unlock(&g.lock);
+
+    char b64s[768], b64p[768], b64v[768];
+    if (hevc) {
+        if (vpsl && spsl && ppsl) {
+            b64enc(vps, vpsl, b64v, sizeof b64v);
+            b64enc(sps, spsl, b64s, sizeof b64s);
+            b64enc(pps, ppsl, b64p, sizeof b64p);
+            snprintf(out, (size_t)cap,
+                     "a=fmtp:96 sprop-vps=%s;sprop-sps=%s;sprop-pps=%s\r\n",
+                     b64v, b64s, b64p);
+        }
+    } else {
+        if (spsl >= 4 && ppsl) {
+            b64enc(sps, spsl, b64s, sizeof b64s);
+            b64enc(pps, ppsl, b64p, sizeof b64p);
+            snprintf(out, (size_t)cap,
+                     "a=fmtp:96 packetization-mode=1;profile-level-id=%02X%02X%02X;"
+                     "sprop-parameter-sets=%s,%s\r\n",
+                     sps[1], sps[2], sps[3], b64s, b64p);
+        }
+    }
+    NVR_LOGI("rtsp", "SDP ch%d st%d %s 参数集 sps=%d pps=%d vps=%d → video fmtp %s",
+             ch, st, hevc ? "H265" : "H264", spsl, ppsl, vpsl,
+             out[0] ? "已生成" : "空(DESCRIBE 时无缓存关键帧→APP 无 video 信息)");
+}
+
 static void build_sdp(rtsp_sess_t *s, char *sdp, int cap)
 {
     int hevc = (s->codec == 1);
@@ -695,12 +810,15 @@ static void build_sdp(rtsp_sess_t *s, char *sdp, int cap)
                      "a=range:npt=now-\r\n",
                      s->mode == MODE_PB ? "NVR Playback" : "NVR Live");
     if (n < 0) n = 0;
-    if (s->want_video && n < cap)
+    if (s->want_video && n < cap) {
+        char vfmtp[2048]; build_vfmtp(s, hevc, vfmtp, (int)sizeof(vfmtp));
         n += snprintf(sdp + n, (size_t)(cap - n),
                       "m=video 0 RTP/AVP 96\r\n"
                       "a=rtpmap:96 %s/90000\r\n"
+                      "%s"                       /* a=fmtp:96 sprop 参数集(供 DXVA 等硬解初始化) */
                       "a=control:track=v\r\n",
-                      hevc ? "H265" : "H264");
+                      hevc ? "H265" : "H264", vfmtp);
+    }
     if (s->want_audio && n < cap)
         n += snprintf(sdp + n, (size_t)(cap - n),
                       "m=audio 0 RTP/AVP 97\r\n"
@@ -938,7 +1056,9 @@ static void handle_client(rtsp_sess_t *s)
             }
             if (s->chn >= 0 && s->chn < 32)
                 s->codec = g.live_codec[s->chn][s->stream < 0 ? 0 : s->stream];
-            char sdp[768];
+            NVR_LOGI("rtsp", "DESCRIBE ch%d st%d pb=%d codec=%s", s->chn, s->stream, is_pb,
+                     s->codec == 1 ? "H265" : "H264");
+            char sdp[2048];   /* 含 fmtp base64 sprop 参数集,加大避免截断 */
             build_sdp(s, sdp, (int)sizeof(sdp));
             char extra[256];
             snprintf(extra, sizeof(extra),
@@ -963,6 +1083,9 @@ static void handle_client(rtsp_sess_t *s)
             s->flush = 0;
             s->playing = 1;
             start_pb_if_needed(s);
+            NVR_LOGI("rtsp", "PLAY ch%d st%d mode=%s v=%d a=%d → 开始推流",
+                     s->chn, s->stream, s->mode == MODE_PB ? "回放" : "直播",
+                     s->want_video, s->want_audio);
             rtsp_reply(s, cseq, 200, "OK", "Range: npt=now-\r\n", NULL);
         } else if (strncmp(req, "PAUSE", 5) == 0) {
             s->playing = 0;
@@ -1027,6 +1150,14 @@ static void *accept_thread(void *arg)
         if (!s) { close(fd); continue; }
         pthread_mutex_init(&s->send_lk, NULL);
         s->fd = fd;
+        /* ★ 直播不卡 puller:加大发送缓冲(吸收 IDR)+ 发送超时(慢 tunnel 不无限阻塞)。
+         * send 超时/背压后由上层丢整帧、等下一关键帧 resync(见 nvr_rtsp_live_feed)。 */
+        {
+            int snd = 1024 * 1024;
+            setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, sizeof(snd));
+            struct timeval to = { 0, 300 * 1000 };   /* 300ms 发送超时 */
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &to, sizeof(to));
+        }
         s->alive = 1;
         s->chn = g.want_chn;
         s->stream = g.want_stream;
@@ -1155,15 +1286,67 @@ void nvr_rtsp_live_feed(int chn, int stream, const uint8_t *data, int len,
     }
     pthread_mutex_unlock(&g.lock);
 
+    /* 诊断:有 PLAY 中的会话时打印喂帧;**每个 is_key 都打** + 非key每300帧节流,
+     * 并解析首个 NAL 类型(H265:(nh>>1)&0x3F;H264:nh&0x1F)定位分类问题。 */
+    if (n > 0) {
+        int t0 = -1, i = 0;
+        while (i < len - 4) {
+            int sc = (data[i]==0&&data[i+1]==0&&data[i+2]==1) ? 3 :
+                     (data[i]==0&&data[i+1]==0&&data[i+2]==0&&data[i+3]==1) ? 4 : 0;
+            if (sc) { int nh = data[i+sc]; t0 = (codec == 1) ? ((nh>>1)&0x3F) : (nh&0x1F); break; }
+            i++;
+        }
+        static unsigned s_cnt[32][2];
+        unsigned *pc = &s_cnt[chn & 31][stream & 1];
+        if (is_key || *pc == 0 || (*pc % 300) == 0)
+            NVR_LOGI("rtsp", "喂直播 ch%d st%d → %d 会话 len=%d key=%d nal0=%d (第%u帧)",
+                     chn, stream, n, len, is_key, t0, *pc);
+        (*pc)++;
+    }
+
     uint32_t utc = (uint32_t)time(NULL);
     for (int i = 0; i < n; i++) {
         rtsp_sess_t *s = list[i];
         if (!s->playing || s->fd < 0) continue;
         s->codec = codec;
         if (is_key) sess_remember_key(s, data, len, codec);
-        s->vts = ts_ms * 90u;
-        if (s->want_video)
-            send_annexb(s, data, len, codec, s->vts, 1, utc);
+        if (!s->want_video) continue;
+        /* ★ 背压丢帧(直播不卡 puller):
+         *   · 发送队列积压超阈(慢 tunnel)→ 丢整帧并进入"等关键帧"态,等缓冲排空;
+         *   · 等态中 P 帧一律丢(依赖已丢关键帧,发了也解不了);
+         *   · 缓冲有余量时:关键帧续流(送成功→清等态);P 帧照送;送失败/超时→回等态。
+         * 保持整帧边界(不发半截 NAL),解码器在下一完整关键帧 resync。 */
+        int outq = 0; ioctl(s->fd, TIOCOUTQ, &outq);   /* 诊断:发送队列积压 */
+        if (sess_congested(s)) {
+            s->drop_until_key = 1;
+            if (is_key) NVR_LOGW("rtsp", "丢关键帧 ch%d st%d len=%d outq=%d(判拥塞,阈%d)",
+                                 chn, stream, len, outq, RTSP_SND_HIWAT);
+            continue;
+        }
+        if (s->drop_until_key && !is_key) continue;
+        /* ★ ts_ms 其实是相机**原始 RTP 时间戳(90kHz 媒体时钟)**,不是毫秒(见 SDK rtp_rx.cpp:
+         * p_rxi->ts = rtpTimestamp)。SDP 已声明 90000,直接透传即可;之前 ×90 → 时戳快 90 倍乱跳
+         * → 播放器解首帧后冻结。诊断:打印相邻帧 ts 增量(正常 30fps ≈ +3000)。 */
+        {
+            static uint32_t s_prev_ts[32][2];
+            static unsigned s_dbg[32][2];
+            uint32_t d = ts_ms - s_prev_ts[chn & 31][stream & 1];
+            s_prev_ts[chn & 31][stream & 1] = ts_ms;
+            unsigned *dc = &s_dbg[chn & 31][stream & 1];
+            if (*dc < 6 || (*dc % 300) == 0)
+                NVR_LOGI("rtsp", "ts ch%d st%d ts=%u Δ=%d (透传 90kHz;第%u帧)", chn, stream, ts_ms, (int)d, *dc);
+            (*dc)++;
+        }
+        s->vts = ts_ms;   /* 透传 90kHz RTP 时戳 */
+        int rc = send_annexb(s, data, len, codec, s->vts, 1, utc);
+        if (rc != 0) {
+            s->drop_until_key = 1;                     /* 发送超时/背压 → 丢到下一关键帧 */
+            if (is_key) NVR_LOGW("rtsp", "关键帧发送失败 ch%d st%d rc=%d len=%d outq_before=%d",
+                                 chn, stream, rc, len, outq);
+        } else if (is_key) {
+            s->drop_until_key = 0;                     /* 关键帧完整送出 → 恢复连续送 */
+            NVR_LOGI("rtsp", "关键帧已送 ch%d st%d len=%d outq_before=%d", chn, stream, len, outq);
+        }
     }
 }
 

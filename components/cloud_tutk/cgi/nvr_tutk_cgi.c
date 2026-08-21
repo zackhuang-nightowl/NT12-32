@@ -169,7 +169,8 @@ static int handle_dash_s(const char *func, const char *args_json)
         return 0;
     }
     if (strcmp(func, "getAvAccount") == 0) {
-        out_value("admin");
+        nvr_identity_get_av_account(buf, sizeof(buf));
+        out_value(buf[0] ? buf : NVR_IDENTITY_DEF_AVACCOUNT);
         return 0;
     }
     if (strcmp(func, "getIotcUID") == 0) {
