@@ -197,6 +197,7 @@ if(NOP_WITH_ONVIF)
     set_target_properties(nopcore_onvif_obj PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_include_directories(nopcore_onvif_obj PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src                 # onvif/mapping/onvif_coord.h(适配层复用映射层坐标编解码)
         ${NOP_ONVIF_DIR} ${NOP_ONVIF_DIR}/bm ${NOP_ONVIF_DIR}/http
         ${NOP_ONVIF_DIR}/onvif ${NOP_ONVIF_DIR}/openssl/include)
     target_compile_definitions(nopcore_onvif_obj PRIVATE

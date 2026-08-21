@@ -16,8 +16,9 @@ set(CMAKE_CXX_STANDARD 14)
 option(NVR_WITH_ONVIF   "启用 ONVIF（Happytime, 需 C++/openssl）" OFF)
 option(NVR_WITH_ONBOARD "在目标机上构建（链接 hdal/platform）"   OFF)
 
-# 云环境:默认 production；-DNVR_STAGE=ON 切 stage。域名表 app/config/nvr_urls.h（ServeDomainV2）。
-option(NVR_STAGE        "使用预发(stage)云环境域名,默认生产(prod)" OFF)
+# 云环境:★ 默认 stage(预发);-DNVR_STAGE=OFF 才切生产(prod)。域名表 app/config/nvr_urls.h(ServeDomainV2)。
+# stage 云证书链本机无 CA bundle 验不过 → OTA/云 curl 在 stage 关证书校验(见 nvr_ota.c curl_common)。
+option(NVR_STAGE        "使用预发(stage)云环境域名,默认 stage(-DNVR_STAGE=OFF 切 prod)" ON)
 if(NVR_STAGE)
     add_compile_definitions(NVR_BUILD_STAGE=1)
 endif()
