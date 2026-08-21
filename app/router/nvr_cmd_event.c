@@ -354,6 +354,33 @@ char *cmd_X_NightOwl_queryEventListWithSpecificOrder(cJSON *a, const nvr_cmd_ctx
     return query_event_list_common(a, c, 1);
 }
 
+/* ---- 连续录像月历/时间轴的覆盖统计 ---- ★读盘用 rsdk_group_foreach_stream(无 cap 截断):
+ * 一个索引段 = 一个 chunk(几十秒),连续录像一天每通道数千段。旧实现用 rsdk_group_query 传固定小
+ * cap(256/1024),超出的段被静默丢弃 → 日历只显示月初一两天、进度条只有开头一小段(而回放走数据区
+ * 却能连续播)。改为无 cap 遍历,chn=-1 一次扫全通道,回调里按请求的通道集 chan_allowed 过滤。 */
+
+typedef struct { char mhit[13]; uint32_t m0[13], m1[13]; const int *chs0; int nch; uint32_t nowt; } cal_month_ctx_t;
+static int cal_month_cb(void *u, int chn0, uint32_t s0, uint32_t send)
+{
+    cal_month_ctx_t *x = (cal_month_ctx_t *)u;
+    if (!chan_allowed(x->chs0, x->nch, chn0)) return 0;
+    uint32_t s1 = (send == 0xFFFFFFFFu) ? x->nowt : send;
+    for (int mo = 1; mo <= 12; mo++)
+        if (s0 <= x->m1[mo] && s1 >= x->m0[mo]) x->mhit[mo] = 1;
+    return 0;
+}
+
+typedef struct { char dayhit[32]; uint32_t d0[32], d1[32]; int dim; const int *chs0; int nch; uint32_t nowt; } cal_day_ctx_t;
+static int cal_day_cb(void *u, int chn0, uint32_t s0, uint32_t send)
+{
+    cal_day_ctx_t *x = (cal_day_ctx_t *)u;
+    if (!chan_allowed(x->chs0, x->nch, chn0)) return 0;
+    uint32_t s1 = (send == 0xFFFFFFFFu) ? x->nowt : send;
+    for (int d = 1; d <= x->dim; d++)
+        if (s0 < x->d1[d] && s1 >= x->d0[d]) x->dayhit[d] = 1;
+    return 0;
+}
+
 /* 连续录像月历:resolution=day → 返回该月有录像的**天**列表;month → 该年有录像的**月**列表。 */
 char *cmd_X_NightOwl_queryContinuousCalendar(cJSON *a, const nvr_cmd_ctx_t *c)
 {
@@ -365,48 +392,48 @@ char *cmd_X_NightOwl_queryContinuousCalendar(cJSON *a, const nvr_cmd_ctx_t *c)
     cJSON *list = cJSON_AddArrayToObject(o, "list");
     if (c->group && year > 0) {
         if (strcmp(res, "month") == 0) {
-            uint32_t y0 = local_ymd_epoch(year, 1, 1, 0, 0, 0);
-            uint32_t y1 = local_ymd_epoch(year, 12, 31, 23, 59, 59);
-            rsdk_index_slot_t *sl = (rsdk_index_slot_t *)malloc(sizeof(rsdk_index_slot_t) * 1024);
-            if (sl) {
-                char mhit[13] = { 0 }; uint32_t nowt = (uint32_t)time(NULL);
-                for (int ci = 0; ci < nch; ci++) {
-                    int n = rsdk_group_query(c->group, y0, y1, chs0[ci], RSDK_REC_CONTINUOUS, sl, 1024);
-                    for (int i = 0; i < n; i++) {
-                        uint32_t s0 = sl[i].start_time;
-                        uint32_t s1 = (sl[i].end_time == 0xFFFFFFFFu) ? nowt : sl[i].end_time;
-                        for (int mo = 1; mo <= 12; mo++) {
-                            uint32_t m0 = local_ymd_epoch(year, mo, 1, 0, 0, 0);
-                            uint32_t m1 = local_ymd_epoch(year, mo, days_in_month(year, mo), 23, 59, 59);
-                            if (s0 <= m1 && s1 >= m0) mhit[mo] = 1;
-                        }
-                    }
-                }
-                for (int mo = 1; mo <= 12; mo++) if (mhit[mo]) cJSON_AddItemToArray(list, cJSON_CreateNumber(mo));
-                free(sl);
+            cal_month_ctx_t x; memset(&x, 0, sizeof(x));
+            x.chs0 = chs0; x.nch = nch; x.nowt = (uint32_t)time(NULL);
+            for (int mo = 1; mo <= 12; mo++) {   /* 预算每月边界,避免每段重复 mktime */
+                x.m0[mo] = local_ymd_epoch(year, mo, 1, 0, 0, 0);
+                x.m1[mo] = local_ymd_epoch(year, mo, days_in_month(year, mo), 23, 59, 59);
             }
+            rsdk_group_foreach_stream(c->group, x.m0[1], x.m1[12], -1,
+                                      RSDK_REC_CONTINUOUS, -1, cal_month_cb, &x);
+            for (int mo = 1; mo <= 12; mo++) if (x.mhit[mo]) cJSON_AddItemToArray(list, cJSON_CreateNumber(mo));
         } else if (month > 0) {
-            int dim = days_in_month(year, month);
-            uint32_t mt0 = local_ymd_epoch(year, month, 1, 0, 0, 0);
-            uint32_t mt1 = local_ymd_epoch(year, month, dim, 23, 59, 59);
-            rsdk_index_slot_t sl[256];
-            char dayhit[32] = { 0 };
-            uint32_t nowt = (uint32_t)time(NULL);
-            for (int ci = 0; ci < nch; ci++) {
-                int n = rsdk_group_query(c->group, mt0, mt1, chs0[ci], RSDK_REC_CONTINUOUS, sl, 256);
-                for (int i = 0; i < n; i++) {
-                    uint32_t s0 = sl[i].start_time;
-                    uint32_t s1 = (sl[i].end_time == 0xFFFFFFFFu) ? nowt : sl[i].end_time;
-                    for (int d = 1; d <= dim; d++) {
-                        uint32_t d0 = local_ymd_epoch(year, month, d, 0, 0, 0), d1 = d0 + 86400;
-                        if (s0 < d1 && s1 >= d0) dayhit[d] = 1;
-                    }
-                }
+            cal_day_ctx_t x; memset(&x, 0, sizeof(x));
+            x.dim = days_in_month(year, month);
+            x.chs0 = chs0; x.nch = nch; x.nowt = (uint32_t)time(NULL);
+            for (int d = 1; d <= x.dim; d++) {   /* 预算每天边界 */
+                x.d0[d] = local_ymd_epoch(year, month, d, 0, 0, 0);
+                x.d1[d] = x.d0[d] + 86400;
             }
-            for (int d = 1; d <= dim; d++) if (dayhit[d]) cJSON_AddItemToArray(list, cJSON_CreateNumber(d));
+            rsdk_group_foreach_stream(c->group, x.d0[1], x.d1[x.dim], -1,
+                                      RSDK_REC_CONTINUOUS, -1, cal_day_cb, &x);
+            for (int d = 1; d <= x.dim; d++) if (x.dayhit[d]) cJSON_AddItemToArray(list, cJSON_CreateNumber(d));
         }
     }
     return nvr_resp_content(o);
+}
+
+typedef struct { uint64_t mask[24]; uint32_t d0, d1, nowt; const int *chs0; int nch; } intv_ctx_t;
+static int intv_cb(void *u, int chn0, uint32_t s0, uint32_t send)
+{
+    intv_ctx_t *x = (intv_ctx_t *)u;
+    if (!chan_allowed(x->chs0, x->nch, chn0)) return 0;
+    uint32_t s1 = (send == 0xFFFFFFFFu) ? x->nowt : send;
+    if (s0 < x->d0) s0 = x->d0;
+    if (s1 > x->d1) s1 = x->d1;
+    if (s1 <= s0) return 0;
+    int m0 = (int)((s0 - x->d0) / 60);
+    int m1 = (int)((s1 - 1 - x->d0) / 60);
+    for (int m = m0; m <= m1 && m < 1440; m++) {
+        if (m < 0) continue;
+        int h = m / 60, mm = m % 60;
+        x->mask[h] |= (1ULL << (mm + 4));
+    }
+    return 0;
 }
 
 /* 日内录像时间轴:返回 24 元素 Int64 数组,list[h] 的每一位表示第 h 小时内的 1 分钟——
@@ -415,33 +442,17 @@ char *cmd_X_NightOwl_queryRecordingInterval(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     int year = nvr_jint(a, "year", 0), month = nvr_jint(a, "month", 0), day = nvr_jint(a, "day", 0);
     int chs0[64]; int nch = chan_list0(a, chs0, 64);
-    uint64_t mask[24] = { 0 };
+    intv_ctx_t x; memset(&x, 0, sizeof(x));
     if (c->group && year > 0 && month > 0 && day > 0) {
-        uint32_t d0 = local_ymd_epoch(year, month, day, 0, 0, 0), d1 = d0 + 86400;
-        rsdk_index_slot_t sl[256];
-        uint32_t nowt = (uint32_t)time(NULL);
-        for (int ci = 0; ci < nch; ci++) {
-            int n = rsdk_group_query(c->group, d0, d1, chs0[ci], RSDK_REC_CONTINUOUS, sl, 256);
-            for (int i = 0; i < n; i++) {
-                uint32_t s0 = sl[i].start_time;
-                uint32_t s1 = (sl[i].end_time == 0xFFFFFFFFu) ? nowt : sl[i].end_time;
-                if (s0 < d0) s0 = d0;
-                if (s1 > d1) s1 = d1;
-                if (s1 <= s0) continue;
-                int m0 = (int)((s0 - d0) / 60);
-                int m1 = (int)((s1 - 1 - d0) / 60);
-                for (int m = m0; m <= m1 && m < 1440; m++) {
-                    if (m < 0) continue;
-                    int h = m / 60, mm = m % 60;
-                    mask[h] |= (1ULL << (mm + 4));
-                }
-            }
-        }
+        x.d0 = local_ymd_epoch(year, month, day, 0, 0, 0); x.d1 = x.d0 + 86400;
+        x.nowt = (uint32_t)time(NULL); x.chs0 = chs0; x.nch = nch;
+        rsdk_group_foreach_stream(c->group, x.d0, x.d1, -1,
+                                  RSDK_REC_CONTINUOUS, -1, intv_cb, &x);
     }
     cJSON *o = cJSON_CreateObject(); cJSON *list = cJSON_AddArrayToObject(o, "list");
     for (int h = 0; h < 24; h++) {
         char buf[24];
-        snprintf(buf, sizeof(buf), "%lld", (long long)(int64_t)mask[h]);
+        snprintf(buf, sizeof(buf), "%lld", (long long)(int64_t)x.mask[h]);
         cJSON_AddItemToArray(list, cJSON_CreateRaw(buf));
     }
     return nvr_resp_content(o);

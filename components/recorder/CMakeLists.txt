@@ -28,7 +28,8 @@ set(RSDK_SRC
   src/rsdk_core.c src/rsdk_util.c src/rsdk_feature.c src/rsdk_rawdev.c
   src/rsdk_crypto.c src/rsdk_storgedev.c src/rsdk_index.c src/rsdk_rec.c
   src/rsdk_play.c src/rsdk_balance.c src/rsdk_backup.c src/rsdk_disk.c
-  src/rsdk_scan.c)   # 自描述扫描重建(索引/meta 丢失可扫盘重建;新 SDK)
+  src/rsdk_scan.c    # 自描述扫描重建(索引/meta 丢失可扫盘重建;新 SDK)
+  src/rsdk_repair.c) # 开机自检 + 分级修复(Tier1 封口 / Tier2 后台重建)
 if(RSDK_WITH_METADATA)
   list(APPEND RSDK_SRC src/rsdk_meta.c src/rsdk_pic.c src/rsdk_cloud.c)  # rsdk_cloud.c = no-op 桩(云存待实现)
 endif()

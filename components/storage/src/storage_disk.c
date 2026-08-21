@@ -140,33 +140,19 @@ rsdk_err_t nvr_storage_format(nvr_storage_t *s, const char *path,
 /* ============ 盘组装配：OURS 盘按 group_index 有序组装 ============ */
 rsdk_err_t nvr_storage_assemble(nvr_storage_t *s, rsdk_group_t **group_out)
 {
-    /* 收集本组盘，按 group_disk_index 排序 */
-    const char *ordered[NVR_MAX_DISKS] = {0};
-    int found = 0, expect = 0;
-    for (int i = 0; i < s->ndisks; i++) {
-        nvr_disk_t *dk = &s->disks[i];
-        if (dk->state != NVR_DISK_OURS && dk->state != NVR_DISK_ACTIVE) continue;
-        if (dk->group_disk_index < NVR_MAX_DISKS) {
-            ordered[dk->group_disk_index] = dk->path;
-            if (dk->group_disk_count > expect) expect = dk->group_disk_count;
-            found++;
-        }
-    }
-    if (found == 0) return RSDK_E_NOTFOUND;
-    if (expect == 0) expect = found;
-
-    /* 压实成连续数组，同时检查缺盘 */
+    /* ★池化:把**全部**本系统盘(OURS/ACTIVE)组成一个多盘负载均衡组。
+     * 旧实现按 group_disk_index 去重——而每块盘各自单独格式化后 index 都是 0,会塌成一块盘,
+     * 多盘均衡实际失效(对标行业"所有通道共享全部 HDD" + 分盘摊带宽)。这里改为收全部盘。
+     * 按 path 稳定排序:组内数组下标确定;回放时段按下标定位盘(rsdk_group_query_stream 会重写下标)。 */
     const char *paths[NVR_MAX_DISKS]; int n = 0;
-    for (int i = 0; i < expect; i++) {
-        if (!ordered[i]) {
-            /* 缺 group_index=i 的盘：多盘模式下部分盘的段暂不可读，
-             * 仍可用现有盘继续（recorder 单盘退化）。这里告警并跳过。 */
-            continue;
-        }
-        paths[n++] = ordered[i];
+    for (int i = 0; i < s->ndisks && n < NVR_MAX_DISKS; i++) {
+        nvr_disk_t *dk = &s->disks[i];
+        if (dk->state == NVR_DISK_OURS || dk->state == NVR_DISK_ACTIVE)
+            paths[n++] = dk->path;
     }
-    if (found < expect)
-        stg_emit(s, NVR_STG_EVT_DISK_REMOVED, NULL);   /* 盘组不完整告警 */
+    if (n == 0) return RSDK_E_NOTFOUND;
+    for (int a = 0; a < n; a++) for (int b = a + 1; b < n; b++)
+        if (strcmp(paths[b], paths[a]) < 0) { const char *t = paths[a]; paths[a] = paths[b]; paths[b] = t; }
 
     rsdk_err_t rc = rsdk_group_open(paths, n, &s->group);
     if (rc == RSDK_OK) {
@@ -175,6 +161,32 @@ rsdk_err_t nvr_storage_assemble(nvr_storage_t *s, rsdk_group_t **group_out)
         if (group_out) *group_out = s->group;
     }
     return rc;
+}
+
+/* 热插拔:把已扫描到、尚未入组的本系统盘(OURS)原地并入现有盘组(group 指针不变)。返回新并入盘数。 */
+int nvr_storage_integrate(nvr_storage_t *s, rsdk_group_t *group)
+{
+    if (!s || !group) return 0;
+    int added = 0;
+    for (int i = 0; i < s->ndisks; i++) {
+        nvr_disk_t *dk = &s->disks[i];
+        if (dk->state != NVR_DISK_OURS && dk->state != NVR_DISK_ACTIVE) continue;
+        if (rsdk_group_find_path(group, dk->path) >= 0) continue;      /* 已在组 */
+        if (rsdk_group_add_disk(group, dk->path) == RSDK_OK) {
+            dk->state = NVR_DISK_ACTIVE; added++;
+        }
+    }
+    return added;
+}
+
+/* 掉盘:把该 path 对应盘在组内标记不健康(balance 选盘跳过),并置状态 OFFLINE。指针不变。 */
+void nvr_storage_disk_offline(nvr_storage_t *s, rsdk_group_t *group, const char *path)
+{
+    if (!group || !path) return;
+    int idx = rsdk_group_find_path(group, path);
+    if (idx >= 0) rsdk_group_set_health(group, idx, 0);
+    if (s) for (int i = 0; i < s->ndisks; i++)
+        if (strcmp(s->disks[i].path, path) == 0) s->disks[i].state = NVR_DISK_OFFLINE;
 }
 
 rsdk_group_t *nvr_storage_group(nvr_storage_t *s) { return s->group; }

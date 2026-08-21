@@ -481,9 +481,27 @@ static void on_storage_evt(nvr_stg_evt_t e, const nvr_disk_t *d, void *user)
     nvr_app_t *a = user;
     const char *p = d ? d->path : "(group)";
     switch (e) {
-        case NVR_STG_EVT_DISK_FAILED: printf("[storage] 盘故障: %s\n", p); break;
-        case NVR_STG_EVT_DISK_REMOVED:printf("[storage] 盘掉线: %s\n", p); break;
-        case NVR_STG_EVT_DISK_ADDED:  printf("[storage] 新盘插入, 需重扫\n"); break;
+        case NVR_STG_EVT_DISK_FAILED:
+            printf("[storage] 盘故障: %s\n", p);
+            if (a && a->group && d) nvr_storage_disk_offline(a->stg, a->group, d->path);
+            break;
+        case NVR_STG_EVT_DISK_REMOVED:
+            printf("[storage] 盘掉线: %s\n", p);
+            /* 掉盘:组内标不健康(balance 跳过),group 指针不变,其余盘继续录。 */
+            if (a && a->group && d) nvr_storage_disk_offline(a->stg, a->group, d->path);
+            break;
+        case NVR_STG_EVT_DISK_ADDED:
+            printf("[storage] 新盘插入, 重扫\n");
+            /* 重扫刷新盘表(空盘/外来盘将在 getStorageInfo 显示为需格式化);已格式化的本系统盘
+             * 原地并入现有盘组(指针不变),立即参与多盘均衡,免重启。空盘 add 失败→仍待用户格式化。 */
+            if (a && a->stg) {
+                nvr_storage_scan(a->stg);
+                if (a->group) {
+                    int added = nvr_storage_integrate(a->stg, a->group);
+                    if (added) printf("[storage] %d 块盘并入盘组(参与均衡)\n", added);
+                }
+            }
+            break;
         case NVR_STG_EVT_FULL:        printf("[storage] 盘组满(策略生效)\n"); break;
         case NVR_STG_EVT_NEED_FORMAT: printf("[storage] 空盘/外来盘, 待格式化: %s\n", p); break;
         default: break;
@@ -861,6 +879,12 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
         }
     }
 #endif
+
+    /* 4.1) 盘上索引/meta 自检 + 分级修复:装配后、对外服务前主动做 —— Tier1(封口未闭合段)同步完成,
+     *      罕见的索引丢失/大损走后台重建(查询期间可 rsdk_group_repair_progress 查进度)。
+     *      保证后续日历/时间轴/回放接口直接查得到数据,而非查空或等惰性重建。 */
+    if (a->group)
+        rsdk_group_check_and_repair(a->group, a->meta);
 
     /* 5) 平台显示:分辨率取**记录值**(display.resolution),无则回退 config→默认;
      *    mhal_vout_init 按此请求,屏幕不支持则沿阶梯降级到可用者;取回**实际生效**分辨率,
@@ -1264,6 +1288,8 @@ void nvr_app_stop(nvr_app_t *app)
     if (app->sm) { nvr_stream_stop_all(app->sm); nvr_stream_mgr_deinit(app->sm); app->sm = NULL; }
     nvr_rtsp_live_stop();
     mhal_vout_deinit(MHAL_OUT_HDMI);
+    /* 先回收后台索引重建线程,避免它在 group/meta 关闭后仍写盘(用到已释放句柄)。 */
+    if (app->group) rsdk_group_repair_stop(app->group);
 #if RSDK_CFG_METADATA
     if (app->meta) { rsdk_meta_close(app->meta); app->meta = NULL; }
 #endif

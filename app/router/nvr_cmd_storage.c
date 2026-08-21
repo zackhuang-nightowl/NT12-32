@@ -133,12 +133,26 @@ char *cmd_formatStorage(cJSON *a, const nvr_cmd_ctx_t *c)
     nvr_disk_t disk;
     if (!stg_find_by_name(c, value, &disk, NULL)) return nvr_resp_err("no_such_storage");
     NVR_LOGW("router", "formatStorage(%s) → %s", value, disk.path);
-    /* ★ 先暂停所有写盘并关闭 writer(盘静默)——否则录像 writer 正写着被格式化的盘,
-     * 既冲突(格式化不干净),格式化后又因旧 writer 还开着导致 set_group 补开 0 路(录像坏)。 */
+
+    /* ★ 新盘并入现有池:该盘不在当前盘组里 → 不影响在录的其它盘,无需暂停;格式化后**原地并入**
+     * (group 指针不变,rec_sched/playback/router 等借用者无需更新),balance 立即把它纳入均衡。 */
+    if (c->group && rsdk_group_find_path(c->group, disk.path) < 0) {
+        rsdk_err_t frc = nvr_storage_format(c->stg, disk.path, 0, 1);
+        nvr_storage_scan(c->stg);
+        if (frc == RSDK_OK) {
+            rsdk_group_add_disk(c->group, disk.path);
+            if (c->settings) nvr_settings_set_int(c->settings, "storage.has_disk", 1);
+            NVR_LOGW("router", "格式化 %s → 原地并入盘组(免暂停/免重启,参与多盘均衡)", disk.path);
+            return nvr_resp_ok();
+        }
+        return nvr_resp_err("format_failed");
+    }
+
+    /* 首盘(无盘组)或重格式化在役盘:先暂停所有写盘并关闭 writer(盘静默)——否则录像 writer 正写着
+     * 被格式化的盘,既冲突,又会因旧 writer 还开着导致 set_group 补开 0 路(录像坏)。 */
     uint32_t was = c->sm ? nvr_stream_mgr_pause_recording(c->sm) : 0;
     rsdk_err_t frc = nvr_storage_format(c->stg, disk.path, 0, 1);
-    /* ★ 无论成败都要恢复写盘:重扫(盘状态转 OURS)→ 重组装盘组 → 恢复录像通道并在新组补开 writer。
-     * 开机盘未格式化时 assemble 失败、group=NULL、录像禁用;此处补上,ch 立即开始写盘。 */
+    /* 无论成败都要恢复写盘:重扫 → 重组装盘组 → 恢复录像通道并在新组补开 writer。 */
     nvr_storage_scan(c->stg);
     rsdk_group_t *g = NULL;
     if (c->sm && nvr_storage_assemble(c->stg, &g) == RSDK_OK && g) {

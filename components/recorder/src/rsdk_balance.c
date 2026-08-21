@@ -90,6 +90,50 @@ void rsdk_group_close(rsdk_group_t *g) {
     free(g);
 }
 
+int rsdk_group_find_path(rsdk_group_t *g, const char *path) {
+    if (!g || !path) return -1;
+    int idx = -1;
+    pthread_mutex_lock(&g->lock);
+    for (int i = 0; i < g->n; i++)
+        if (g->paths[i] && strcmp(g->paths[i], path) == 0) { idx = i; break; }
+    pthread_mutex_unlock(&g->lock);
+    return idx;
+}
+
+rsdk_err_t rsdk_group_add_disk(rsdk_group_t *g, const char *path) {
+    if (!g || !path) return RSDK_E_PARAM;
+    pthread_mutex_lock(&g->lock);
+    for (int i = 0; i < g->n; i++)
+        if (g->paths[i] && strcmp(g->paths[i], path) == 0) {
+            pthread_mutex_unlock(&g->lock); return RSDK_OK;          /* 已在组内 */
+        }
+    rsdk_dev_t *dev = NULL;
+    rsdk_err_t rc = rsdk_dev_open(path, &dev);   /* 未格式化/外来盘会失败 → 不入组 */
+    if (rc) { pthread_mutex_unlock(&g->lock); return rc; }
+
+    int nn = g->n + 1;
+    /* 逐个 realloc 并即时赋回 g->(失败也保持数组有效, 只是多出容量); 全部就绪再 n++。 */
+    rsdk_dev_t **nd = realloc(g->devs, (size_t)nn * sizeof *nd);        if (nd) g->devs = nd;
+    char       **np = realloc(g->paths, (size_t)nn * sizeof *np);       if (np) g->paths = np;
+    int         *nh = realloc(g->health_ok, (size_t)nn * sizeof *nh);   if (nh) g->health_ok = nh;
+    double      *nb = realloc(g->bw, (size_t)nn * sizeof *nb);          if (nb) g->bw = nb;
+    char        *pdup = strdup(path);
+    if (!nd || !np || !nh || !nb || !pdup) {                            /* OOM: 回滚, 不入组 */
+        free(pdup);
+        rsdk_dev_close(dev);
+        pthread_mutex_unlock(&g->lock);
+        return RSDK_E_IO;
+    }
+    rsdk_dev_bind_lock(dev, &g->lock);           /* 与组共享同一把锁(与 group_open 一致) */
+    g->devs[g->n]      = dev;
+    g->paths[g->n]     = pdup;
+    g->health_ok[g->n] = 1;
+    g->bw[g->n]        = 0.0;
+    g->n = nn;                                    /* 最后才发布: balance_pick 读到时数组已就绪 */
+    pthread_mutex_unlock(&g->lock);
+    return RSDK_OK;
+}
+
 /* ==================== 新 API ==================== */
 
 /* SMART 健康刷新: 对每块盘读 SMART 并更新 health_ok[].
@@ -225,6 +269,16 @@ int rsdk_group_query_stream(rsdk_group_t *g, uint32_t t0, uint32_t t1, int chn,
 int rsdk_group_query(rsdk_group_t *g, uint32_t t0, uint32_t t1, int chn,
                      int rectype, rsdk_index_slot_t *out, int cap) {
     return rsdk_group_query_stream(g, t0, t1, chn, rectype, -1, out, cap);
+}
+
+int rsdk_group_foreach_stream(rsdk_group_t *g, uint32_t t0, uint32_t t1, int chn,
+                              int rectype, int stream, rsdk_seg_visit_fn cb, void *user) {
+    if (!g || !cb) return 0;
+    int total = 0;
+    /* 覆盖统计与盘间顺序无关, 无需跨盘归并/排序; 各盘独立遍历累加即可。 */
+    for (int i = 0; i < g->n; i++)
+        total += rsdk_index_foreach_stream(g->devs[i], t0, t1, chn, rectype, stream, cb, user);
+    return total;
 }
 
 struct rsdk_group_player {

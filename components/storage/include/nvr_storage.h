@@ -93,6 +93,11 @@ rsdk_err_t nvr_storage_format(nvr_storage_t *s, const char *path,
 rsdk_err_t nvr_storage_assemble(nvr_storage_t *s, rsdk_group_t **group_out);
 rsdk_group_t *nvr_storage_group(nvr_storage_t *s);              /* 取已装配盘组 */
 
+/* 热插拔:把已扫描到、尚未入组的本系统盘(OURS)原地并入现有盘组(group 指针不变)。返回新并入盘数。 */
+int  nvr_storage_integrate(nvr_storage_t *s, rsdk_group_t *group);
+/* 掉盘:把该 path 盘在组内标记不健康(balance 跳过)并置 OFFLINE。 */
+void nvr_storage_disk_offline(nvr_storage_t *s, rsdk_group_t *group, const char *path);
+
 /* 4) 周期维护：健康轮询 + 满盘检测 + 处理热插拔事件（app 定时调，如每 5s） */
 void       nvr_storage_tick  (nvr_storage_t *s);
 

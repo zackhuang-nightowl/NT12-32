@@ -137,6 +137,56 @@ int rsdk_index_query(rsdk_dev_t *d, uint32_t t0, uint32_t t1, int chn,
     return rsdk_index_query_stream(d, t0, t1, chn, rectype, -1, out, cap);
 }
 
+/* 无 cap 覆盖遍历: 批量顺序读整个索引区(不逐槽 pread), 逐个命中段回调。与 query_stream 相同的
+ * 无锁+逐槽 CRC 安全模型(与录像写并发时坏/半写槽 CRC 不过→跳过)。BATCH 与 load_map 一致。 */
+int rsdk_index_foreach_stream(rsdk_dev_t *d, uint32_t t0, uint32_t t1, int chn,
+                              int rectype, int stream, rsdk_seg_visit_fn cb, void *user)
+{
+    if (!d || !cb) return 0;
+    rsdk_systab_t *st = rsdk_dev_systab(d);
+    if (t1 == 0) t1 = 0xFFFFFFFFu;
+    uint32_t n = st->index_slot_count;
+    int hit = 0;
+
+    enum { BATCH = 256 };
+    rsdk_index_slot_t *buf = (rsdk_index_slot_t *)malloc(BATCH * SLOT_SZ);
+    if (!buf) {                                        /* 无缓冲兜底: 逐槽读(慢但正确) */
+        for (uint32_t i = 0; i < n; i++) {
+            rsdk_index_slot_t s; rd_slot(d, i, &s);
+            if (!(s.flags & (RSDK_SLOT_VALID | RSDK_SLOT_OPEN))) continue;
+            rsdk_index_slot_t t = s; t.crc32 = 0;
+            if (rsdk_crc32(&t, SLOT_SZ) != s.crc32) continue;
+            uint32_t e = (s.end_time == 0xFFFFFFFFu) ? t1 : s.end_time;
+            if (e < t0 || s.start_time > t1) continue;
+            if (chn >= 0 && s.chn != chn) continue;
+            if (rectype >= 0 && s.rectype != rectype) continue;
+            if (stream >= 0 && (int)s.stream != stream) continue;
+            hit++;
+            if (cb(user, (int)s.chn, s.start_time, s.end_time)) return hit;
+        }
+        return hit;
+    }
+    for (uint32_t base = 0; base < n; base += BATCH) {
+        uint32_t cnt = (n - base < BATCH) ? (n - base) : BATCH;
+        rsdk_rawdev_pread(rsdk_dev_raw(d), slot_off(d, base), buf, cnt * SLOT_SZ);
+        for (uint32_t k = 0; k < cnt; k++) {
+            rsdk_index_slot_t *s = &buf[k];
+            if (!(s->flags & (RSDK_SLOT_VALID | RSDK_SLOT_OPEN))) continue;
+            rsdk_index_slot_t t = *s; t.crc32 = 0;
+            if (rsdk_crc32(&t, SLOT_SZ) != s->crc32) continue;
+            uint32_t e = (s->end_time == 0xFFFFFFFFu) ? t1 : s->end_time;
+            if (e < t0 || s->start_time > t1) continue;
+            if (chn >= 0 && s->chn != chn) continue;
+            if (rectype >= 0 && s->rectype != rectype) continue;
+            if (stream >= 0 && (int)s->stream != stream) continue;
+            hit++;
+            if (cb(user, (int)s->chn, s->start_time, s->end_time)) { free(buf); return hit; }
+        }
+    }
+    free(buf);
+    return hit;
+}
+
 /* 判断 chunk 是否落在段 [start_chunk, end_chunk] 内, 处理环绕(start > end) */
 static int slot_covers_chunk(const rsdk_index_slot_t *s, uint64_t chunk) {
     if (s->start_chunk <= s->end_chunk)
@@ -180,6 +230,49 @@ int rsdk_index_invalidate_chunk(rsdk_dev_t *d, uint64_t chunk)
     if (cleared) rsdk_rawdev_sync(rsdk_dev_raw(d));
     rsdk_dev_unlock(d);
     return cleared;
+}
+
+void rsdk_index_scan_stats(rsdk_dev_t *d, uint32_t *valid, uint32_t *open, uint32_t *corrupt)
+{
+    uint32_t v = 0, o = 0, c = 0;
+    if (d) {
+        rsdk_systab_t *st = rsdk_dev_systab(d);
+        uint32_t n = st->index_slot_count;
+        enum { BATCH = 256 };
+        rsdk_index_slot_t *buf = (rsdk_index_slot_t *)malloc(BATCH * SLOT_SZ);
+        if (buf) {
+            for (uint32_t base = 0; base < n; base += BATCH) {
+                uint32_t cnt = (n - base < BATCH) ? (n - base) : BATCH;
+                rsdk_rawdev_pread(rsdk_dev_raw(d), slot_off(d, base), buf, cnt * SLOT_SZ);
+                for (uint32_t k = 0; k < cnt; k++) {
+                    rsdk_index_slot_t *s = &buf[k];
+                    if (!(s->flags & (RSDK_SLOT_VALID | RSDK_SLOT_OPEN))) continue;
+                    rsdk_index_slot_t t = *s; t.crc32 = 0;
+                    if (rsdk_crc32(&t, SLOT_SZ) != s->crc32) { c++; continue; }
+                    if (s->flags & RSDK_SLOT_OPEN) o++; else v++;
+                }
+            }
+            free(buf);
+        }
+    }
+    if (valid) *valid = v;
+    if (open) *open = o;
+    if (corrupt) *corrupt = c;
+}
+
+int rsdk_index_list_open(rsdk_dev_t *d, rsdk_index_slot_t *out, int cap)
+{
+    if (!d || !out || cap <= 0) return 0;
+    rsdk_systab_t *st = rsdk_dev_systab(d);
+    int found = 0;
+    for (uint32_t i = 0; i < st->index_slot_count && found < cap; i++) {
+        rsdk_index_slot_t s; rd_slot(d, i, &s);
+        if (!(s.flags & RSDK_SLOT_OPEN)) continue;
+        rsdk_index_slot_t t = s; t.crc32 = 0;
+        if (rsdk_crc32(&t, SLOT_SZ) != s.crc32) continue;   /* 跳损坏槽 */
+        out[found++] = s;
+    }
+    return found;
 }
 
 rsdk_err_t rsdk_index_earliest(rsdk_dev_t *d, uint32_t *epoch)

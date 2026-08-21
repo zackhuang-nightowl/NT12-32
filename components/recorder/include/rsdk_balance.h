@@ -3,6 +3,7 @@
 #define RSDK_BALANCE_H
 #include "rsdk_types.h"
 #include "rsdk_storgedev.h"
+#include "rsdk_index.h"   /* rsdk_seg_visit_fn(覆盖遍历回调) */
 #include <stdint.h>
 #ifdef __cplusplus
 extern "C" {
@@ -24,6 +25,12 @@ RSDK_API void       rsdk_balance_report(rsdk_group_t *g, rsdk_dev_t *dev, uint64
 RSDK_API void       rsdk_group_set_health(rsdk_group_t *g, int disk, int ok);
 RSDK_API void       rsdk_group_close(rsdk_group_t *g);
 
+/* 运行时把一块**已格式化**的盘原地加入盘组(★group 指针不变——避免关组重开导致各模块借用的
+ * group 指针悬空;数组在锁内 realloc 追加)。已在组内→RSDK_OK;未格式化/外来→rsdk_dev_open 失败原样返回。 */
+RSDK_API rsdk_err_t rsdk_group_add_disk(rsdk_group_t *g, const char *path);
+/* 按 devpath 查组内下标(供热插拔判断是否已入组);无则返回 -1。 */
+RSDK_API int        rsdk_group_find_path(rsdk_group_t *g, const char *path);
+
 /* 盘组元数据锁(= 组内各盘共享的递归锁): 供 rec 层把"跨多个原语的复合操作"(段翻转、开/关 writer)
  * 做成原子。递归 → 可与内部各原语的自锁嵌套。数据区读写不走此锁。 */
 RSDK_API void       rsdk_group_lock(rsdk_group_t *g);
@@ -37,6 +44,10 @@ RSDK_API int rsdk_group_query(rsdk_group_t *g, uint32_t t0, uint32_t t1, int chn
 /* 同 rsdk_group_query; stream>=0 只取该码流段(0主/1子); stream<0 不限。 */
 RSDK_API int rsdk_group_query_stream(rsdk_group_t *g, uint32_t t0, uint32_t t1, int chn,
                                       int rectype, int stream, rsdk_index_slot_t *out, int cap);
+/* 跨盘覆盖遍历: 归并盘组内所有盘, 逐段回调, ★无 cap 截断(见 rsdk_index_foreach_stream)。
+ * 日历/日内时间轴等只需覆盖统计的接口用此, 避免 query_stream 的 cap 截断漏段。返回命中段数。 */
+RSDK_API int rsdk_group_foreach_stream(rsdk_group_t *g, uint32_t t0, uint32_t t1, int chn,
+                                       int rectype, int stream, rsdk_seg_visit_fn cb, void *user);
 
 /* 跨盘连续回放器: 顺序播放一组(可跨盘)段, 到段尾自动切到下一段所在盘。 */
 typedef struct rsdk_group_player rsdk_group_player_t;

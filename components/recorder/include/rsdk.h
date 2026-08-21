@@ -38,6 +38,7 @@
 #include "rsdk_balance.h"
 #include "rsdk_backup.h"
 #include "rsdk_scan.h"
+#include "rsdk_repair.h"
 #if RSDK_CFG_METADATA
 #include "rsdk_meta.h"
 #include "rsdk_pic.h"
