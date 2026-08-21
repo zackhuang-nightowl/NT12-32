@@ -1,0 +1,201 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="dllmain.cpp" />
+    <ClCompile Include="stdafx.cpp" />
+    <ClCompile Include="bm\base64.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\hqueue.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\linked_list.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_act.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_api.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_cln.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_cm.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_event.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_pkt.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_probe.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_utils.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\ppstack.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\rfc_md5.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\sha1.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\soap.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\soap_parser.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\sys_buf.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\sys_log.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\sys_os.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\util.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\word_analyse.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="onvif\onvif_http.cpp">
+      <Filter>onvif</Filter>
+    </ClCompile>
+    <ClCompile Include="http\http_cln.cpp">
+      <Filter>http</Filter>
+    </ClCompile>
+    <ClCompile Include="http\http_parse.cpp">
+      <Filter>http</Filter>
+    </ClCompile>
+    <ClCompile Include="http\http_srv.cpp">
+      <Filter>http</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\hxml.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\xml_node.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\sha256.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\net_util.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+    <ClCompile Include="bm\ws.cpp">
+      <Filter>bm</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="stdafx.h" />
+    <ClInclude Include="bm\hqueue.h">
+      <Filter>bm</Filter>
+    </ClInclude>
+    <ClInclude Include="bm\linked_list.h">
+      <Filter>bm</Filter>
+    </ClInclude>
+    <ClInclude Include="onvif\onvif.h">
+      <Filter>onvif</Filter>
+    </ClInclude>
+    <ClInclude Include="onvif\onvif_act.h">
+      <Filter>onvif</Filter>
+    </ClInclude>
+    <ClInclude Include="onvif\onvif_api.h">
+      <Filter>onvif</Filter>
+    </ClInclude>
+    <ClInclude Include="onvif\onvif_cln.h">
+      <Filter>onvif</Filter>
+    </ClInclude>
+    <ClInclude Include="onvif\onvif_cm.h">
+      <Filter>onvif</Filter>
+    </ClInclude>
+    <ClInclude Include="onvif\onvif_event.h">
+      <Filter>onvif</Filter>
+    </ClInclude>
+    <ClInclude Include="onvif\onvif_pkt.h">
+      <Filter>onvif</Filter>
+    </ClInclude>
+    <ClInclude Include="onvif\onvif_probe.h">
+      <Filter>onvif</Filter>
+    </ClInclude>
+    <ClInclude Include="onvif\onvif_req.h">
+      <Filter>onvif</Filter>
+    </ClInclude>
+    <ClInclude Include="onvif\onvif_res.h">
+      <Filter>onvif</Filter>
+    </ClInclude>
+    <ClInclude Include="onvif\onvif_utils.h">
+      <Filter>onvif</Filter>
+    </ClInclude>
+    <ClInclude Include="bm\ppstack.h">
+      <Filter>bm</Filter>
+    </ClInclude>
+    <ClInclude Include="bm\rfc_md5.h">
+      <Filter>bm</Filter>
+    </ClInclude>
+    <ClInclude Include="bm\sha1.h">
+      <Filter>bm</Filter>
+    </ClInclude>
+    <ClInclude Include="onvif\soap.h">
+      <Filter>onvif</Filter>
+    </ClInclude>
+    <ClInclude Include="onvif\soap_parser.h">
+      <Filter>onvif</Filter>
+    </ClInclude>
+    <ClInclude Include="bm\sys_buf.h">
+      <Filter>bm</Filter>
+    </ClInclude>
+    <ClInclude Include="bm\sys_inc.h">
+      <Filter>bm</Filter>
+    </ClInclude>
+    <ClInclude Include="bm\sys_log.h">
+      <Filter>bm</Filter>
+    </ClInclude>
+    <ClInclude Include="bm\util.h">
+      <Filter>bm</Filter>
+    </ClInclude>
+    <ClInclude Include="bm\word_analyse.h">
+      <Filter>bm</Filter>
+    </ClInclude>
+    <ClInclude Include="onvif\onvif_http.h">
+      <Filter>onvif</Filter>
+    </ClInclude>
+    <ClInclude Include="http\http.h">
+      <Filter>http</Filter>
+    </ClInclude>
+    <ClInclude Include="http\http_cln.h">
+      <Filter>http</Filter>
+    </ClInclude>
+    <ClInclude Include="http\http_srv.h">
+      <Filter>http</Filter>
+    </ClInclude>
+    <ClInclude Include="bm\hxml.h">
+      <Filter>bm</Filter>
+    </ClInclude>
+    <ClInclude Include="bm\xml_node.h">
+      <Filter>bm</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="bm">
+      <UniqueIdentifier>{b618103b-eff0-4351-9c2c-35fae7356926}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="onvif">
+      <UniqueIdentifier>{cce941d7-1d52-4c3c-ae92-765b24a95b27}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="http">
+      <UniqueIdentifier>{f2d352e5-3a77-4898-9d0b-7581a76836f0}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

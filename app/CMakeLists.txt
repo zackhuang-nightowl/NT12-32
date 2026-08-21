@@ -103,8 +103,9 @@ endif()
 if(NVR_WITH_ONBOARD)
     add_executable(nvr_app src/main.c)
     target_include_directories(nvr_app PRIVATE ${NVR_APP_INCLUDES})
-    # happytime 依赖：openssl(HTTPS,用 TUTK aarch64 .so) + libsrt/libsrtp(arm64-v8a 预编译)
-    set(_ht ${NVR_ROOT}/third_party/happytime_onvif_rtsp/source)
+    # RTSP SDK 预编译依赖：libsrt/libsrtp(arm64-v8a),随 SDK/OnvifClientLibrary 一起在仓库内
+    # openssl(HTTPS)用 TUTK aarch64 .so
+    set(_ocl ${NVR_ROOT}/SDK/OnvifClientLibrary)
     set(_tutk ${NVR_ROOT}/third_party/tutk_sdk/Lib/Linux/ArmCortexA53_NT98633_8.4.0)
     target_link_libraries(nvr_app PRIVATE
         nvr_app_core
@@ -113,9 +114,9 @@ if(NVR_WITH_ONBOARD)
         nvr_onvif nvr_cloud_uploader mhal cjson
         nopcore_static nvr_cloud_tutk
         ${_tutk}/libssl.so ${_tutk}/libcrypto.so
-        ${_ht}/libsrt/lib/arm64-v8a/libsrt.a ${_ht}/libsrtp/lib/arm64-v8a/libsrtp2.a
+        ${_ocl}/libsrt/lib/arm64-v8a/libsrt.a ${_ocl}/libsrtp/lib/arm64-v8a/libsrtp2.a
         pthread m dl z)
-    # nop 的 ONVIF 客户端 与 happytime_rtsp 同为 Happytimesoft，共享 bm/http 工具符号(base64/md5/
+    # nop 的 ONVIF 客户端 与 onvifclient 同为 Happytimesoft，共享 bm/http 工具符号(base64/md5/
     # http_onvif_trans 等)会重复定义。二者实现同源，允许重复定义(取先出现的)。
     target_link_options(nvr_app PRIVATE -Wl,--allow-multiple-definition)
 endif()

@@ -2,8 +2,8 @@
 cmake_minimum_required(VERSION 3.13)
 project(nvr_streaming C CXX)
 
-# 统一 RTSP SDK：NT12-SDK/OnvifClientLibrary(nop::NopRtspClient facade)。puller 仅需 nop_rtsp.h。
-set(OCL ${CMAKE_CURRENT_SOURCE_DIR}/../../../NT12-SDK/OnvifClientLibrary)
+# 统一 RTSP SDK：仓库内 SDK/OnvifClientLibrary(nop::NopRtspClient facade)。puller 仅需 nop_rtsp.h。
+set(OCL ${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/OnvifClientLibrary)
 
 add_library(nvr_streaming STATIC
     src/stream_nal.c        # 纯 C：NAL 分类
@@ -27,7 +27,8 @@ target_include_directories(nvr_streaming PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../common/include      # nvr_log.h
 )
 
-# 链接：recorder(librsdk) + platform media_hal + happytime rtsp 客户端库
-# target_link_libraries(nvr_streaming PUBLIC rsdk mhal happytime_rtsp)
+# 链接：recorder(librsdk) + platform media_hal + onvifclient(RTSP SDK)。
+# 静态库本身不必链依赖;最终由 app 统一链接 nvr_streaming + onvifclient + rsdk + mhal。
+# target_link_libraries(nvr_streaming PUBLIC rsdk mhal onvifclient)
 
 set_target_properties(nvr_streaming PROPERTIES C_STANDARD 11 CXX_STANDARD 14)

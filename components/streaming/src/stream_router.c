@@ -561,7 +561,7 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
     }
 
     /* --- Bootstrap 旁路缓存(每路 channel+stream 独立): 参数集 + 完整 IDR AU。 --- */
-    const uint8_t *sbuf = data; int slen = len; uint8_t *tmp = NULL;
+    const uint8_t *sbuf = data; int slen = len; uint8_t *tmp = NULL; int have_params = 0;
     if (nc.is_param) {
         if (!p->par_building) { p->par_len = 0; p->par_building = 1; }
         if (p->par_len + len <= (int)sizeof(p->par)) {
@@ -587,7 +587,7 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
         }
         /* ★ 只缓存"含参数集"的关键 AU 作 bootstrap:自带 SPS/PPS(has_param)或成功拼回缓存参数(tmp)。
          * param-less IDR(无 SPS)绝不当 bootstrap —— 喂给 VPU 会 scan first header error / 花屏。 */
-        int have_params = nc.is_key && (nc.has_param || tmp != NULL);
+        have_params = nc.is_key && (nc.has_param || tmp != NULL);
         if (have_params && slen > 0) {
             if (p->kf_cap < slen) {
                 uint8_t *nk = (uint8_t *)realloc(p->kf, (size_t)slen);
@@ -612,10 +612,13 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
             stream_live_enter_resync(c, "disc_mark");
         }
         if (c->live_state != STREAM_LIVE_IDLE) {
-            int dropped = stream_live_q_push(&c->live_q, sbuf, (uint32_t)slen, ts, nc.is_key, mono_ms);
+            /* ★ 起播点标志用 have_params(非裸 is_key):只有"带参数集的关键 AU"(自带 SPS 或拼回
+             * 缓存/ SDP 参数)才作 WAIT_IDR/RESYNC 起播点。param-less IDR(拼不回 SPS)不起播,
+             * 继续等 → 避免把无序列头的 IDR 喂 VPU 触发 scan first header error。 */
+            int dropped = stream_live_q_push(&c->live_q, sbuf, (uint32_t)slen, ts, have_params, mono_ms);
             if (dropped) {
                 stream_live_enter_resync(c, "live_q_overflow");
-                (void)stream_live_q_push(&c->live_q, sbuf, (uint32_t)slen, ts, nc.is_key, mono_ms);
+                (void)stream_live_q_push(&c->live_q, sbuf, (uint32_t)slen, ts, have_params, mono_ms);
             }
             stream_live_drain(c);
         }
@@ -629,7 +632,7 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
     if (c->cfg.record) {
         stream_apply_event_tags_puller(c);
         if (stream_rec_stream_on(c, p->stream) && !nc.is_param)
-            (void)stream_record_enqueue(c, p, data, len, ts, wall, &nc);
+            (void)stream_record_enqueue(c, p, sbuf, slen, ts, wall, &nc);
     } else if (c->event_arm) {
         if (!c->event_clip && (c->writer_main || c->writer_sub))
             stream_close_writer(c);
@@ -643,11 +646,11 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
                     p->pre_flushed = 1;
                 }
                 if (!nc.is_param)
-                    (void)stream_record_enqueue(c, p, data, len, ts, wall, &nc);
+                    (void)stream_record_enqueue(c, p, sbuf, slen, ts, wall, &nc);
             }
         } else if (!nc.is_param && c->pre_record_s > 0 && stream_rec_stream_on(c, p->stream)) {
             if (stream_pre_ensure(p, c->pre_record_s) == 0)
-                stream_pre_push(p, data, len, ts, wall, nc.is_key, p->codec, nc.frame_type);
+                stream_pre_push(p, sbuf, slen, ts, wall, nc.is_key, p->codec, nc.frame_type);
         }
     } else if (!c->event_clip && (c->pmain.pre_frames || c->psub.pre_frames)) {
         stream_pre_free_chan(c);

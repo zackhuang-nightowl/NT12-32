@@ -24,7 +24,6 @@ endif()
 
 # --- 顶层第三方路径（各模块 glue 引用这里，替代原 nop_sdk/third_party）---
 set(NVR_THIRD_PARTY ${CMAKE_CURRENT_SOURCE_DIR}/third_party CACHE PATH "")
-set(NVR_HAPPYTIME   ${NVR_THIRD_PARTY}/happytime_onvif_rtsp)
 set(NVR_TUTK        ${NVR_THIRD_PARTY}/tutk_sdk)
 set(NVR_FFMPEG      ${NVR_THIRD_PARTY}/ffmpeg)
 set(NVR_CJSON       ${NVR_THIRD_PARTY}/cJSON)
@@ -76,12 +75,12 @@ add_subdirectory(components/cloud_tutk)
 # --- 云存上传引擎（事件切片→TS→VSaaS；依赖 recorder + libcurl）---
 add_subdirectory(components/cloud_uploader)
 
-# --- 平台层 + happytime RTSP 客户端（仅目标机构建）---
+# --- 平台层 + RTSP SDK（仅目标机构建）---
 if(NVR_WITH_ONBOARD)
     add_subdirectory(platform/media_hal)                 # hd_videodec/videoproc/videoout 封装
-    add_subdirectory(third_party/happytime_onvif_rtsp)   # CRtspClient（streaming 拉流）— 旧，逐步替换
-    # 统一 RTSP SDK：NT12-SDK/OnvifClientLibrary(nop::NopRtspClient facade)。external source。
-    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../NT12-SDK/OnvifClientLibrary onvifclient_build)
+    # 统一 RTSP SDK：仓库内 SDK/OnvifClientLibrary(nop::NopRtspClient facade + happytime 引擎源)。
+    # 拉流(CRtspClient)与 server(NopRtspServer)统一在此;旧 third_party/happytime_onvif_rtsp 已移除。
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/SDK/OnvifClientLibrary onvifclient_build)
 endif()
 
 # --- 集成主程序 ---

@@ -5,7 +5,7 @@
  *      ├─ platform/media_hal(hd_videodec) 硬解上屏（预览）
  *      └─ components/recorder(rsdk_rec_write_frame) 旁路录像
  *
- *  上游拉流: third_party/happytime_onvif_rtsp (CRtspClient)
+ *  上游拉流: SDK/OnvifClientLibrary (nop::NopRtspClient facade over CRtspClient)
  *  解码上屏: platform/media_hal (mhal_vdec/mhal_vout)  ——不走 ffmpeg 软解
  *  录像:     components/recorder (rsdk_group_t 由 storage 装配)
  *  详见 README.md。

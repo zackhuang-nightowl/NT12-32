@@ -51,6 +51,19 @@ static void pull_on_connected(stream_pull_t *p)
     p->connected = 1;
     NVR_LOGI("puller", "ch%d[%s] CONNSUCC (SDP codec=%d 1=H264 4=H265)", c->cfg.chn, sname(p->stream), vc);
 
+    /* ★ 用相机 SDP 通告的参数集(sprop-parameter-sets / sprop-vps/sps/pps)真实 seed 本路 par[]。
+     * 有些相机只在 SDP 带 SPS/PPS,带内 IDR 不含参数集 → 否则 router 拼不回 SPS,VPU 报
+     * scan first header error、录像段首无头无法回放。seed 后, param-less IDR 能拼回真实 SPS
+     * (预览秒出图 / 录像段首带头)。来源=DESCRIBE SDP 解析,非猜测。仅在本路 par 尚空时 seed;
+     * 相机若随后带内发参数集,router 会以带内的覆盖(带内更权威)。 */
+    if (p->par_len == 0) {
+        int n = cli->videoParameterSets(p->par, (int)sizeof(p->par));
+        if (n > 0) {
+            p->par_len = n; p->par_building = 0;
+            NVR_LOGI("puller", "ch%d[%s] 用 SDP sprop seed par[]=%dB (→AnnexB)", c->cfg.chn, sname(p->stream), n);
+        }
+    }
+
     if (!c->router_open) { c->router_open = 1; stream_router_open(c, c->grp); }  /* 首个连上的路开 writer */
     /* 该路是当前解码源且落在可见格 → 开解码器 */
     if (p->stream == c->decode_stream && c->show_win >= 0 && !c->vdec)
