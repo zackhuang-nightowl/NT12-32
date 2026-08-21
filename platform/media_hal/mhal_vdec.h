@@ -29,8 +29,15 @@ typedef struct mhal_vdec mhal_vdec_t;
 int  mhal_vdec_open(int chn, mhal_codec_t codec, int w, int h, int fps,
                     int bind_vout_win, mhal_vdec_t **out);
 
-/* 送一帧 Annex-B 裸流（来自 streaming 的 CRtspClient video_cb）；ts 为 90kHz PTS */
+/* 送一帧 Annex-B 裸流（来自 streaming 的 CRtspClient video_cb）；ts 为 90kHz PTS。
+ * 阻塞至多 200ms 等解码器输入 FIFO 腾空(关键帧/bootstrap 用,尽量送进)。 */
 int  mhal_vdec_send(mhal_vdec_t *d, const uint8_t *annexb, uint32_t len, uint32_t ts);
+
+/* 送一帧,自定义等待 FIFO 的毫秒数。live 实时路径传小值(如 0/10ms):FIFO 满即返回
+ *  MHAL_VDEC_EBUSY 而**不阻塞**——调用方据此丢帧追帧(限时延),不把积压推给上游网络缓冲。
+ * 返回:0=成功送入;MHAL_VDEC_EBUSY(-3)=FIFO 满/超时(解码器跟不上);其它<0=硬错误。 */
+#define MHAL_VDEC_EBUSY (-3)
+int  mhal_vdec_send_ex(mhal_vdec_t *d, const uint8_t *annexb, uint32_t len, uint32_t ts, int wait_ms);
 
 /* 拉解码后 YUV（若不直连 vout，需要二次处理/抓拍时用） */
 int  mhal_vdec_recv(mhal_vdec_t *d, void *yuv_buf, uint32_t *inout_len, uint32_t timeout_ms);

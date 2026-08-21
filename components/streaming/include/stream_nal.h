@@ -22,6 +22,11 @@ void nal_classify(const uint8_t *data, int len, int codec, nal_class_t *out);
 int nal_h264_frame_num_gap(const uint8_t *data, int len, int is_idr,
                            int *log2_io, int *prev_fn_io);
 
+/* 从整帧 Annex-B 里找 SPS(H264 type7 / H265 type33)解析**真实编码分辨率**(含裁剪窗修正)。
+ * codec:0=H264 1=H265。成功返回 1 并填 *w/*h(luma 采样,已去 crop);失败返回 0。
+ * 调用方须做保护:失败时**不得**用猜测尺寸开解码器。 */
+int nal_sps_dims(const uint8_t *data, int len, int codec, int *w, int *h);
+
 #ifdef __cplusplus
 }
 #endif

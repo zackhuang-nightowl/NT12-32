@@ -96,6 +96,11 @@ rsdk_err_t nvr_stream_set_url      (nvr_stream_mgr_t *m, int chn, int stream, co
 /* ★ 切换喂解码器的码流(单宫格=主/多宫格=子)。两路都在拉 → 瞬时切换、不重连。 */
 rsdk_err_t nvr_stream_set_decode_stream(nvr_stream_mgr_t *m, int chn, int stream);
 
+/* ★ 强制重发 HAL 窗口绑定(即使窗口号未变)。用于自由窗(DisplayExt/bind_rect)切回宫格:
+ * HAL 窗被 unbind(visible=0)但流层 vdec_win 仍停在同格号,相等守卫会短路不重绑 → 窗口永隐。
+ * 调用后由 puller 线程无条件重发 mhal_vout_bind(show_win)。见 nvr_preview_set_mode 回宫格处。 */
+rsdk_err_t nvr_stream_force_rebind(nvr_stream_mgr_t *m, int chn);
+
 /* 状态查询（供 UI/诊断） */
 typedef enum { NVR_CH_IDLE, NVR_CH_CONNECTING, NVR_CH_PLAYING, NVR_CH_NOSIGNAL, NVR_CH_FAIL } nvr_ch_state_t;
 nvr_ch_state_t nvr_stream_state(nvr_stream_mgr_t *m, int chn);

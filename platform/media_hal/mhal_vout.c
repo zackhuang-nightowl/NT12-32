@@ -7,7 +7,7 @@
 #include "mhal_internal.h"
 #include "nvr_log.h"
 #include "nvr_display_modes.h"    /* HDMI 分辨率阶梯单一来源(热切降级) */
-#include "vendor_videoout.h"      /* VENDOR_VIDEOOUT_PARAM_AUTO_CLEARWIN:空/停路窗口自动清黑 */
+#include "vendor_videoout.h"      /* VENDOR_VIDEOOUT_PARAM_WIN_LAYER_ATTR:背景窗口置最低层 */
 #include <stdio.h>
 #include <string.h>
 #include <pthread.h>
@@ -389,12 +389,15 @@ int mhal_vout_init(mhal_out_t out, int width, int height)
     mhal_commit_thread_start();   /* ★ 启动唯一显示重建线程(防抖合并 commit) */
     /* ★ 开机默认黑(LVGL 走 ARGB1555 逐像素 alpha 挖透明,视频层无信号时默认是绿 → 必须由 NVR 兜黑):
      *  ① setup_fb_alpha —— 关 OSD FB colorkey、走 ARGB1555 逐像素 alpha(与 GUI 一致)。
-     *  ② AUTO_CLEARWIN(SDK liveview_with_clearwin.c 方式)—— 开启后驱动**自动**把"未起/已停 vo 路"
-     *     的窗口区域清成黑,持续生效:开机无通道、无设备、通道掉线,对应区域都默认黑(核心兜底)。
-     *  ③ clear_black —— 再显式挂一帧视频黑(WINCOLOR_BLACK),保证开机瞬间即黑不闪绿。 */
+     *  ② push_black_bg —— 向最低层背景窗口(IN63)push 一帧**常驻全屏 NV12 黑**:开机即黑、空格恒黑。
+     *     这就是开机刷黑的核心兜底(视频层最低层常驻黑,通道窗盖其上、空处透出黑)。
+     *  ③ clear_black —— 再显式清一次整屏视频黑,保证开机瞬间不闪绿。
+     *
+     *  ⚠️ 不再开 AUTO_CLEARWIN:它让驱动后台常驻 clrwin_0 worker 自动清窗,与防抖 commit 线程
+     *  (1dcc8da 起异步)在 start_list/stop_list 图重建瞬间并发操作同一 videoout → clrwin_0 卡死整机
+     *  (开机有 PoE 设备触发首次 commit 必卡)。改由 NV12 常驻黑背景兜底"开机黑/空格黑",不需后台清窗。 */
     mhal_vout_setup_fb_alpha();
-    mhal_vout_enable_auto_clearwin();
-    mhal_vout_push_black_bg();     /* ★ 挂全屏黑帧到专用背景窗口:开机/无设备立即黑(核心) */
+    mhal_vout_push_black_bg();     /* 常驻全屏 NV12 黑背景(最低层):开机/无设备/空格即黑(核心) */
     mhal_vout_clear_black();
     return 0;
 }
@@ -430,8 +433,15 @@ void mhal_vout_push_black_bg(void)
         vendor_videoout_set(g_bg_path, VENDOR_VIDEOOUT_PARAM_WIN_LAYER_ATTR, &la);
     }
 
-    /* 2) 分配全屏黑 YUV422(UYVY)缓冲并 push 一帧(常驻显示,不释放该 block) */
-    UINT32 sz = (UINT32)w * h * 2;
+    /* 2) 分配全屏黑 YUV420(NV12)缓冲并 push 一帧(常驻显示,不释放该 block)。
+     *    ⚠️ push 帧格式必须与视频输出层一致:本平台 vpd_fmt=YUV420(0x520c0420)。
+     *    之前用 YUV422_ONE(UYVY,0x51100422) → videoout_push_in_buf fmt fail、返回 -13、
+     *    背景根本没上屏 → 开机到"首路出图起 vo 路"之间视频层露默认绿(AUTO_CLEARWIN 那时还没
+     *    有已起 vo 路可清)。改推 NV12 黑(Y=0x10 限幅黑, UV=0x80 中性)→ nvr_app 显示 init 即
+     *    有一帧常驻黑背景,开机就黑、不必等出图。 */
+    UINT32 ysz  = (UINT32)w * h;          /* Y 平面 */
+    UINT32 uvsz = ysz / 2;                 /* UV 交织平面(w×h/2) */
+    UINT32 sz   = ysz + uvsz;              /* NV12 = w*h*3/2 */
     if (g_bg_blk == HD_COMMON_MEM_VB_INVALID_BLK) {
         g_bg_blk = hd_common_mem_get_block(HD_COMMON_MEM_USER_BLK, sz, DDR_ID0);
         if (g_bg_blk == HD_COMMON_MEM_VB_INVALID_BLK) {
@@ -441,36 +451,22 @@ void mhal_vout_push_black_bg(void)
     UINTPTR pa = hd_common_mem_blk2pa(g_bg_blk);
     UINT8 *va = (UINT8 *)hd_common_mem_mmap(HD_COMMON_MEM_MEM_TYPE_NONCACHE, pa, sz);
     if (!va) { NVR_LOGW("mhal", "背景黑帧 mmap 失败"); return; }
-    for (UINT32 i = 0; i < sz / 4; i++) *(UINT32 *)(va + 4 * i) = 0x10801080;  /* WINCOLOR_BLACK */
+    memset(va,       0x10, ysz);          /* Y  = 16  视频黑(限幅下限) */
+    memset(va + ysz, 0x80, uvsz);         /* UV = 128 中性(不偏色) */
     hd_common_mem_munmap(va, sz);
 
     HD_VIDEO_FRAME f; memset(&f, 0, sizeof(f));
     f.sign        = MAKEFOURCC('V', 'F', 'R', 'M');
     f.ddr_id      = DDR_ID0;
-    f.pxlfmt      = HD_VIDEO_PXLFMT_YUV422_ONE;
+    f.pxlfmt      = HD_VIDEO_PXLFMT_YUV420;         /* 与 vpd_fmt 一致(NV12 2 平面) */
     f.dim.w       = w;         f.dim.h       = h;
-    f.pw[0]       = w;         f.ph[0]       = h;
-    f.loff[0]     = (UINT32)w * 2;                 /* UYVY 行跨距 */
-    f.phy_addr[0] = pa;
+    f.pw[0]       = w;         f.ph[0]       = h;        f.loff[0] = w;   f.phy_addr[0] = pa;         /* Y */
+    f.pw[1]       = w;         f.ph[1]       = h / 2;    f.loff[1] = w;   f.phy_addr[1] = pa + ysz;   /* UV */
     f.blk         = g_bg_blk;
     if ((ret = hd_videoout_push_in_buf(g_bg_path, &f, NULL, 0)) != HD_OK)
         NVR_LOGW("mhal", "背景黑帧 push_in_buf 失败 %d", ret);
     else
-        NVR_LOGI("mhal", "背景黑帧已上屏(IN63 全屏 %dx%d,最低层):开机/无设备默认黑", w, h);
-}
-
-/* SDK 统一方式:开启 videoout AUTO_CLEARWIN —— 驱动自动把未起/已停的 vo 路窗口区清黑。
- * 一次开启持续生效:无视频/无设备/掉线的区域都默认黑(不再露出视频层绿底)。 */
-void mhal_vout_enable_auto_clearwin(void)
-{
-    if (!g_disp.inited || !g_disp.ctrl_path) return;
-    VENDOR_VIDEOOUT_AUTO_CLEARWIN acw;
-    memset(&acw, 0, sizeof(acw));
-    acw.enable = 1;
-    if (vendor_videoout_set(g_disp.ctrl_path, VENDOR_VIDEOOUT_PARAM_AUTO_CLEARWIN, &acw) != HD_OK)
-        NVR_LOGW("mhal", "AUTO_CLEARWIN 开启失败(vendor_videoout_set)");
-    else
-        NVR_LOGI("mhal", "AUTO_CLEARWIN 开启:空/停 vo 路窗口默认黑");
+        NVR_LOGI("mhal", "背景黑帧已上屏(IN63 全屏 %dx%d NV12,最低层):开机/无设备默认黑", w, h);
 }
 
 void mhal_vout_get_resolution(int *w, int *h)

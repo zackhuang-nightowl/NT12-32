@@ -161,6 +161,7 @@ int mhal_vdec_open(int chn, mhal_codec_t codec, int w, int h, int fps,
     /* ★ 同批内先关后开(切主/子码流 reopen 同一通道):旧解码器还挂在 pending_free(defer 期间未拆,
      * 路径仍占用),此时下面 hd_videodec_open 复用同一 IN/OUT 号会 ALREADY_OPEN(-25)。先就地停+拆旧:
      * 旧路径上次 commit 已 started → 停之、从 started 集合摘除、拆绑/关/释放,再往下开新路径。 */
+    int reopen_freed = 0;
     for (int i = 0; i < g_disp.pending_n; i++) {
         struct mhal_vdec *old = g_disp.pending_free[i];
         if (!old || old->chn != chn) continue;
@@ -179,9 +180,14 @@ int mhal_vdec_open(int chn, mhal_codec_t codec, int w, int h, int fps,
         mhal_vdec_teardown(old);
         g_disp.pending_free[i] = g_disp.pending_free[g_disp.pending_n - 1];
         g_disp.pending_n--;
-        NVR_LOGI("mhal", "chn%d 同批 reopen:先拆旧解码器路径(避免 ALREADY_OPEN)", chn);
-        break;
+        reopen_freed++;
+        /* ★ swap-remove 把末尾元素填到了下标 i:必须回退重查, 否则漏检。
+         * 且不能 break —— 高频 open/close 抖动下同一 chn 可能残留**多个**未排空实例,
+         * 只拆第一个会让其余仍占着 IN(0,chn) → 下次 hd_videoout_open 报 ALREADY_OPEN(-25) → 级联黑屏。 */
+        i--;
     }
+    if (reopen_freed)
+        NVR_LOGI("mhal", "chn%d 同批 reopen:拆旧解码器路径 x%d(避免 ALREADY_OPEN)", chn, reopen_freed);
 
     HD_RESULT ret; int step = 0;
     /* 1) 开 dec/proc/vout 三段路径（dev 0, id=chn） */
@@ -226,7 +232,9 @@ int mhal_vdec_open(int chn, mhal_codec_t codec, int w, int h, int fps,
     return 0;
 
 fail:
-    NVR_LOGE("mhal", "vdec_open chn%d fail %d (step%d: 1dec_open/2proc_open/3vout_open/4dec_bind/5proc_bind/6cfg)", chn, ret, step);
+    NVR_LOGE("mhal", "vdec_open chn%d fail %d (step%d: 1dec_open/2proc_open/3vout_open/4dec_bind/5proc_bind/6cfg)"
+             " [vout_win=%d dim=%dx%d started=%d pending=%d]",
+             chn, ret, step, bind_vout_win, d->w, d->h, g_disp.started_n, g_disp.pending_n);
     d->opened = 0;
     g_disp.ch[chn] = NULL;
     /* ★ 关键:关掉本次已开的 dec/proc/vout 路径。否则任一步失败后路径泄漏 → 同号(IN/OUT)下次
@@ -249,7 +257,13 @@ static pthread_mutex_t g_send_lock = PTHREAD_MUTEX_INITIALIZER;
 
 int mhal_vdec_send(mhal_vdec_t *d, const uint8_t *annexb, uint32_t len, uint32_t ts)
 {
+    return mhal_vdec_send_ex(d, annexb, len, ts, 200 /*阻塞等 FIFO*/);
+}
+
+int mhal_vdec_send_ex(mhal_vdec_t *d, const uint8_t *annexb, uint32_t len, uint32_t ts, int wait_ms)
+{
     if (!d || !d->opened || !annexb || len == 0) return -1;
+    if (wait_ms < 0) wait_ms = 0;
 
     /* 单帧走 send_list（样例验证过的送流路径） */
     HD_VIDEODEC_SEND_LIST item;
@@ -261,19 +275,28 @@ int mhal_vdec_send(mhal_vdec_t *d, const uint8_t *annexb, uint32_t len, uint32_t
     item.user_bs.timestamp  = (UINT64)ts * 1000;   /* 90kHz→us 的换算按需精化 */
 
     pthread_mutex_lock(&g_send_lock);
-    HD_RESULT ret = hd_videodec_send_list(&item, 1, 200 /*wait_ms*/);
+    HD_RESULT ret = hd_videodec_send_list(&item, 1, (UINT32)wait_ms);
     pthread_mutex_unlock(&g_send_lock);
-    if (ret < 0 || item.user_bs.retval < 0) {
-        /* 送流失败诊断:按通道计数(节流)。看是否 ch16(8K)大帧/超窗口/DIN 满 → 定位丢图根因。 */
+    if (ret >= 0 && item.user_bs.retval >= 0)
+        return 0;
+
+    /* 送不进:>4MB(超解码窗口)=**硬错误**;否则(帧本身合法却入不了队)判为 **FIFO 满/超时**。
+     *   非阻塞 live 送(wait_ms 小)→ 返回 MHAL_VDEC_EBUSY 供上层限时延丢帧追帧,不刷屏诊断;
+     *   阻塞送(关键帧/bootstrap, wait_ms 大)失败仍按硬错误处理(触发 RESYNC),并节流记诊断。 */
+    if (len > (4u << 20)) {
+        NVR_LOGE("vdec", "chn%d 送流失败(帧>4MB超窗口) ret=%d retval=%d len=%u",
+                 d->chn, ret, item.user_bs.retval, len);
+        return -1;
+    }
+    if (wait_ms >= 100) {
         static int fail_cnt[MHAL_MAX_CH];
         int c = (d->chn >= 0 && d->chn < MHAL_MAX_CH) ? d->chn : 0;
         if (fail_cnt[c]++ < 30 || fail_cnt[c] % 50 == 0)
-            NVR_LOGE("vdec", "chn%d 送流失败 ret=%d retval=%d len=%u(第%d次) %s",
-                     d->chn, ret, item.user_bs.retval, len, fail_cnt[c],
-                     len > (4u<<20) ? "★帧>4MB超窗口" : "");
+            NVR_LOGE("vdec", "chn%d 送流失败 ret=%d retval=%d len=%u(第%d次)",
+                     d->chn, ret, item.user_bs.retval, len, fail_cnt[c]);
         return -1;
     }
-    return 0;
+    return MHAL_VDEC_EBUSY;
 }
 
 /* ★ 批量送流(按 SDK playback_1div_to_4div:多路解码器的帧**一次** send_list 送,避免逐路分别 send

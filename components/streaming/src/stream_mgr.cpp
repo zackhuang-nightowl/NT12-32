@@ -135,6 +135,17 @@ extern "C" rsdk_err_t nvr_stream_set_decode_stream(nvr_stream_mgr_t *m, int chn,
     return RSDK_OK;
 }
 
+/* 强制 puller 重发 mhal_vout_bind(show_win)——即使窗口号未变(vdec_win==show_win)。
+ * 用于自由窗(bind_rect)↔宫格切换:HAL 窗已被 unbind(visible=0),但流层 vdec_win 仍停在
+ * 同一格号,相等守卫会短路不重绑 → 窗口永隐。置 vout_rebind + decode_dirty 唤醒 puller 兑现。 */
+extern "C" rsdk_err_t nvr_stream_force_rebind(nvr_stream_mgr_t *m, int chn)
+{
+    stream_chan_t *c = slot(m, chn);
+    if (!c) return RSDK_E_NOTFOUND;
+    if (c->show_win >= 0) { c->vout_rebind = 1; c->decode_dirty = 1; }
+    return RSDK_OK;
+}
+
 extern "C" rsdk_err_t nvr_stream_start(nvr_stream_mgr_t *m, int chn)
 {
     stream_chan_t *c = slot(m, chn);

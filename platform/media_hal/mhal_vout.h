@@ -51,8 +51,7 @@ void mhal_layout_rect(mhal_layout_t layout, int idx, int disp_w, int disp_h,
                       int *x, int *y, int *w, int *h);
 int  mhal_vout_unbind(int decoder_chn);                                /* 隐藏该通道窗口 */
 void mhal_vout_clear_black(void);                                      /* 整屏(视频层)清稳定黑;回放进入时黑屏用 */
-void mhal_vout_enable_auto_clearwin(void);                            /* 开启 AUTO_CLEARWIN:空/停 vo 路窗口自动黑(SDK 方式) */
-void mhal_vout_push_black_bg(void);                                   /* 向专用背景窗口 push 全屏黑帧:开机/无设备默认黑 */
+void mhal_vout_push_black_bg(void);                                   /* 向最低层背景窗口 push 常驻全屏 NV12 黑:开机/无设备/空格恒黑(开机刷黑核心) */
 /* 数字变焦:对某解码通道设**输入裁剪 ROI**(源画面千分比 0..1000),VPE 把 ROI 放大填满窗口。
  * x_pm/y_pm=0 且 w_pm/h_pm=1000 → 全画面(取消变焦)。返回 0 成功、-1 该通道未在解码。 */
 int  mhal_vout_set_crop(int decoder_chn, int x_pm, int y_pm, int w_pm, int h_pm);

@@ -47,6 +47,11 @@ typedef struct stream_pull {
     int              codec;         /* 解析确定的 rsdk codec: 0=H264 1=H265;-1=未定 */
     int              connected;     /* 1=CONNSUCC(codec 有效) */
 
+    /* ★ 本路**真实编码分辨率**(从 SPS 解析回填,含裁剪窗修正)。0=未知。
+     * 硬解/vout 必须按此开(而非猜 720p/8K 默认 → 开错尺寸解不动/越界)。每路独立(主/子不同)。 */
+    int              enc_w, enc_h;
+    unsigned         enc_probe_frames;  /* 已尝试解析 SPS 的帧数(宽限兜底,避免永不出图) */
+
     /* 参数集缓存:相机把 SPS/PPS(/VPS) 作为独立小帧发,IDR 关键帧不含参数集 → Novatek 硬解组不成
      * 完整 AU(全黑)。缓存参数集,IDR 前拼回去。每路独立。
      * ★ 2048B:High profile 带 VUI 的 SPS、或 H.265 VPS+SPS+PPS 常 >512B,过小会**截断参数集**→
@@ -111,11 +116,18 @@ typedef struct stream_chan {
     /* 平台解码器(单个;由 decode_stream 那一路喂 → 解码即上屏) */
     mhal_vdec_t     *vdec;
     int              decode_stream; /* 当前喂解码器的码流:NVR_STREAM_MAIN/SUB(单宫格=主,多宫格=子) */
+    int              vdec_stream;   /* 当前已开解码器**实际所用**的码流(=开解码那刻的 decode_stream)。
+                                      * 与 decode_stream 比:相等=仅窗口变→挪窗(rebind);不等=码流/分辨率变→须重开。 */
+    int              vdec_win;      /* 当前解码器已绑定的显示格(挪窗比对用;-1=未绑) */
     int              decode_denied; /* 1=解码预算超限被拒(只录不显) */
     int              show_win;      /* 显示目标格:-1=隐藏(只拉+录,不解码);>=0=可见格号 */
     volatile int     decode_dirty;  /* 命令/preview 线程置1:解码状态(show_win/decode_stream)变了,
                                       * 由 puller 线程在自己线程内 open/close 解码器(避免与 mhal_vdec_send
                                       * 并发 → use-after-free 野 chn)。与 writer 的 pend_event 同模式。 */
+    volatile int     vout_rebind;   /* 命令/preview 线程置1:强制 puller 重发 mhal_vout_bind(show_win),
+                                      * 即使 vdec_win==show_win。用于自由窗(bind_rect)↔宫格切换后 HAL 窗
+                                      * 被 unbind(visible=0)但流层 vdec_win 仍停在同格号 → 相等守卫短路
+                                      * 不重绑的 desync。见 nvr_preview_set_mode 回宫格清自由窗处。 */
 
     /* 录像:主/子各一 writer(独立段;slot.stream 区分)。音频写主流。 */
     rsdk_writer_t   *writer_main;
@@ -145,6 +157,8 @@ typedef struct stream_chan {
     stream_live_state_t live_state; /* Live 状态机(替代 live_synced bool) */
     stream_live_q_t  live_q;        /* 仅 decode 路入队;满丢旧追最新 */
     unsigned         live_gen;      /* 已对齐的 pull conn_gen;不一致则 RESYNC */
+    int              live_busy_cnt; /* SYNCED 连续送不进(解码器 FIFO 满)计数:超阈值判"跟不上"→
+                                     * 丢帧追最新关键帧(限时延)。成功送入即清 0。 */
 } stream_chan_t;
 
 /* stream_mgr 完整定义(record worker 需遍历通道) */

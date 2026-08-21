@@ -319,6 +319,9 @@ void stream_chan_get_dim(stream_chan_t *c, int stream, int *w, int *h, int *fps)
     if (c) resolve_dim(&c->cfg, stream, w, h, fps);
 }
 
+/* SPS 分辨率宽限:相机始终不给可解析 SPS 的帧数上限,超过退安全 4K 出图(不永久黑)。 */
+#define STREAM_ENC_PROBE_MAX  120
+
 void stream_decode_open(stream_chan_t *c, int win)
 {
     if (!c || win < 0 || c->vdec) return;         /* 已在解码则不重复开 */
@@ -326,7 +329,23 @@ void stream_decode_open(stream_chan_t *c, int win)
     if (!p->connected || p->codec < 0) return;    /* 该路还没连上/codec 未定 → 等连上再开 */
     c->decode_denied = 0;
     mhal_codec_t mc = (p->codec == RSDK_CODEC_H265) ? MHAL_CODEC_H265 : MHAL_CODEC_H264;
-    int w, h, fps; resolve_dim(&c->cfg, c->decode_stream, &w, &h, &fps);
+    /* ★ 分辨率保护:开解码器/vout 必须用**真实**编码尺寸(SPS 回填的 p->enc_w/h),绝不猜 720p/8K。
+     *   · 真实值已知 → 精确开(按设备实际分辨率分配解码);
+     *   · 未知且在宽限期内 → 不开,交回 decode_dirty,待 SPS 到达下帧重试(避免用错尺寸);
+     *   · 超宽限(相机始终不给可解析 SPS)→ 退安全 4K(非 8K),保证仍能出图(录像不受影响)。 */
+    int w = p->enc_w, h = p->enc_h, fps;
+    if (w <= 0 || h <= 0) {
+        if (p->enc_probe_frames < STREAM_ENC_PROBE_MAX) {
+            c->decode_dirty = 1;                  /* 再等 SPS;下帧由 puller 重试开 */
+            return;
+        }
+        w = 3840; h = 2160;                       /* 兜底:绝不 8K,vout 必可开 */
+        NVR_LOGW("stream", "chn%d[%s] %u 帧未解析出 SPS 分辨率 → 退安全 4K 出图(录像不受影响)",
+                 c->cfg.chn, c->decode_stream == NVR_STREAM_SUB ? "子" : "主", p->enc_probe_frames);
+    }
+    /* ★ fps 也要真实:解码能力(预算/节拍)按 分辨率×帧率 开。cfg.fps 未配 → 用实测 fps_est,
+     * 再兜底 20。之前只兜 20 → 高帧率子流(如 30fps)被按 20fps 开 → 供帧超解码节拍 → FIFO 堵、一直追帧。 */
+    fps = c->cfg.fps > 0 ? c->cfg.fps : (p->fps_est > 0 ? p->fps_est : 20);
     int rc = mhal_vdec_open(c->cfg.chn, mc, w, h, fps, win, &c->vdec);
     if (rc == MHAL_VDEC_EBUDGET) {
         c->vdec = NULL; c->decode_denied = 1;
@@ -338,6 +357,9 @@ void stream_decode_open(stream_chan_t *c, int win)
     c->bootstrap_pending = 0;
     stream_live_q_flush(&c->live_q);
     c->live_state = c->vdec ? STREAM_LIVE_WAIT_IDR : STREAM_LIVE_IDLE;
+    /* 记下本解码器实际所用码流/绑定格:后续「指定窗口播放」若只是挪窗且码流不变 → 挪窗不重开。 */
+    c->vdec_stream = c->vdec ? c->decode_stream : -1;
+    c->vdec_win    = c->vdec ? win : -1;
     c->live_gen = p->conn_gen;
     /* 解码重开也清本路 RTP/frame_num 连续态,避免拿关窗前的 seq/fn 误判缺口 */
     p->rtp_seq_valid = 0;
@@ -403,6 +425,12 @@ static void stream_live_inject_bootstrap(stream_chan_t *c)
         NVR_LOGI("live", "chn%d RESYNC 注入 bootstrap IDR len=%d", c->cfg.chn, p->kf_len);
 }
 
+/* ★ 实时(SYNCED)送流的**非阻塞**等待与"跟不上"判定阈值:
+ *   SEND_WAIT_MS 小 → FIFO 满立即返回(不 200ms 硬等,免把积压推给网络缓冲累积时延);
+ *   连续 BUSY_MAX 次送不进(FIFO 持续满)→ 判定解码器跟不上,丢帧 RESYNC 追最新关键帧,限住时延。 */
+#define STREAM_LIVE_SEND_WAIT_MS  5
+#define STREAM_LIVE_BUSY_MAX      3
+
 static void stream_live_enter_resync(stream_chan_t *c, const char *why)
 {
     if (!c) return;
@@ -410,6 +438,7 @@ static void stream_live_enter_resync(stream_chan_t *c, const char *why)
     if (c->live_state != STREAM_LIVE_RESYNC)
         NVR_LOGW("live", "chn%d %s → RESYNC", c->cfg.chn, why ? why : "disc");
     c->live_state = STREAM_LIVE_RESYNC;
+    c->live_busy_cnt = 0;
     stream_live_q_flush(&c->live_q);
     stream_live_inject_bootstrap(c);
 }
@@ -432,13 +461,25 @@ static void stream_live_drain(stream_chan_t *c)
             continue;
         }
         if (c->live_state == STREAM_LIVE_SYNCED) {
-            if (mhal_vdec_send(c->vdec, s->data, s->len, s->ts) != 0) {
-                stream_live_enter_resync(c, "vdec_send_fail");
-                break;
+            /* ★ 限时延实时送:**非阻塞**(等 FIFO 极短)。
+             *   跟得上 → 送入,清 busy 计数;
+             *   FIFO 满(EBUSY)→ 本轮停送、留帧下帧重试;连续满超阈 → 判定解码器跟不上,
+             *     丢帧 + RESYNC 追**最新关键帧**(时延不再累积,不把积压压给网络缓冲);
+             *   硬错误 → 直接 RESYNC。 */
+            int sr = mhal_vdec_send_ex(c->vdec, s->data, s->len, s->ts, STREAM_LIVE_SEND_WAIT_MS);
+            if (sr == 0) {
+                c->live_busy_cnt = 0;
+                if (c->fed_since_open < 1000000) c->fed_since_open++;
+                stream_live_q_pop(&c->live_q);
+                continue;
             }
-            if (c->fed_since_open < 1000000) c->fed_since_open++;
-            stream_live_q_pop(&c->live_q);
-            continue;
+            if (sr == MHAL_VDEC_EBUSY) {
+                if (++c->live_busy_cnt >= STREAM_LIVE_BUSY_MAX)
+                    stream_live_enter_resync(c, "解码器跟不上(限时延丢帧追帧)");
+                break;   /* FIFO 满:留帧待下帧(给 FIFO 腾空);超阈已转 RESYNC */
+            }
+            stream_live_enter_resync(c, "vdec_send_fail");
+            break;
         }
         /* IDLE:不应入队 */
         stream_live_q_pop(&c->live_q);
@@ -493,12 +534,54 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
     if (!p || !p->owner || !data || len <= 0) return;
     stream_chan_t *c = p->owner;
 
+    /* ★ 真实编码分辨率回填(每路独立):从 SPS 解析(含裁剪窗)。只在未知时试解析,得到后不再扫。
+     * 供 stream_decode_open **精确**开解码器/vout(而非猜 720p/8K 默认 → 开错尺寸解不动)。主路
+     * 解析成功同时回填 c->cfg.enc(供回放/resolve_dim 用真实主码流分辨率)。 */
+    if (p->enc_w <= 0 || p->enc_h <= 0) {
+        int sw = 0, sh = 0;
+        if (nal_sps_dims(data, len, p->codec, &sw, &sh) &&
+            sw >= 160 && sw <= 8192 && sh >= 120 && sh <= 8192) {
+            p->enc_w = sw; p->enc_h = sh;
+            if (p->stream == NVR_STREAM_MAIN) { c->cfg.enc_w = sw; c->cfg.enc_h = sh; }
+            NVR_LOGI("stream", "chn%d[%s] SPS 实际分辨率 %dx%d(回填,供精确开解码)",
+                     c->cfg.chn, p->stream == NVR_STREAM_SUB ? "子" : "主", sw, sh);
+        } else {
+            p->enc_probe_frames++;
+        }
+    }
+
     /* ★ 兑现待处理的解码状态变更(show_win/decode_stream 变了)。只在**喂解码器那一路**的 puller
      * 线程里 open/close 解码器 → 与本函数下方 mhal_vdec_send 同线程,彻底消除跨线程 use-after-free。 */
     if (c->decode_dirty && p->stream == c->decode_stream) {
         c->decode_dirty = 0;
-        if (c->vdec) stream_decode_close(c);
-        if (c->show_win >= 0) stream_decode_open(c, c->show_win);
+        int win = c->show_win;
+        int force = c->vout_rebind; c->vout_rebind = 0;   /* 强制重开(自由窗切回宫格:HAL 已 unbind 且路径已被上次 commit stop_list 摘除) */
+        if (win < 0) {
+            /* 隐藏该通道:关解码(仍继续拉流+录像) */
+            if (c->vdec) stream_decode_close(c);
+        } else if (!force && c->vdec && c->vdec_stream == c->decode_stream) {
+            /* ★「指定窗口播放」同码流仅换格:只重绑窗口矩形(hd_videoout IN_WIN_ATTR),**不** teardown+
+             * 重开 dec/proc/vout。根除每次换窗都 hd_videoout_open 造成的 ALREADY_OPEN(-25)/VPD/clrwin
+             * 整屏抖动(重则 clrwin_0 卡死整机)。仅当**路径仍在 start_list**(挪窗,vout_win 全程>=0)才走此轻量路。 */
+            if (c->vdec_win != win) {
+                if (mhal_vout_bind(win, c->cfg.chn) == 0) {
+                    c->vdec_win = win;
+                    NVR_LOGI("stream", "chn%d ⇄换格 → 格%d(同码流,不重开解码器)", c->cfg.chn, win);
+                } else {
+                    NVR_LOGW("stream", "chn%d 换格 rebind 失败 → 退回完整重开", c->cfg.chn);
+                    stream_decode_close(c);
+                    stream_decode_open(c, win);
+                }
+            }
+        } else {
+            /* 码流/分辨率变(主↔子切换)、尚未解码,或 force:完整关旧 + 按新码流开新。
+             * ★ force 必须走完整重开(而非轻量挪窗):自由窗切回宫格时,HAL 已被 unbind(vout_win=-1)
+             *   且该路径已被 set_mode 收尾的 commit **stop_list 摘除** → 单发 mhal_vout_bind 只改
+             *   IN_WIN_ATTR、既不重启已停路径也不触发 commit → 窗口不进 start_list 仍黑。
+             *   stream_decode_close+open 会重登记 g_disp.ch[] 并 request_commit,让该路重进合成图。 */
+            if (c->vdec) stream_decode_close(c);
+            stream_decode_open(c, win);
+        }
     }
     if (p->stream == c->decode_stream) stream_try_bootstrap(c);
 
@@ -656,11 +739,18 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
         stream_pre_free_chan(c);
     }
 
-    if (tmp) free(tmp);
-
-    nvr_rtsp_live_feed(c->cfg.chn, p->stream, data, len, p->codec, nc.is_key, ts);
+    /* ★ 喂 tunnel RTSP(nvr_rtsp_live):关键帧喂**拼好的参数集+IDR**(sbuf,与本地秒开 p->kf 同源),
+     * 使其缓存含全套 VPS/SPS/PPS(SDP fmtp 可生成)+ APP 首帧拿到带参数集 IDR(秒开、可解);
+     * P 帧喂原始;参数集单独 NAL 不单喂(已随关键帧)。
+     * ⚠️ sbuf 可能指向 tmp,必须在 free(tmp) **之前**喂,否则 use-after-free。 */
+    if (nc.is_key && have_params)
+        nvr_rtsp_live_feed(c->cfg.chn, p->stream, sbuf, slen, p->codec, 1, ts);
+    else if (!nc.is_param)
+        nvr_rtsp_live_feed(c->cfg.chn, p->stream, data, len, p->codec, nc.is_key, ts);
     if (!nc.is_param)
         nvr_cloud_sync_feed(c->cfg.chn, p->stream, data, len, p->codec, nc.is_key, ts);
+
+    if (tmp) free(tmp);
 }
 
 void stream_route_audio(stream_pull_t *p, const uint8_t *data, int len, uint32_t ts)
