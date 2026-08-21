@@ -159,6 +159,11 @@ typedef struct stream_chan {
     unsigned         live_gen;      /* 已对齐的 pull conn_gen;不一致则 RESYNC */
     int              live_busy_cnt; /* SYNCED 连续送不进(解码器 FIFO 满)计数:超阈值判"跟不上"→
                                      * 丢帧追最新关键帧(限时延)。成功送入即清 0。 */
+    uint32_t         live_stall_since; /* 解码器"有帧但送不进"起始时刻(mono ms;0=未卡)。仅在**有数据却
+                                        * 持续送失败**时累计——网络无帧(队列空)不计,正常追帧一送成功即清 0。
+                                        * 超 STREAM_LIVE_STALL_MS 判定解码器卡死 → 置 live_rebuild 重建。 */
+    volatile int     live_rebuild;   /* 看门狗置1:解码器卡死(RESYNC 也救不回)→ 由 puller 在 decode_dirty 处
+                                        * 完整 close+reopen 重建路径。是追帧 RESYNC 之上的升级层,不影响正常追帧。 */
 } stream_chan_t;
 
 /* stream_mgr 完整定义(record worker 需遍历通道) */

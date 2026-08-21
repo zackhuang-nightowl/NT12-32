@@ -355,6 +355,7 @@ void stream_decode_open(stream_chan_t *c, int win)
     }
     c->fed_since_open = 0;
     c->bootstrap_pending = 0;
+    c->live_stall_since = 0;                  /* 新解码器起点:清卡死计时 */
     stream_live_q_flush(&c->live_q);
     c->live_state = c->vdec ? STREAM_LIVE_WAIT_IDR : STREAM_LIVE_IDLE;
     /* 记下本解码器实际所用码流/绑定格:后续「指定窗口播放」若只是挪窗且码流不变 → 挪窗不重开。 */
@@ -405,6 +406,7 @@ void stream_decode_close(stream_chan_t *c)
     mhal_vdec_t *v = c->vdec;
     c->vdec = NULL;
     c->bootstrap_pending = 0;
+    c->live_stall_since = 0;
     c->live_state = STREAM_LIVE_IDLE;
     stream_live_q_flush(&c->live_q);
     mhal_vdec_close(v);
@@ -430,6 +432,26 @@ static void stream_live_inject_bootstrap(stream_chan_t *c)
  *   连续 BUSY_MAX 次送不进(FIFO 持续满)→ 判定解码器跟不上,丢帧 RESYNC 追最新关键帧,限住时延。 */
 #define STREAM_LIVE_SEND_WAIT_MS  5
 #define STREAM_LIVE_BUSY_MAX      3
+/* ★ 解码器卡死看门狗:有帧可送却持续送不进(RESYNC 也回不到 SYNCED)达此时长 → 判定解码器 wedge
+ * (如批量开后 scan-first-header / invalid path),完整 close+reopen 重建。是追帧 RESYNC 之上的升级层:
+ *  正常追帧(瞬时 EBUSY→RESYNC→很快重 SYNCED)一送成功即清零、绝不触发;网络无帧(队列空)不计时。 */
+#define STREAM_LIVE_STALL_MS      4000
+
+/* 记录一次"有帧却送失败":首次失败起表;持续超 STALL_MS 未成功 → 请求重建解码器。返回 1=已请求重建。 */
+static int stream_live_note_stall(stream_chan_t *c)
+{
+    uint32_t now = stream_hub_mono_ms();
+    if (c->live_stall_since == 0) { c->live_stall_since = now; return 0; }
+    if ((uint32_t)(now - c->live_stall_since) > STREAM_LIVE_STALL_MS) {
+        c->live_stall_since = 0;
+        c->live_rebuild = 1;      /* 交由 puller 在 decode_dirty 处完整 close+reopen */
+        c->decode_dirty = 1;
+        NVR_LOGW("live", "chn%d 解码器 %ums 有帧却送不进(疑 wedge)→ 重建解码器",
+                 c->cfg.chn, (unsigned)STREAM_LIVE_STALL_MS);
+        return 1;
+    }
+    return 0;
+}
 
 static void stream_live_enter_resync(stream_chan_t *c, const char *why)
 {
@@ -453,7 +475,11 @@ static void stream_live_drain(stream_chan_t *c)
 
         if (c->live_state == STREAM_LIVE_WAIT_IDR || c->live_state == STREAM_LIVE_RESYNC) {
             if (!s->is_key) { stream_live_q_pop(&c->live_q); continue; }
-            if (mhal_vdec_send(c->vdec, s->data, s->len, s->ts) != 0) break;
+            if (mhal_vdec_send(c->vdec, s->data, s->len, s->ts) != 0) {
+                if (stream_live_note_stall(c)) return;   /* 起播关键帧长时间送不进 → 重建 */
+                break;
+            }
+            c->live_stall_since = 0;                      /* 送进即恢复 */
             c->live_state = STREAM_LIVE_SYNCED;
             if (c->fed_since_open < 1000000) c->fed_since_open++;
             NVR_LOGI("live", "chn%d 完整关键 AU 起播 → SYNCED (len=%u)", c->cfg.chn, (unsigned)s->len);
@@ -469,15 +495,18 @@ static void stream_live_drain(stream_chan_t *c)
             int sr = mhal_vdec_send_ex(c->vdec, s->data, s->len, s->ts, STREAM_LIVE_SEND_WAIT_MS);
             if (sr == 0) {
                 c->live_busy_cnt = 0;
+                c->live_stall_since = 0;               /* 送进即恢复,清卡死计时(正常追帧不触发重建) */
                 if (c->fed_since_open < 1000000) c->fed_since_open++;
                 stream_live_q_pop(&c->live_q);
                 continue;
             }
             if (sr == MHAL_VDEC_EBUSY) {
+                if (stream_live_note_stall(c)) return;  /* FIFO 持续满达 STALL_MS(RESYNC 也没救回)→ 重建 */
                 if (++c->live_busy_cnt >= STREAM_LIVE_BUSY_MAX)
                     stream_live_enter_resync(c, "解码器跟不上(限时延丢帧追帧)");
                 break;   /* FIFO 满:留帧待下帧(给 FIFO 腾空);超阈已转 RESYNC */
             }
+            if (stream_live_note_stall(c)) return;      /* 硬错误(如 invalid path)持续 → 重建 */
             stream_live_enter_resync(c, "vdec_send_fail");
             break;
         }
@@ -556,10 +585,11 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
         c->decode_dirty = 0;
         int win = c->show_win;
         int force = c->vout_rebind; c->vout_rebind = 0;   /* 强制重开(自由窗切回宫格:HAL 已 unbind 且路径已被上次 commit stop_list 摘除) */
+        int rebuild = c->live_rebuild; c->live_rebuild = 0; /* 看门狗判解码器 wedge:强制完整重建 */
         if (win < 0) {
             /* 隐藏该通道:关解码(仍继续拉流+录像) */
             if (c->vdec) stream_decode_close(c);
-        } else if (!force && c->vdec && c->vdec_stream == c->decode_stream) {
+        } else if (!force && !rebuild && c->vdec && c->vdec_stream == c->decode_stream) {
             /* ★「指定窗口播放」同码流仅换格:只重绑窗口矩形(hd_videoout IN_WIN_ATTR),**不** teardown+
              * 重开 dec/proc/vout。根除每次换窗都 hd_videoout_open 造成的 ALREADY_OPEN(-25)/VPD/clrwin
              * 整屏抖动(重则 clrwin_0 卡死整机)。仅当**路径仍在 start_list**(挪窗,vout_win 全程>=0)才走此轻量路。 */
@@ -574,11 +604,13 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
                 }
             }
         } else {
-            /* 码流/分辨率变(主↔子切换)、尚未解码,或 force:完整关旧 + 按新码流开新。
+            /* 码流/分辨率变(主↔子切换)、尚未解码、force,或 rebuild:完整关旧 + 按新码流开新。
              * ★ force 必须走完整重开(而非轻量挪窗):自由窗切回宫格时,HAL 已被 unbind(vout_win=-1)
              *   且该路径已被 set_mode 收尾的 commit **stop_list 摘除** → 单发 mhal_vout_bind 只改
              *   IN_WIN_ATTR、既不重启已停路径也不触发 commit → 窗口不进 start_list 仍黑。
-             *   stream_decode_close+open 会重登记 g_disp.ch[] 并 request_commit,让该路重进合成图。 */
+             *   stream_decode_close+open 会重登记 g_disp.ch[] 并 request_commit,让该路重进合成图。
+             * ★ rebuild(看门狗):解码器 wedge(scan-first-header / invalid path,RESYNC 也救不回)→
+             *   同样必须完整重建路径,而非再往坏解码器喂 bootstrap。 */
             if (c->vdec) stream_decode_close(c);
             stream_decode_open(c, win);
         }
