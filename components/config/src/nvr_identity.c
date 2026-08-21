@@ -203,6 +203,20 @@ int nvr_identity_get_tutk_creds(char *iotckey, size_t kc, char *avkey, size_t ac
     return 0;
 }
 
+int nvr_identity_get_av_account(char *out, size_t cap)
+{
+    const char *acct = NVR_IDENTITY_DEF_AVACCOUNT;
+    cJSON *j = read_tutkdata();
+    if (j) {
+        cJSON *v = cJSON_GetObjectItem(j, "AvAccount");
+        if (v && cJSON_IsString(v) && v->valuestring[0]) acct = v->valuestring;
+    }
+    int n = (int)strlen(acct);
+    if (out && cap) snprintf(out, cap, "%s", acct);
+    if (j) cJSON_Delete(j);
+    return n;
+}
+
 void nvr_identity_ensure_provisioned(void)
 {
     char sn[64], mac[24], uid[64], model[64];
@@ -238,8 +252,9 @@ int nvr_identity_set_tutk_creds(const char *iotckey, const char *avkey)
     if (!iotckey && !avkey) return -1;
 
     /* 读旧值以保留未改字段(任一入参为 NULL 则不改) */
-    char cur_ik[64], cur_av[64];
+    char cur_ik[64], cur_av[64], cur_acct[64];
     nvr_identity_get_tutk_creds(cur_ik, sizeof(cur_ik), cur_av, sizeof(cur_av));
+    nvr_identity_get_av_account(cur_acct, sizeof(cur_acct));   /* 保留 AvAccount,重写时不丢 */
     const char *ik = iotckey ? iotckey : cur_ik;
     const char *av = avkey   ? avkey   : cur_av;
 
@@ -250,6 +265,7 @@ int nvr_identity_set_tutk_creds(const char *iotckey, const char *avkey)
     if (!j) return -1;
     cJSON_AddStringToObject(j, "IotcAuthKey", ik);
     cJSON_AddStringToObject(j, "AvPassword", av);
+    cJSON_AddStringToObject(j, "AvAccount", cur_acct);
     char *txt = cJSON_PrintUnformatted(j);
     cJSON_Delete(j);
     if (!txt) return -1;

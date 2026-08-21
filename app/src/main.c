@@ -13,6 +13,11 @@ int main(int argc, char **argv)
 {
     const char *cfg_dir = (argc > 1) ? argv[1] : "config";
 
+    /* ★ 必须忽略 SIGPIPE:作为 8089 HTTP 服务端,向"对端已关闭"的 socket 写响应会收到 SIGPIPE,
+     * 默认动作是终止进程(rc=141=128+13)。真机现象:向导页"检查版本更新"走 HTTPS(SSL 慢/失败重试),
+     * GUI 客户端超时先关连接,server 再写响应 → SIGPIPE → nvr_app 崩 → 看门狗连带重启 GUI。
+     * SIG_IGN 后写失败改为返回 EPIPE(由各 write 调用方处理),进程不再被打死。 */
+    signal(SIGPIPE, SIG_IGN);
     signal(SIGINT,  on_signal);
     signal(SIGTERM, on_signal);
 

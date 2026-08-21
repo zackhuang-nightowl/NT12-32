@@ -82,8 +82,15 @@ int nvr_chan_persist_get_mapping(nvr_chan_persist_t *p, int *out, int cap){
 
 int nvr_chan_persist_set_mapping(nvr_chan_persist_t *p, const int *map, int n){
     if(!p||!map) return -1;
+    /* ★ 落库即去重:同一通道全表只允许出现一次(硬解单实例,重复→重复绑窗→clrwin_0 卡死整机)。
+     * 重复项写 0(空格),保证持久化映射表永远唯一,避免坏表(如 [..7,7,9..])再次落盘。 */
     cJSON *arr=cJSON_CreateArray();
-    for(int i=0;i<n;i++) cJSON_AddItemToArray(arr,cJSON_CreateNumber(map[i]));
+    char seen[NVR_PERSIST_MAX_CH+1]; memset(seen,0,sizeof(seen));
+    for(int i=0;i<n;i++){
+        int v=map[i];
+        if(v>=1 && v<=NVR_PERSIST_MAX_CH && !seen[v]){ seen[v]=1; cJSON_AddItemToArray(arr,cJSON_CreateNumber(v)); }
+        else cJSON_AddItemToArray(arr,cJSON_CreateNumber(0));   /* 重复/越界 → 空格 */
+    }
     cJSON_DeleteItemFromObject(p->root,"channelMapping");
     cJSON_AddItemToObject(p->root,"channelMapping",arr);
     return atomic_save(p);

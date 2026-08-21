@@ -28,6 +28,7 @@ extern "C" {
 /* 数据分区缺省值(文件缺失/为空时回退),对齐 NOP 平台默认凭据。 */
 #define NVR_IDENTITY_DEF_IOTCKEY "00000000"   /* 出厂默认 IotcAuthKey(APP_client_Agent.md) */
 #define NVR_IDENTITY_DEF_AVKEY   "888888"
+#define NVR_IDENTITY_DEF_AVACCOUNT "admin"    /* 出厂默认 AvAccount(AV 登录账户) */
 #define NVR_IDENTITY_DEF_MODEL   "NOP12-32"   /* 机型缺省(/User/OWLModel 缺失时回退) */
 
 /* ---------- 恒定身份(只读,跟随物理设备) ----------
@@ -53,6 +54,8 @@ int nvr_identity_set_model(const char *model);
 int nvr_identity_get_tutk_creds(char *iotckey, size_t kc, char *avkey, size_t ac);
 /* iotckey/avkey 任一可传 NULL 表示保持文件内该字段不变(仅改另一个)。 */
 int nvr_identity_set_tutk_creds(const char *iotckey, const char *avkey);
+/* AvAccount(AV 登录账户)← tutkdata.json:"AvAccount",缺省 "admin"。与 iotc/av 同源、全由 json 控。 */
+int nvr_identity_get_av_account(char *out, size_t cap);
 
 /* 供 set_* 后使 SN/MAC 进程内缓存失效(通常无需;SN/MAC 恒定不写)。 */
 void nvr_identity_cache_invalidate(void);

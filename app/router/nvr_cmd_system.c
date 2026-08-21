@@ -233,6 +233,18 @@ char *cmd_X_NightOwl_setOwner(cJSON *a, const nvr_cmd_ctx_t *c)
     if (stoken[0]) snprintf(ow.stoken, sizeof(ow.stoken), "%s", stoken);
     nvr_settings_owner_set(c->settings, &ow);
 
+    /* ★ setOwner = APP/tutkagent 绑定路径(addDevice 由 APP 做,NVR 不实现;NVR 只记录
+     * owner_id/username/stoken)。绑定到 NOP 账户后**删除本地 Admin 组/全部本地用户**
+     * (与 GUI login_aws 绑定路径一致:本地 Admin 让位给 NOP 账户)。仅在有 owner_id 时删,
+     * 避免空 setOwner 误删。 */
+    if (owner_id[0] && c->settings) {
+        nvr_user_row_t list[NVR_USER_MAX];
+        int n = nvr_settings_user_list(c->settings, list, NVR_USER_MAX);
+        for (int i = 0; i < n; i++)
+            (void)nvr_settings_user_delete(c->settings, list[i].username);
+        if (n > 0) NVR_LOGI("router", "setOwner: 绑定 NOP(%s) → 清本地用户 %d 个", owner_id, n);
+    }
+
     /* 文档：setOwner 带 ownerId 触发 BLEKey 更新；回包带 BLEKey；下一连接才用新 key 加密 */
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "func", "X_NightOwl_setOwner");
@@ -255,6 +267,12 @@ char *cmd_X_NightOwl_getOwner(cJSON *a, const nvr_cmd_ctx_t *c)
         cJSON_AddStringToObject(o, "owner_id", ow.owner_id);
         cJSON_AddStringToObject(o, "username", ow.username);
         cJSON_AddStringToObject(o, "stoken", ow.stoken);
+    }
+    /* BLEKey(NVR 蓝牙密码)← ble.key(nvr_settings.db);供 APP 重连取回蓝牙配对密码。仅非空时回。 */
+    {
+        char blekey[20] = "";
+        nvr_settings_get_str(c->settings, "ble.key", blekey, sizeof(blekey), "");
+        if (blekey[0]) cJSON_AddStringToObject(o, "BLEKey", blekey);
     }
     return nvr_resp_content(o);
 }
@@ -521,8 +539,10 @@ char *cmd_getAvPassword(cJSON *a, const nvr_cmd_ctx_t *c)
 char *cmd_getAvAccount(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     (void)a; (void)c;
+    char acct[64] = "";
+    nvr_identity_get_av_account(acct, sizeof(acct));    /* AvAccount ← /User/OWL/tutkdata.json(默认 admin) */
     cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "value", "admin");
+    cJSON_AddStringToObject(o, "value", acct[0] ? acct : "admin");
     return nvr_resp_content(o);
 }
 

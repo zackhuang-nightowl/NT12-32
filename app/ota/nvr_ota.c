@@ -512,8 +512,31 @@ static void curl_common(CURL *c)
 {
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+#if defined(NVR_BUILD_STAGE) && (NVR_BUILD_STAGE)
+    /* ★ stage(预发)云:证书链本机无 CA bundle 验不过(unable to get local issuer cert / unknown CA)
+     * → 预发环境关闭证书校验,保证 OTA/云查询能连通。生产(prod)仍全量校验。 */
+    curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
+#else
     curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 2L);
+#endif
+}
+
+/* ★ curl 调试回调:把**发出的请求行/请求头**(HEADER_OUT)与 TLS 握手信息(TEXT)打进 NVR 日志,
+ * 供排查"检查版本更新"的请求问题(URL、Host、TLS/证书链失败原因)。按行去尾换行、截断防刷屏。 */
+static int ota_curl_debug(CURL *h, curl_infotype type, char *data, size_t size, void *ud)
+{
+    (void)h; (void)ud;
+    const char *tag = (type == CURLINFO_HEADER_OUT) ? "→请求头" :
+                      (type == CURLINFO_TEXT)       ? "·TLS/连接" : NULL;
+    if (!tag || !data || !size) return 0;
+    char line[512];
+    size_t n = size < sizeof(line) - 1 ? size : sizeof(line) - 1;
+    memcpy(line, data, n); line[n] = 0;
+    while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
+    if (n) NVR_LOGI("ota", "curl %s: %s", tag, line);
+    return 0;
 }
 
 int nvr_ota_build_check_url(char *out, size_t cap,
@@ -546,17 +569,25 @@ int nvr_ota_query(const char *url, nvr_ota_meta_t *out)
     curl_easy_setopt(c, CURLOPT_WRITEDATA, &m);
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 10L);
     curl_easy_setopt(c, CURLOPT_TIMEOUT, 20L);
+    /* ★ 打印查询请求(请求行/头 + TLS 握手)供排查请求问题 */
+    curl_easy_setopt(c, CURLOPT_VERBOSE, 1L);
+    curl_easy_setopt(c, CURLOPT_DEBUGFUNCTION, ota_curl_debug);
     curl_common(c);
+    NVR_LOGI("ota", "查询请求 GET %s (verifypeer=1 verifyhost=2)", url);
     rc = curl_easy_perform(c);
     curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http);
-    curl_easy_cleanup(c);
     if (rc != CURLE_OK) {
-        NVR_LOGW("ota", "查询失败 %s curl=%s", url, curl_easy_strerror(rc));
+        long ssl_rc = 0;
+        curl_easy_getinfo(c, CURLINFO_SSL_VERIFYRESULT, &ssl_rc);
+        NVR_LOGW("ota", "查询失败 %s curl=%s (rc=%d ssl_verify=%ld http=%ld)",
+                 url, curl_easy_strerror(rc), (int)rc, ssl_rc, http);
+        curl_easy_cleanup(c);
         free(m.buf);
         return -1;
     }
+    curl_easy_cleanup(c);
     if (http != 200 || !m.buf) {
-        NVR_LOGW("ota", "查询 HTTP %ld %s", http, url);
+        NVR_LOGW("ota", "查询 HTTP %ld %s 响应=%.200s", http, url, m.buf ? m.buf : "(空)");
         free(m.buf);
         return -2;
     }
@@ -609,6 +640,8 @@ int nvr_ota_http_download(const char *url, const char *dst,
     if (c) {
         long http = 0;
         curl_easy_setopt(c, CURLOPT_URL, url);
+        /* NVR←云端固件下载 = https 文件下载(GET,见 OTA_standalone doc "通过 url 下载固件");
+         * POST 是另一段 NVR→相机 upload.cgi multipart 推送(见 OTA_slaveMode),不在此处。 */
         curl_easy_setopt(c, CURLOPT_WRITEDATA, f);
         curl_easy_setopt(c, CURLOPT_TIMEOUT, 600L);
         curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
