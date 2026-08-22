@@ -4,7 +4,8 @@
  ***************************************************************************************/
 #include "nvr_record_sched.h"
 #include "nvr_record_policy.h"
-#include "rsdk_cloud.h"   /* 云存上传跟踪(当前 no-op 桩;新 rsdk.h 不再伞含它) */
+#include "nvr_defaults.h"   /* 出厂默认(NVR_DEF_POST_RECORD_S 等) */
+#include "rsdk_cloud.h"   /* 云存工作队列(meta.db,可丢) */
 #include "nvr_log.h"
 
 #include <stdio.h>
@@ -36,7 +37,7 @@ int nvr_rec_sched_init(const nvr_rec_sched_cfg_t *cfg, nvr_rec_sched_t **out)
     nvr_rec_sched_t *r = calloc(1, sizeof(*r));
     if (!r) return -1;
     r->cfg = *cfg;
-    if (r->cfg.post_record_s <= 0) r->cfg.post_record_s = 10;
+    if (r->cfg.post_record_s <= 0) r->cfg.post_record_s = NVR_DEF_POST_RECORD_S;
     *out = r;
     return 0;
 }

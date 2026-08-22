@@ -177,9 +177,9 @@ static void evt_sink(void *sink_ctx, const nop_event_t *ev)
             ? nvr_settings_record_post_s_get(h->cfg.settings, chn) : -1;
         int pre_s  = h->cfg.settings
             ? nvr_settings_record_pre_s_get(h->cfg.settings, chn) : -1;
-        if (post_s < 0 || pre_s < 0) {
-            NVR_LOGW("event", "ch%d post/pre_s missing in DB, skip event record", chn);
-        } else {
+        if (post_s < 0) post_s = NVR_DEF_POST_RECORD_S;   /* 设置库缺省 → 出厂默认(nvr_defaults.h) */
+        if (pre_s  < 0) pre_s  = NVR_DEF_PRE_RECORD_S;
+        {
         uint32_t start = (pre_s > 0 && ts > (uint32_t)pre_s) ? (ts - (uint32_t)pre_s) : ts;
         eid = nvr_rec_trigger_event(h->cfg.rs, chn, rectype, start, post_s);
         /* ★ 事件录像落盘:连续轨打标,或仅事件待命时开片段(预录 flush + 后录)。

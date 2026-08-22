@@ -558,7 +558,7 @@ static void maybe_start_uploader(nvr_app_t *a, const char *config_dir)
     nvr_cloud_uploader_cfg_t uc = {
         .group = a->group, .meta = a->meta, .settings = a->settings, .udid = udid, .stoken = ow.stoken,
         .stage = nvr_settings_get_int(a->settings, "cloud.stage", 0),
-        .worker_count = 2, .poll_interval_s = 5, .slice_ms = 15000,
+        .worker_count = 2, .poll_interval_s = NVR_DEF_CLOUD_POLL_S, .slice_ms = NVR_DEF_CLOUD_SLICE_MS,
     };
     if (nvr_cloud_uploader_start(&uc, &a->up) == 0) {
         nvr_cloud_uploader_set_switch(a->up, nvr_settings_get_int(a->settings, "cloud.switch", 0));
