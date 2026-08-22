@@ -8,7 +8,9 @@
 #include "uploader_internal.h"
 #include "http_vsaas.h"
 #include "ts_mux.h"
-#include "rsdk_cloud.h"   /* 云存上传跟踪(当前 no-op 桩;新 rsdk.h 不再伞含它) */
+#include "rsdk_cloud.h"   /* 云存工作队列(meta.db,可丢) */
+#include "rsdk_evtidx.h"  /* 云存态盘上权威=事件索引槽(查询源/可扫盘重建) */
+#include "rsdk_balance.h" /* rsdk_group_count/dev */
 #include "nvr_log.h"
 
 #include <pthread.h>
@@ -42,23 +44,40 @@ static const char *rectype_tag(uint32_t rectype)
     }
 }
 
-/* 处理一个待传事件：返回 0 成功(DONE)，<0 失败(FAILED)，-1000=强制关 */
+/* 置云存态:写工作队列(meta.db,可丢)+ 镜像到事件索引槽(盘上权威/查询源/可重建)。 */
+static void cloud_set(nvr_cloud_uploader_t *up, uint64_t eid, int state, int32_t err)
+{
+#if RSDK_CFG_METADATA
+    rsdk_cloud_set_state(up->cfg.meta, eid, (rsdk_cloud_state_t)state, err);
+    if (up->cfg.group) {
+        uint32_t now = (uint32_t)time(NULL);
+        for (int di = 0; di < rsdk_group_count(up->cfg.group); di++) {
+            rsdk_dev_t *d = rsdk_group_dev(up->cfg.group, di);
+            if (d && rsdk_evtidx_patch_state(d, eid, state, err, now) == RSDK_OK) break;
+        }
+    }
+#else
+    (void)up; (void)eid; (void)state; (void)err;
+#endif
+}
+
+/* 处理一个待传事件：返回 0 成功(DONE)，<0 失败(RETRY)，-1000=强制关 */
 static int process_event(nvr_cloud_uploader_t *up, const rsdk_cloud_event_t *ev, const char *stoken)
 {
 #if RSDK_CFG_METADATA
-    rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_UPLOADING, 0);
+    cloud_set(up, ev->event_id, RSDK_CLOUD_UPLOADING, 0);
 
     int rec_stream = 1;
     if (!up->cfg.settings ||
         !nvr_cloud_ch_upload_stream(up->cfg.settings, ev->chn, rectype_tag(ev->rectype), &rec_stream)) {
         NVR_LOGI("cloud", "ch%d 事件跳过上传(云存未开/未启用/trigger/stream)", ev->chn);
-        rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_RETRY, -10);
+        cloud_set(up, ev->event_id, RSDK_CLOUD_RETRY, -10);
         return -1;
     }
 
     if (up->cfg.group && !nvr_cloud_async_upload_allowed(up->cfg.settings, ev->starttime)) {
         NVR_LOGI("cloud", "ch%d 事件跳过(早于 async_upload_since) start=%u", ev->chn, ev->starttime);
-        rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_NONE, 0);
+        cloud_set(up, ev->event_id, RSDK_CLOUD_NONE, 0);
         return -1;
     }
 
@@ -68,11 +87,11 @@ static int process_event(nvr_cloud_uploader_t *up, const rsdk_cloud_event_t *ev,
     rsdk_index_slot_t segs[64];
     int nseg = rsdk_group_query_stream(up->cfg.group, t0, t1, ev->chn,
                                        RSDK_REC_CONTINUOUS, rec_stream, segs, 64);
-    if (nseg <= 0) { rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_RETRY, -1); return -1; }
+    if (nseg <= 0) { cloud_set(up, ev->event_id, RSDK_CLOUD_RETRY, -1); return -1; }
 
     rsdk_group_player_t *pl = NULL;
     if (rsdk_group_play_open(up->cfg.group, segs, nseg, &pl) != RSDK_OK || !pl) {
-        rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_RETRY, -2); return -1;
+        cloud_set(up, ev->event_id, RSDK_CLOUD_RETRY, -2); return -1;
     }
 
     /* 2) 多通道 starttime 埋通道 + tags */
@@ -89,17 +108,17 @@ static int process_event(nvr_cloud_uploader_t *up, const rsdk_cloud_event_t *ev,
                       event_id_code(ev->rectype), tags, &vu) != 0) {
         NVR_LOGW("cloud", "ch%d GET url 失败(网络?)", ev->chn);
         rsdk_group_play_close(pl);
-        rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_RETRY, -3); return -1;
+        cloud_set(up, ev->event_id, RSDK_CLOUD_RETRY, -3); return -1;
     }
     if (vu.err_code == -1002 || vu.err_code == -1003 || vu.err_code == -1004) {
         NVR_LOGE("cloud", "服务器拒绝 code=%d(设备/绑定/合约无效) → 关云存", vu.err_code);
         rsdk_group_play_close(pl);
-        rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_RETRY, vu.err_code);
+        cloud_set(up, ev->event_id, RSDK_CLOUD_RETRY, vu.err_code);
         return -1000;   /* 上层 force_off */
     }
     if (!vu.http_ok) {
         rsdk_group_play_close(pl);
-        rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_RETRY, -4); return -1;
+        cloud_set(up, ev->event_id, RSDK_CLOUD_RETRY, -4); return -1;
     }
 
     /* 4) 读帧 → TS 分片 → POST（按 slice_ms 切片；末片 event_end=1） */
@@ -143,10 +162,10 @@ static int process_event(nvr_cloud_uploader_t *up, const rsdk_cloud_event_t *ev,
 
     if (rc_all == 0) {
         NVR_LOGI("cloud", "ch%d 上传完成 (%d 切片)", ev->chn, slice_idx);
-        rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_DONE, 0); return 0;
+        cloud_set(up, ev->event_id, RSDK_CLOUD_DONE, 0); return 0;
     }
     NVR_LOGW("cloud", "ch%d 上传失败(切片 POST)", ev->chn);
-    rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_RETRY, -5);
+    cloud_set(up, ev->event_id, RSDK_CLOUD_RETRY, -5);
     return -1;
 #else
     (void)up; (void)ev; (void)stoken; return -1;
@@ -177,6 +196,33 @@ static void *worker_main(void *arg)
                         nvr_cloud_uploader_force_off(up, pend[i].last_err);
                         break;
                     }
+                }
+                /* 二次:从事件索引槽(盘上权威)补捞 PENDING/RETRY,覆盖 meta.db 丢失+扫盘重建后的事件
+                 * (重建把"上传中"→"待重试")。按 event_id 去重,已在上面处理过的跳过。 */
+                rsdk_evt_slot_t *ss = (rsdk_evt_slot_t *)calloc(256, sizeof(rsdk_evt_slot_t));
+                if (ss) {
+                    for (int di = 0; di < rsdk_group_count(up->cfg.group) && up->running; di++) {
+                        rsdk_dev_t *d = rsdk_group_dev(up->cfg.group, di);
+                        if (!d) continue;
+                        int m = rsdk_evtidx_query(d, 0, 0xFFFFFFFFu, -1, -1, ss, 256);
+                        for (int i = 0; i < m && up->running; i++) {
+                            if (ss[i].state != RSDK_CLOUD_PENDING && ss[i].state != RSDK_CLOUD_RETRY) continue;
+                            int seen = 0;
+                            for (int k = 0; k < n; k++)
+                                if (pend[k].event_id == ss[i].event_id) { seen = 1; break; }
+                            if (seen) continue;
+                            rsdk_cloud_event_t ev; memset(&ev, 0, sizeof(ev));
+                            ev.event_id = ss[i].event_id; ev.chn = ss[i].chn;
+                            ev.rectype = ss[i].rectype; ev.starttime = ss[i].start_time;
+                            ev.state = ss[i].state;
+                            if (process_event(up, &ev, stoken) == -1000) {
+                                nvr_cloud_uploader_force_off(up, ev.last_err);
+                                di = rsdk_group_count(up->cfg.group);   /* 退出外层 */
+                                break;
+                            }
+                        }
+                    }
+                    free(ss);
                 }
             }
 #endif

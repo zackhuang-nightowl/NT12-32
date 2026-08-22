@@ -387,20 +387,22 @@ static int app_http_uri(void *ctx, int fd, const char *method, const char *uri)
         const char *e = strstr(q, "eid=");
         if (e) eid = strtoull(e + 4, NULL, 10);
     }
-    if (!eid || !a || !a->meta || !a->group) {
+    if (!eid || !a || !a->group) {
         nop_http_send_response(fd, 404, "Not Found", "text/plain", "not found", 9);
         return 1;
     }
-    rsdk_pic_ref_t r[1];
-    int n = rsdk_pic_list_event(a->meta, eid, RSDK_PIC_MAIN, r, 1);
-    if (n <= 0) n = rsdk_pic_list_event(a->meta, eid, -1, r, 1);
-    if (n <= 0) {
-        nop_http_send_response(fd, 404, "Not Found", "text/plain", "not found", 9);
-        return 1;
+    /* 截图指针来自事件索引槽(盘上权威),按 snap_off 直接读 blob,不经 meta.db;
+     * 读时校验 event_id(环覆盖后 snap_off 可能被新事件占用,不匹配当无图)。 */
+    void *jpeg = NULL; size_t jlen = 0; int got = 0;
+    for (int di = 0; di < rsdk_group_count(a->group) && !got; di++) {
+        rsdk_dev_t *d = rsdk_group_dev(a->group, di);
+        rsdk_evt_slot_t es;
+        if (d && rsdk_evtidx_get(d, eid, &es) == RSDK_OK
+            && (es.flags & RSDK_EVT_HAS_SNAP) && es.snap_off
+            && rsdk_pic_read_blob(d, es.snap_off, eid, &jpeg, &jlen) == RSDK_OK)
+            got = 1;
     }
-    rsdk_dev_t *d = rsdk_group_dev(a->group, (int)r[0].disk);
-    void *jpeg = NULL; size_t jlen = 0;
-    if (!d || rsdk_pic_read(d, a->meta, r[0].pic_id, &jpeg, &jlen) != RSDK_OK) {
+    if (!got) {
         nop_http_send_response(fd, 404, "Not Found", "text/plain", "not found", 9);
         return 1;
     }

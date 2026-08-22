@@ -191,11 +191,12 @@ static int pb_query_segs(nvr_playback_t *pb, int chn0, int want_stream,
 {
     rsdk_group_t *g = pb->cfg.group;
     if (end_wall <= start_wall) end_wall = start_wall + 24 * 3600;
+    /* rectype=-1:连续∪事件段都纳入时间轴(纯事件录像的段 rectype≠CONTINUOUS,否则会漏播) */
     int n = rsdk_group_query_stream(g, start_wall, end_wall, chn0,
-                                    RSDK_REC_CONTINUOUS, want_stream, segs, cap);
+                                    -1, want_stream, segs, cap);
     if (n <= 0 && want_stream == NVR_STREAM_SUB)
         n = rsdk_group_query_stream(g, start_wall, end_wall, chn0,
-                                    RSDK_REC_CONTINUOUS, -1, segs, cap);
+                                    -1, -1, segs, cap);
     return n;
 }
 

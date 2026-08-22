@@ -18,6 +18,7 @@
 #include "rsdk_meta.h"
 #include "rsdk_types.h"
 #include "rsdk_balance.h"
+#include "rsdk_evtidx.h"
 #include <time.h>
 #include <string.h>
 #include <stdlib.h>
@@ -126,6 +127,7 @@ typedef struct {
     int      rectype;
     uint32_t type_mask;
     uint64_t event_id;
+    int      has_snap;   /* 事件槽是否已有截图(决定是否给缩略图 URL) */
 } evt_rec_t;
 
 static int evt_cmp_desc(const void *a, const void *b)
@@ -136,49 +138,46 @@ static int evt_cmp_desc(const void *a, const void *b)
     return 0;
 }
 
-/* 从 meta DOC_CLOUD 收集事件。 */
-static int collect_from_meta(void *meta, uint32_t t0, uint32_t t1,
-                             const int *chs0, int nch,
-                             const int *want, int nw,
-                             evt_rec_t *out, int cap)
+/* 从事件索引区(盘上权威)收集事件:遍历盘组各盘的事件槽。 */
+static int collect_from_evtidx(rsdk_group_t *g, uint32_t t0, uint32_t t1,
+                               const int *chs0, int nch,
+                               const int *want, int nw,
+                               evt_rec_t *out, int cap)
 {
-    if (!meta || cap <= 0) return 0;
-    rsdk_meta_query_t q; memset(&q, 0, sizeof(q));
-    q.t0 = t0; q.t1 = t1 ? t1 : 0xFFFFFFFFu; q.chn = -1;
-    q.doc_type = RSDK_DOC_CLOUD; q.limit = 0;
-    rsdk_metadoc_list_t lst; memset(&lst, 0, sizeof(lst));
-    if (rsdk_meta_query(meta, &q, &lst) != RSDK_OK) return 0;
+    if (!g || cap <= 0) return 0;
+    rsdk_evt_slot_t *slots = (rsdk_evt_slot_t *)calloc(512, sizeof(rsdk_evt_slot_t));
+    if (!slots) return 0;
     int n = 0;
-    for (int i = 0; i < lst.count && n < cap; i++) {
-        const rsdk_metadoc_t *d = &lst.docs[i];
-        int chn0 = (int)d->key.chn;
-        if (!chan_allowed(chs0, nch, chn0)) continue;
-        int rectype = RSDK_REC_MOTION;
-        uint32_t start = d->key.ts, end = 0;
-        if (d->json) {
-            cJSON *j = cJSON_Parse(d->json);
-            if (j) {
-                cJSON *rt = cJSON_GetObjectItem(j, "rectype");
-                cJSON *st = cJSON_GetObjectItem(j, "starttime");
-                cJSON *en = cJSON_GetObjectItem(j, "end");
-                if (cJSON_IsNumber(rt)) rectype = (int)rt->valuedouble;
-                if (cJSON_IsNumber(st)) start = (uint32_t)st->valuedouble;
-                if (cJSON_IsNumber(en)) end = (uint32_t)en->valuedouble;
-                cJSON_Delete(j);
-            }
+    for (int di = 0; di < rsdk_group_count(g) && n < cap; di++) {
+        rsdk_dev_t *d = rsdk_group_dev(g, di);
+        if (!d) continue;
+        int m = rsdk_evtidx_query(d, t0, t1 ? t1 : 0xFFFFFFFFu, -1, -1, slots, 512);
+        for (int i = 0; i < m && n < cap; i++) {
+            rsdk_evt_slot_t *s = &slots[i];
+            int chn0 = (int)s->chn;
+            if (!chan_allowed(chs0, nch, chn0)) continue;
+            int rectype = (int)s->rectype;
+            uint32_t mask = s->type_mask ? s->type_mask
+                                         : ((rectype > 0 && rectype < 32) ? (1u << rectype) : 0);
+            if (!filter_types_hit(want, nw, rectype, mask)) continue;
+            uint32_t start = s->start_time;
+            if (start < t0 || (t1 && start > t1)) continue;
+            int dup = 0;   /* 多盘/多次收集去重 */
+            for (int k = 0; k < n; k++)
+                if (out[k].event_id && out[k].event_id == s->event_id) { dup = 1; break; }
+            if (dup) continue;
+            uint32_t end = (s->end_time == 0xFFFFFFFFu) ? 0 : s->end_time;
+            out[n].chn0 = chn0;
+            out[n].ts = start;
+            out[n].duration = (end > start) ? (end - start) : (uint32_t)NVR_EVT_POST_RECORD_S;
+            out[n].rectype = rectype;
+            out[n].type_mask = mask;
+            out[n].event_id = s->event_id;
+            out[n].has_snap = (s->flags & RSDK_EVT_HAS_SNAP) ? 1 : 0;
+            n++;
         }
-        uint32_t mask = (rectype > 0 && rectype < 32) ? (1u << rectype) : 0;
-        if (!filter_types_hit(want, nw, rectype, mask)) continue;
-        if (start < t0 || (t1 && start > t1)) continue;
-        out[n].chn0 = chn0;
-        out[n].ts = start;
-        out[n].duration = (end > start) ? (end - start) : (uint32_t)NVR_EVT_POST_RECORD_S;
-        out[n].rectype = rectype;
-        out[n].type_mask = mask;
-        out[n].event_id = d->key.event_id;
-        n++;
     }
-    rsdk_meta_free_list(&lst);
+    free(slots);
     return n;
 }
 
@@ -257,15 +256,11 @@ static void emit_event_item(cJSON *list, const evt_rec_t *r, const nvr_cmd_ctx_t
     {
         char thumb[128] = "";
 #if RSDK_CFG_METADATA
-        if (r->event_id && c->meta) {
-            rsdk_pic_ref_t pr[1];
-            int np = rsdk_pic_list_event(c->meta, r->event_id, RSDK_PIC_MAIN, pr, 1);
-            if (np <= 0) np = rsdk_pic_list_event(c->meta, r->event_id, -1, pr, 1);
-            if (np > 0)
-                snprintf(thumb, sizeof(thumb),
-                         "http://iotc-tunnel:8089/eventSnap?eid=%llu",
-                         (unsigned long long)r->event_id);
-        }
+        /* 截图有无来自事件槽 HAS_SNAP;URL 只给隧道地址,App 经 TUTK 映射 8089 GET 取图。 */
+        if (r->event_id && r->has_snap)
+            snprintf(thumb, sizeof(thumb),
+                     "http://iotc-tunnel:8089/eventSnap?eid=%llu",
+                     (unsigned long long)r->event_id);
 #else
         (void)c;
 #endif
@@ -308,7 +303,7 @@ static char *query_event_list_common(cJSON *a, const nvr_cmd_ctx_t *c, int speci
     evt_rec_t *buf = (evt_rec_t *)calloc((size_t)CAP, sizeof(evt_rec_t));
     int n = 0;
     if (buf) {
-        n = collect_from_meta(c->meta, t0, t1, chs0, nch, want, nw, buf, CAP);
+        n = collect_from_evtidx(c->group, t0, t1, chs0, nch, want, nw, buf, CAP);
         if (n <= 0 && c->group)
             n = collect_from_disk(c->group, (t0 > 0) ? t0 :
                                   ((start > 7 * 86400u) ? (start - 7 * 86400u) : 0),
@@ -484,7 +479,7 @@ char *cmd_X_NightOwl_queryEventCalendar(cJSON *a, const nvr_cmd_ctx_t *c)
     evt_rec_t *buf = (evt_rec_t *)calloc((size_t)CAP, sizeof(evt_rec_t));
     int n = 0;
     if (buf) {
-        n = collect_from_meta(c->meta, t0, t1, chs0, nch, NULL, 0, buf, CAP);
+        n = collect_from_evtidx(c->group, t0, t1, chs0, nch, NULL, 0, buf, CAP);
         if (n <= 0 && c->group)
             n = collect_from_disk(c->group, t0, t1, chs0, nch, NULL, 0, buf, CAP);
     }
