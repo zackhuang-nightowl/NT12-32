@@ -62,9 +62,9 @@ int main(void)
     CHECK(rsdk_cloud_set_state(meta, e1, RSDK_CLOUD_DONE, 0) == RSDK_OK, "e1 done");
 
     /* e2 → FAILED with err -5 */
-    rsdk_cloud_set_state(meta, e2, RSDK_CLOUD_FAILED, -5);
+    rsdk_cloud_set_state(meta, e2, RSDK_CLOUD_RETRY, -5);
     rsdk_cloud_get(meta, e2, &got);
-    CHECK(got.state == RSDK_CLOUD_FAILED && got.last_err == -5, "e2 failed err");
+    CHECK(got.state == RSDK_CLOUD_RETRY && got.last_err == -5, "e2 retry err");
 
     /* enumerate include_failed=1 → 只剩 e2(FAILED)，e1 已 DONE */
     n = rsdk_cloud_enumerate_pending(meta, &opt, list, 8);
@@ -79,7 +79,7 @@ int main(void)
     int marked = rsdk_cloud_on_reclaim(meta, 0, 6000);
     CHECK(marked == 1, "on_reclaim marked 1");
     rsdk_cloud_get(meta, e2, &got);
-    CHECK(got.state == RSDK_CLOUD_LOST, "e2 → LOST");
+    CHECK(got.state == RSDK_CLOUD_NONE, "e2 → NONE(源覆盖)");
 
     /* on_reclaim 命中 e1 的第二段 chunk(5001) 但 e1 已 DONE → 不改 */
     marked = rsdk_cloud_on_reclaim(meta, 0, 5001);

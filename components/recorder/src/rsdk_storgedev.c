@@ -88,35 +88,43 @@ static void rnd_fill(uint8_t *p, size_t n) {
     else for (size_t i = 0; i < n; i++) p[i] = (uint8_t)(0x11 * (i + 1));
 }
 
+/* chunk 档位:采用监控行业量级(大块摊寻道、压缩索引区),小盘/开发盘退回小块保证多分块。
+ * 参照海康默认 256MB;显式 req 优先。 */
 static uint32_t pick_chunk_mib(uint64_t total_bytes, uint32_t req) {
     if (req) return req;
     uint64_t tb = total_bytes;
-    if (tb <= (4ULL<<40)) return 8;
-    if (tb <= (16ULL<<40)) return 16;
-    return 32;
+    if (tb <  (8ULL<<30))  return 8;     /* <8GiB: 开发/小盘,保持小 chunk 多分块 */
+    if (tb <= (4ULL<<40))  return 256;   /* ≤4TB: 行业量级 */
+    if (tb <= (16ULL<<40)) return 512;   /* ≤16TB */
+    return 1024;                          /* >16TB */
 }
 
-/* §1.1 自动布局: 迭代求 chunk_count / rsv / data_start */
+/* §1.1 自动布局: 迭代求 chunk_count / rsv / data_start。
+ * 保留区顺序: [位图][段索引区 64B×slots][事件索引区 128B×evt_slots]。evt_slots=0 则无事件区。
+ * data_start 对齐到 1MiB(不是整 chunk)→ 大 chunk 下不白扔近一个 chunk。 */
 static void compute_layout(uint64_t total_sectors, uint32_t chunk_mib, uint32_t slots,
+                           uint32_t evt_slots,
                            uint64_t *chunk_sectors, uint64_t *chunk_count,
                            uint64_t *data_start_sec, uint64_t *bitmap_sectors,
-                           uint64_t *index_sectors) {
+                           uint64_t *index_sectors, uint64_t *evtidx_sectors) {
     uint64_t total = total_sectors * RSDK_SEC;
     uint64_t chunk = (uint64_t)chunk_mib << 20;
     uint64_t cc = total / chunk;
-    uint64_t bmS = 0, ixS = 0, ds = 0;
+    uint64_t bmS = 0, ixS = 0, exS = 0, ds = 0;
     for (int it = 0; it < 4; it++) {
         uint64_t bitmap_bytes = ((cc * 2 + 7) / 8) * 2;              /* 2bit/chunk, 主备 */
-        uint64_t index_bytes  = cc * slots * (uint64_t)sizeof(rsdk_index_slot_t); /* 单副本实用 */
+        uint64_t index_bytes  = cc * slots * (uint64_t)sizeof(rsdk_index_slot_t); /* 段槽 */
+        uint64_t evt_bytes    = evt_slots ? cc * evt_slots * (uint64_t)sizeof(rsdk_evt_slot_t) : 0; /* 事件槽 */
         bmS = rsdk_align_up(bitmap_bytes, RSDK_SEC) / RSDK_SEC;
         ixS = rsdk_align_up(index_bytes,  RSDK_SEC) / RSDK_SEC;
-        uint64_t rsv_end = (BITMAP_SEC + bmS + ixS) * RSDK_SEC;
-        ds = rsdk_align_up(rsv_end, chunk) / RSDK_SEC;
+        exS = rsdk_align_up(evt_bytes,    RSDK_SEC) / RSDK_SEC;
+        uint64_t rsv_end = (BITMAP_SEC + bmS + ixS + exS) * RSDK_SEC;
+        ds = rsdk_align_up(rsv_end, 1ull << 20) / RSDK_SEC;   /* 对齐 1MiB */
         cc = (total - ds * RSDK_SEC) / chunk;
     }
     *chunk_sectors = chunk / RSDK_SEC;
     *chunk_count = cc; *data_start_sec = ds;
-    *bitmap_sectors = bmS; *index_sectors = ixS;
+    *bitmap_sectors = bmS; *index_sectors = ixS; *evtidx_sectors = exS;
 }
 
 rsdk_err_t rsdk_plan_layout(uint64_t total_sectors, uint32_t chunk_mib_req,
@@ -128,8 +136,10 @@ rsdk_err_t rsdk_plan_layout(uint64_t total_sectors, uint32_t chunk_mib_req,
     uint32_t cmib = pick_chunk_mib(total_sectors * RSDK_SEC, chunk_mib_req);
     double mratio = (meta_ratio_pct > 0) ? meta_ratio_pct
                                          : ((double)RSDK_CFG_META_RATIO_PCT10 / 10.0);
-    uint64_t cs, cc, ds, bmS, ixS;
-    compute_layout(total_sectors, cmib, slots, &cs, &cc, &ds, &bmS, &ixS);
+    /* 事件索引区与 MetaRegion 同门控(metadata=on):无 metadata 则事件退回段槽标志位。 */
+    uint32_t evt_slots = (feature_mask & RSDK_FEAT_METADATA) ? RSDK_CFG_EVT_SLOTS_PER_CHUNK : 0;
+    uint64_t cs, cc, ds, bmS, ixS, exS;
+    compute_layout(total_sectors, cmib, slots, evt_slots, &cs, &cc, &ds, &bmS, &ixS, &exS);
     if (cc == 0) return RSDK_E_NOSPACE;
     uint64_t meta_cc = (feature_mask & RSDK_FEAT_METADATA) ? (uint64_t)(cc * mratio / 100.0) : 0;
     if ((feature_mask & RSDK_FEAT_METADATA) && meta_cc == 0 && cc > 4) meta_cc = 1;
@@ -140,9 +150,11 @@ rsdk_err_t rsdk_plan_layout(uint64_t total_sectors, uint32_t chunk_mib_req,
     out->data_start_sec = ds;
     out->bitmap_sectors = bmS;
     out->index_sectors = ixS;
+    out->evtidx_sectors = exS;
     out->meta_chunk_count = meta_cc;
     out->data_chunk_count = cc - meta_cc;
     out->index_slot_count = (uint32_t)(ixS * RSDK_SEC / sizeof(rsdk_index_slot_t));
+    out->evtidx_slot_count = (uint32_t)(exS * RSDK_SEC / sizeof(rsdk_evt_slot_t));
     if (out->data_chunk_count == 0) return RSDK_E_NOSPACE;
     return RSDK_OK;
 }
@@ -219,6 +231,11 @@ rsdk_err_t rsdk_format(const char *path, const rsdk_format_opt_t *opt)
     st.index_slot_size = sizeof(rsdk_index_slot_t);
     st.index_slot_count = L.index_slot_count;
     st.index_next = 0;
+    /* 事件索引区紧邻段索引区之后 */
+    st.evtidx_start_sec  = st.index_start_sec + L.index_sectors;
+    st.evtidx_sectors    = L.evtidx_sectors;
+    st.evtidx_slot_count = L.evtidx_slot_count;
+    st.evtidx_next       = 0;
     st.meta_next_off = 0;
     st.meta_bytes = L.meta_chunk_count * (L.chunk_sectors * RSDK_SEC);  /* MetaRegion 字节大小 */
     st.crc32 = 0; st.crc32 = rsdk_crc32(&st, sizeof st);
@@ -230,9 +247,10 @@ rsdk_err_t rsdk_format(const char *path, const rsdk_format_opt_t *opt)
     rsdk_rawdev_pwrite(raw, SB_BAK_SEC*RSDK_SEC,  &sb, sizeof sb);
     rsdk_rawdev_pwrite(raw, ST_MAIN_SEC*RSDK_SEC, &st, sizeof st);
     rsdk_rawdev_pwrite(raw, ST_BAK_SEC*RSDK_SEC,  &st, sizeof st);
-    /* 清位图 + 索引区(小块循环写0) */
+    /* 清位图 + 段索引区 + 事件索引区(小块循环写0) */
     uint8_t blk[RSDK_SEC]; memset(blk, 0, sizeof blk);
-    for (uint64_t s = BITMAP_SEC; s < st.index_start_sec + L.index_sectors; s++)
+    uint64_t rsv_zero_end = st.evtidx_start_sec + L.evtidx_sectors;   /* 含事件区(sectors 可为0) */
+    for (uint64_t s = BITMAP_SEC; s < rsv_zero_end; s++)
         rsdk_rawdev_pwrite(raw, s*RSDK_SEC, blk, RSDK_SEC);
     rsdk_rawdev_sync(raw);
     rsdk_rawdev_close(raw);

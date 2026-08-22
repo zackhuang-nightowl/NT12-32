@@ -47,9 +47,11 @@ typedef struct {
     uint64_t data_start_sec;
     uint64_t bitmap_sectors;
     uint64_t index_sectors;
+    uint64_t evtidx_sectors;     /* 事件索引区扇区数(metadata=off 时 0) */
     uint64_t meta_chunk_count;
     uint64_t data_chunk_count;   /* = chunk_count - meta_chunk_count */
     uint32_t index_slot_count;
+    uint32_t evtidx_slot_count;  /* 事件槽总数 */
 } rsdk_layout_t;
 
 /* 扇区大小谓词: 512 → 1(支持); 其它(如 4096/4Kn) → 0(不支持) */

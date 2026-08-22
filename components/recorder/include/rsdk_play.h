@@ -14,6 +14,9 @@ typedef struct rsdk_player rsdk_player_t;
 RSDK_API rsdk_err_t rsdk_play_open(rsdk_dev_t *d, const rsdk_index_slot_t *seg, rsdk_player_t **out);
 /* 段内按 PTS 定位到最近不晚于 pts 的帧 */
 RSDK_API rsdk_err_t rsdk_play_seek_pts(rsdk_player_t *p, uint64_t pts);
+/* 段内按墙钟 epoch 定位到最近不晚于 wall 的关键帧(IDR)。优先读本段 RK_KEYIDX 表(大 chunk
+ * 免顺扫);无表则顺扫。定位后 rsdk_play_next_frame 从该 IDR 起播。 */
+RSDK_API rsdk_err_t rsdk_play_seek(rsdk_player_t *p, uint32_t wall);
 /* 取下一帧: 读帧头→读负载→(按帧头 enc)解密→返回明文 Annex-B。
  * *data 指向内部缓冲(下次调用失效); 段尾返回 RSDK_E_NOTFOUND。 */
 RSDK_API rsdk_err_t rsdk_play_next_frame(rsdk_player_t *p, rsdk_frame_hdr_t *hdr,

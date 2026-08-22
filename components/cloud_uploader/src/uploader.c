@@ -52,7 +52,7 @@ static int process_event(nvr_cloud_uploader_t *up, const rsdk_cloud_event_t *ev,
     if (!up->cfg.settings ||
         !nvr_cloud_ch_upload_stream(up->cfg.settings, ev->chn, rectype_tag(ev->rectype), &rec_stream)) {
         NVR_LOGI("cloud", "ch%d 事件跳过上传(云存未开/未启用/trigger/stream)", ev->chn);
-        rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_FAILED, -10);
+        rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_RETRY, -10);
         return -1;
     }
 
@@ -68,11 +68,11 @@ static int process_event(nvr_cloud_uploader_t *up, const rsdk_cloud_event_t *ev,
     rsdk_index_slot_t segs[64];
     int nseg = rsdk_group_query_stream(up->cfg.group, t0, t1, ev->chn,
                                        RSDK_REC_CONTINUOUS, rec_stream, segs, 64);
-    if (nseg <= 0) { rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_FAILED, -1); return -1; }
+    if (nseg <= 0) { rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_RETRY, -1); return -1; }
 
     rsdk_group_player_t *pl = NULL;
     if (rsdk_group_play_open(up->cfg.group, segs, nseg, &pl) != RSDK_OK || !pl) {
-        rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_FAILED, -2); return -1;
+        rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_RETRY, -2); return -1;
     }
 
     /* 2) 多通道 starttime 埋通道 + tags */
@@ -89,17 +89,17 @@ static int process_event(nvr_cloud_uploader_t *up, const rsdk_cloud_event_t *ev,
                       event_id_code(ev->rectype), tags, &vu) != 0) {
         NVR_LOGW("cloud", "ch%d GET url 失败(网络?)", ev->chn);
         rsdk_group_play_close(pl);
-        rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_FAILED, -3); return -1;
+        rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_RETRY, -3); return -1;
     }
     if (vu.err_code == -1002 || vu.err_code == -1003 || vu.err_code == -1004) {
         NVR_LOGE("cloud", "服务器拒绝 code=%d(设备/绑定/合约无效) → 关云存", vu.err_code);
         rsdk_group_play_close(pl);
-        rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_FAILED, vu.err_code);
+        rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_RETRY, vu.err_code);
         return -1000;   /* 上层 force_off */
     }
     if (!vu.http_ok) {
         rsdk_group_play_close(pl);
-        rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_FAILED, -4); return -1;
+        rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_RETRY, -4); return -1;
     }
 
     /* 4) 读帧 → TS 分片 → POST（按 slice_ms 切片；末片 event_end=1） */
@@ -146,7 +146,7 @@ static int process_event(nvr_cloud_uploader_t *up, const rsdk_cloud_event_t *ev,
         rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_DONE, 0); return 0;
     }
     NVR_LOGW("cloud", "ch%d 上传失败(切片 POST)", ev->chn);
-    rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_FAILED, -5);
+    rsdk_cloud_set_state(up->cfg.meta, ev->event_id, RSDK_CLOUD_RETRY, -5);
     return -1;
 #else
     (void)up; (void)ev; (void)stoken; return -1;

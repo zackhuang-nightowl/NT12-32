@@ -48,6 +48,8 @@ RSDK_API void rsdk_rec_set_event(rsdk_writer_t *w, uint64_t event_id);
 /* 内联标记(自描述,供扫描重建):事件(复合 type_mask+精确时窗)/ 云存终态。 */
 RSDK_API rsdk_err_t rsdk_rec_mark_event(rsdk_writer_t *w, uint64_t event_id, uint8_t rectype,
                                         uint32_t start, uint32_t end, uint32_t type_mask, uint32_t ref_seg);
+/* 事件窗结束:闭合事件索引槽(填 end_time、清未闭合位)。 */
+RSDK_API rsdk_err_t rsdk_rec_end_event(rsdk_writer_t *w, uint64_t event_id, uint32_t end_time);
 RSDK_API rsdk_err_t rsdk_rec_mark_cloud(rsdk_writer_t *w, uint64_t event_id, uint8_t state, uint32_t ts);
 
 #ifdef __cplusplus

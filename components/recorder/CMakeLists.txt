@@ -26,12 +26,12 @@ add_custom_target(rsdk_config DEPENDS ${RSDK_CONFIG_H})
 # ---- 静态库 ----
 set(RSDK_SRC
   src/rsdk_core.c src/rsdk_util.c src/rsdk_feature.c src/rsdk_rawdev.c
-  src/rsdk_crypto.c src/rsdk_storgedev.c src/rsdk_index.c src/rsdk_rec.c
+  src/rsdk_crypto.c src/rsdk_storgedev.c src/rsdk_index.c src/rsdk_evtidx.c src/rsdk_rec.c
   src/rsdk_play.c src/rsdk_balance.c src/rsdk_backup.c src/rsdk_disk.c
-  src/rsdk_scan.c    # 自描述扫描重建(索引/meta 丢失可扫盘重建;新 SDK)
+  src/rsdk_scan.c    # rsdk_evtidx.c=事件索引区; rsdk_scan.c=自描述扫描重建(索引丢失可扫盘重建)
   src/rsdk_repair.c) # 开机自检 + 分级修复(Tier1 封口 / Tier2 后台重建)
 if(RSDK_WITH_METADATA)
-  list(APPEND RSDK_SRC src/rsdk_meta.c src/rsdk_pic.c src/rsdk_cloud.c)  # rsdk_cloud.c = no-op 桩(云存待实现)
+  list(APPEND RSDK_SRC src/rsdk_meta.c src/rsdk_pic.c src/rsdk_cloud.c)  # 元数据/抓拍/云存态(真实现)
 endif()
 
 add_library(rsdk STATIC ${RSDK_SRC})
@@ -82,7 +82,13 @@ if(RSDK_BUILD_EXAMPLES)
   if(RSDK_WITH_METADATA)
     add_executable(cloud_demo examples/cloud_demo.c)   # 云存状态: begin/set_state/enumerate/reclaim
     target_link_libraries(cloud_demo rsdk)
+
+    add_executable(rebuild_demo examples/rebuild_demo.c)  # 统一扫盘重建: 抹事件区→rebuild→全链回来
+    target_link_libraries(rebuild_demo rsdk)
   endif()
+
+  add_executable(evtidx_demo examples/evtidx_demo.c)   # 事件索引区: 写/查/patch/失效
+  target_link_libraries(evtidx_demo rsdk)
 endif()
 
 install(TARGETS rsdk ARCHIVE DESTINATION lib)

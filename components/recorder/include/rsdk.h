@@ -33,6 +33,7 @@
 #include "rsdk_storgedev.h"
 #include "rsdk_disk.h"
 #include "rsdk_index.h"
+#include "rsdk_evtidx.h"
 #include "rsdk_rec.h"
 #include "rsdk_play.h"
 #include "rsdk_balance.h"

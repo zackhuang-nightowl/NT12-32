@@ -22,14 +22,8 @@
 extern "C" {
 #endif
 
-typedef enum {
-    RSDK_CLOUD_NONE      = 0,   /* 不上传（非云存事件/已禁用） */
-    RSDK_CLOUD_PENDING   = 1,   /* 未上传（已入队待传） */
-    RSDK_CLOUD_UPLOADING = 2,   /* 上传中（某 worker 持有） */
-    RSDK_CLOUD_DONE      = 3,   /* 上传完毕 */
-    RSDK_CLOUD_FAILED    = 4,   /* 上传失败（可重试） */
-    RSDK_CLOUD_LOST      = 5    /* 源 chunk 已被覆盖，放弃 */
-} rsdk_cloud_state_t;
+/* rsdk_cloud_state_t 现为盘上权威值,定义在 rsdk_types.h(事件槽 state 字段共用)。
+ * 四态:NONE(0)/PENDING(1 未上传)/UPLOADING(2)/DONE(3 已上传)/RETRY(4 待重试)。 */
 
 /* 一个云存事件 = 某通道一个 AI/门铃事件，绑定其 RecSegment。
  * event_id 由调用方铸造（见 rsdk_cloud_make_event_id）。

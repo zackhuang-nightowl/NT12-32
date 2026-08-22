@@ -196,13 +196,13 @@ static int process_sess(struct nvr_cloud_uploader *up, sync_sess_t *s, const cha
             finish_sess(up, s, stoken);
         else {
 #if RSDK_CFG_METADATA
-            rsdk_cloud_set_state(up->cfg.meta, s->event_id, RSDK_CLOUD_FAILED, -5);
+            rsdk_cloud_set_state(up->cfg.meta, s->event_id, RSDK_CLOUD_RETRY, -5);
 #endif
             sess_free(s);
         }
     } else if (rc != 0) {
 #if RSDK_CFG_METADATA
-        rsdk_cloud_set_state(up->cfg.meta, s->event_id, RSDK_CLOUD_FAILED, -5);
+        rsdk_cloud_set_state(up->cfg.meta, s->event_id, RSDK_CLOUD_RETRY, -5);
 #endif
         sess_free(s);
     }
@@ -247,7 +247,7 @@ int cloud_sync_event_begin(struct nvr_cloud_uploader *up, int chn, uint64_t eid,
         !vu.http_ok) {
         NVR_LOGW("cloud", "ch%d sync GET url 失败", chn);
 #if RSDK_CFG_METADATA
-        rsdk_cloud_set_state(up->cfg.meta, eid, RSDK_CLOUD_FAILED, -3);
+        rsdk_cloud_set_state(up->cfg.meta, eid, RSDK_CLOUD_RETRY, -3);
 #endif
         sess_free(s);
         pthread_mutex_unlock(&up->lk);

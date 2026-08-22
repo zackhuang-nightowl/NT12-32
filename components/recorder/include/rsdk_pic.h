@@ -52,9 +52,18 @@ typedef struct __attribute__((packed)) {
 /* meta: 由 rsdk_meta_open 返回的句柄(sqlite)。写入侧不解码 JPEG, 原样存。 */
 RSDK_API rsdk_err_t rsdk_pic_write(rsdk_dev_t *d, void *meta, const rsdk_pic_key_t *k,
                                    const void *jpeg, size_t len, uint64_t *pic_id);
+/* 单张截图上限:20MP JPEG(高质量约 0.8B/px)→ ~16MiB。宏,实机调试后可调。 */
+#ifndef RSDK_PIC_MAX_BYTES
+#define RSDK_PIC_MAX_BYTES (16u << 20)
+#endif
+
 /* 读回并解密 JPEG(*jpeg 需 free) */
 RSDK_API rsdk_err_t rsdk_pic_read (rsdk_dev_t *d, void *meta, uint64_t pic_id,
                                    void **jpeg, size_t *len);
+/* 按 MetaRegion 绝对偏移直接读截图(供事件槽 snap_off 取图,不经 meta.db)。
+ * expect_event_id 校验环覆盖(0=不校验;*jpeg 需 free)。 */
+RSDK_API rsdk_err_t rsdk_pic_read_blob(rsdk_dev_t *d, uint64_t off, uint64_t expect_event_id,
+                                       void **jpeg, size_t *len);
 /* 列出某事件的抓拍(type<0=全部) */
 RSDK_API int        rsdk_pic_list_event(void *meta, uint64_t event_id, int type,
                                         rsdk_pic_ref_t *out, int cap);

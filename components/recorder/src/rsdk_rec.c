@@ -4,6 +4,7 @@
 #include "rsdk_rec.h"
 #include "rsdk_balance.h"
 #include "rsdk_index.h"
+#include "rsdk_evtidx.h"
 #include "rsdk_crypto.h"
 #include "rsdk_util.h"
 #include <stdlib.h>
@@ -20,11 +21,48 @@ struct rsdk_writer {
     int      open_written;
     uint64_t cur_event_id;   /* 连续轨事件标签:>0 则后续帧头打此 event_id;0=无 */
     uint8_t *pbuf; size_t pcap;
+    rsdk_kf_entry_t *kf; uint32_t kf_count, kf_cap;  /* 本段关键帧表(段闭合写入 chunk) */
     rsdk_reclaim_cb reclaim; void *reclaim_user;
 };
 
 void rsdk_rec_set_reclaim(rsdk_writer_t *w, rsdk_reclaim_cb cb, void *user) {
     if (w) { w->reclaim = cb; w->reclaim_user = user; }
+}
+
+/* 记录一个 IDR 的 (墙钟, chunk内偏移) 到本段关键帧表(供段闭合时落 RK_KEYIDX)。 */
+static void kf_record(rsdk_writer_t *w, uint32_t wall, uint32_t chunk_off) {
+    if (w->kf_count >= 4096) return;             /* 上限兜底(超长段) */
+    if (w->kf_count == w->kf_cap) {
+        uint32_t nc = w->kf_cap ? w->kf_cap * 2 : 64;
+        rsdk_kf_entry_t *n = realloc(w->kf, nc * sizeof *n);
+        if (!n) return;
+        w->kf = n; w->kf_cap = nc;
+    }
+    w->kf[w->kf_count].wall_time = wall;
+    w->kf[w->kf_count].chunk_off = chunk_off;
+    w->kf_count++;
+}
+
+/* 段闭合前把本段关键帧表写进当前 chunk(RK_KEYIDX 记录)。放不下则跳过(回放退化为顺扫,
+ * 扫盘重建仍可复原)。直接写盘、不做段轮转,避免与 finalize_seg 递归。 */
+static void flush_keyframes(rsdk_writer_t *w) {
+    if (!w->kf || w->kf_count == 0) return;
+    uint32_t pl = w->kf_count * (uint32_t)sizeof(rsdk_kf_entry_t);
+    uint64_t chunk_bytes = rsdk_dev_sb(w->d)->chunk_sectors * RSDK_SEC;
+    uint32_t need = (uint32_t)rsdk_align_up(64ull + pl, RSDK_FRAME_ALIGN);
+    if (w->cur_off + need > chunk_bytes) { w->kf_count = 0; return; }   /* 放不下:跳过 */
+    rsdk_frame_hdr_t h; memset(&h, 0, sizeof h);
+    memcpy(h.magic, RSDK_FRAME_MAGIC, 8);
+    h.chn = (uint16_t)w->chn; h.stream = (uint8_t)w->stream;
+    h.rec_kind = RSDK_RK_KEYIDX; h.rectype = (uint8_t)w->rectype;
+    h.payload_len = pl; h.seg_id = w->seg_id; h.frame_seq = w->frame_seq;
+    h.wall_time = w->last_time; h.enc = 0; h.payload_crc32 = 0;
+    h.hdr_crc32 = 0; h.hdr_crc32 = rsdk_crc32(&h, sizeof h);
+    uint64_t off = w->base_off + w->cur_off;
+    if (rsdk_rawdev_pwrite(rsdk_dev_raw(w->d), off, &h, sizeof h) == RSDK_OK)
+        rsdk_rawdev_pwrite(rsdk_dev_raw(w->d), off + 64, w->kf, pl);
+    w->cur_off += need;
+    w->kf_count = 0;
 }
 
 /* 事件标签:置后续帧头 event_id(连续轨命中事件时打标;传 0 清除)。 */
@@ -57,14 +95,16 @@ static rsdk_err_t start_seg(rsdk_writer_t *w) {
     uint64_t chunk, off;
     rc = rsdk_dev_alloc_chunk(w->d, &chunk, &off);
     if (rc) { wunlock(w); return rc; }          /* stop 策略盘满 → NOSPACE */
-    if (rsdk_dev_is_wrapped(w->d)) {            /* 覆盖模式: 回收该 chunk 上旧段索引 + 元数据 */
+    if (rsdk_dev_is_wrapped(w->d)) {            /* 覆盖模式: 回收该 chunk 上旧段索引 + 事件索引 + 元数据 */
         rsdk_index_invalidate_chunk(w->d, chunk);
+        rsdk_evtidx_invalidate_chunk(w->d, chunk);   /* 事件槽随视频覆盖一并作废(全链一致) */
         if (w->reclaim) w->reclaim(w->reclaim_user, rsdk_dev_index(w->d), chunk);
     }
     w->chunk = chunk; w->base_off = off; w->cur_off = 0;
     w->seg_id = next_seg_id(w->d, w->chn);
     w->frame_seq = 0; w->frame_count = 0; w->total_bytes = 0;
     w->start_time = 0; w->last_time = 0; w->end_off = 0; w->open_written = 0;
+    w->kf_count = 0;   /* 新段:清关键帧表 */
     wunlock(w);
     return RSDK_OK;
 }
@@ -86,6 +126,7 @@ static void fill_slot(rsdk_writer_t *w, rsdk_index_slot_t *s, int closed) {
 
 static rsdk_err_t finalize_seg(rsdk_writer_t *w) {
     if (w->frame_count == 0) return RSDK_OK;
+    flush_keyframes(w);   /* 段闭合:先落关键帧表到本 chunk(写自身 chunk 数据区,无需元数据锁) */
     /* 段封口: 写 VALID 槽 + 报告带宽, 与并发 index_write/balance 串行(递归锁内嵌各原语自锁)。 */
     wlock(w);
     rsdk_index_slot_t s; fill_slot(w, &s, 1);
@@ -190,6 +231,8 @@ rsdk_err_t rsdk_rec_write_frame(rsdk_writer_t *w, const rsdk_frame_t *f) {
     }
 
     w->end_off = w->cur_off;
+    if (f->frame_type == RSDK_FRAME_I)     /* IDR:入关键帧表(chunk内偏移=本帧起点) */
+        kf_record(w, (uint32_t)f->wall_time, w->cur_off);
     w->cur_off += need;
     w->last_time = (uint32_t)f->wall_time;
     w->frame_seq++; w->frame_count++; w->total_bytes += f->len;
@@ -223,16 +266,50 @@ static rsdk_err_t write_marker(rsdk_writer_t *w, uint8_t kind, uint8_t rectype,
     return RSDK_OK;
 }
 
-/* 事件标记:复合 type_mask + 精确 start/end + 归属段(扫描重建事件用)。 */
+/* 用当前写入器位置 upsert 一条事件槽(音视频定位 = 当前 chunk/off)。open=1 置未闭合。 */
+static void evt_slot_upsert(rsdk_writer_t *w, uint64_t event_id, uint8_t rectype,
+                            uint32_t start, uint32_t end, uint32_t type_mask, int open) {
+    rsdk_evt_slot_t e;
+    if (rsdk_evtidx_get(w->d, event_id, &e) != RSDK_OK) {   /* 新事件:建槽,定位音视频 */
+        memset(&e, 0, sizeof e);
+        e.event_id = event_id; e.chn = (uint16_t)w->chn;
+        e.state = RSDK_CLOUD_NONE;
+        e.av_disk = rsdk_dev_sb(w->d)->group_disk_index;
+        e.av_chunk = w->chunk; e.av_off = w->cur_off;
+    }
+    e.rectype = rectype; e.type_mask |= type_mask;
+    if (start) e.start_time = start;
+    e.end_time = end ? end : 0xFFFFFFFFu;
+    e.av_end_off = w->cur_off;
+    e.flags = RSDK_EVT_VALID | (e.flags & RSDK_EVT_HAS_SNAP) | (open ? RSDK_EVT_OPEN : 0);
+    rsdk_evtidx_write(w->d, &e);   /* metadata=off 时 E_NOSPACE, 无害 */
+}
+
+/* 事件标记:数据区自描述标记(扫描重建用)+ 事件索引槽(运行期查询用)。一处调用两处落盘。
+ * end=0 视为进行中(事件窗未闭合)。 */
 rsdk_err_t rsdk_rec_mark_event(rsdk_writer_t *w, uint64_t event_id, uint8_t rectype,
                                uint32_t start, uint32_t end, uint32_t type_mask, uint32_t ref_seg) {
+    if (!w) return RSDK_E_PARAM;
+    evt_slot_upsert(w, event_id, rectype, start, end, type_mask, end == 0);
     rsdk_mk_event_t e = { .event_start = start, .event_end = end,
                           .type_mask = type_mask, .ref_seg_id = ref_seg };
     return write_marker(w, RSDK_RK_EVENT, rectype, event_id, start, &e, sizeof e);
 }
 
-/* 云存终态标记:0不传/1未传/2上传中/3已传/4失败(仅终态追加,扫描重建云存态用)。 */
+/* 事件窗结束:闭合事件槽(end_time + 清 OPEN)。无对应槽则忽略。 */
+rsdk_err_t rsdk_rec_end_event(rsdk_writer_t *w, uint64_t event_id, uint32_t end_time) {
+    if (!w) return RSDK_E_PARAM;
+    rsdk_evt_slot_t e;
+    if (rsdk_evtidx_get(w->d, event_id, &e) != RSDK_OK) return RSDK_E_NOTFOUND;
+    e.end_time = end_time ? end_time : e.end_time;
+    e.flags &= (uint16_t)~RSDK_EVT_OPEN;
+    return rsdk_evtidx_write(w->d, &e);
+}
+
+/* 云存态标记:数据区自描述标记(重建用)+ 事件索引槽 state(运行期查询用)。 */
 rsdk_err_t rsdk_rec_mark_cloud(rsdk_writer_t *w, uint64_t event_id, uint8_t state, uint32_t ts) {
+    if (!w) return RSDK_E_PARAM;
+    rsdk_evtidx_patch_state(w->d, event_id, state, 0, ts);   /* 无槽/无区时无害 */
     rsdk_mk_cloud_t c = { .state = state, ._r = {0,0,0} };
     return write_marker(w, RSDK_RK_CLOUD_STATE, 0, event_id, ts, &c, sizeof c);
 }
@@ -267,6 +344,6 @@ rsdk_err_t rsdk_rec_close(rsdk_writer_t *w) {
     } else {
         rsdk_dev_flush(w->d);
     }
-    free(w->pbuf); free(w);
+    free(w->pbuf); free(w->kf); free(w);
     return rc;
 }

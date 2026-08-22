@@ -1,8 +1,9 @@
 /* Copyright (C) 2025-2026, Nightowl DG. RSDK 抓拍(PIC).
- * 事件触发 JPEG → 加密写 MetaRegion → 索引进 meta_doc(SNAP, 绑 event_id) → 供事件推送取图。
- * 仅在 metadata=on 时编译(依赖 sqlite3 + MetaRegion)。 */
+ * 事件触发时刻那帧 JPEG → 加密写 MetaRegion(环形) → 截图指针回填事件索引槽(权威,可扫盘重建)。
+ * 兼容期同时写 meta_doc(SNAP);Phase6 后 meta.db 仅剩可丢元数据。仅在 metadata=on 时编译。 */
 #include "rsdk_pic.h"
 #include "rsdk_meta.h"      /* RSDK_DOC_SNAP */
+#include "rsdk_evtidx.h"    /* 截图指针回填事件槽 */
 #include "rsdk_crypto.h"
 #include "rsdk_util.h"
 #include <sqlite3.h>
@@ -22,10 +23,11 @@ rsdk_err_t rsdk_pic_write(rsdk_dev_t *d, void *meta, const rsdk_pic_key_t *k,
                           const void *jpeg, size_t len, uint64_t *pic_id)
 {
     if (!d || !meta || !k || !jpeg || !len) return RSDK_E_PARAM;
+    if (len > RSDK_PIC_MAX_BYTES) return RSDK_E_PARAM;   /* 单张上限(20MP,宏可调);超出拒绝防挤爆环 */
     sqlite3 *db = meta;
 
-    /* 分配 MetaRegion 空间(头 + JPEG) */
-    uint64_t total = sizeof(rsdk_pic_hdr_t) + len, abs_off;
+    /* 分配 MetaRegion 空间(头 + JPEG),按 512 对齐 → 头落扇区边界,供扫盘重建按扇区定位 PIC0。 */
+    uint64_t total = rsdk_align_up(sizeof(rsdk_pic_hdr_t) + len, RSDK_SEC), abs_off;
     rsdk_err_t rc = rsdk_dev_meta_alloc(d, total, &abs_off);
     if (rc) return rc;                          /* metadata=off → E_NOSPACE */
 
@@ -48,6 +50,9 @@ rsdk_err_t rsdk_pic_write(rsdk_dev_t *d, void *meta, const rsdk_pic_key_t *k,
     rsdk_rawdev_sync(raw);
     free(buf);
 
+    /* 截图指针回填事件索引槽(权威;供只读事件区取图 + 扫盘重建)。无对应事件槽则无害。 */
+    rsdk_evtidx_patch_snap(d, k->event_id, rsdk_dev_index(d), abs_off, (uint32_t)total, k->ts);
+
     /* 索引: meta_doc SNAP 行(storage=1 blobref), 绑 event_id */
     char json[96];
     int jl = snprintf(json, sizeof json, "{\"pic\":%d,\"w\":%u,\"h\":%u}", k->type, k->w, k->h);
@@ -69,12 +74,16 @@ rsdk_err_t rsdk_pic_write(rsdk_dev_t *d, void *meta, const rsdk_pic_key_t *k,
     return r == SQLITE_DONE ? RSDK_OK : RSDK_E_DB;
 }
 
-static rsdk_err_t read_blob(rsdk_dev_t *d, uint64_t off, void **jpeg, size_t *len) {
+/* expect_event_id!=0 时校验 PIC0 头 event_id 匹配(环覆盖后 snap_off 可能已被新事件占用,
+ * 不匹配当无图返回 NOTFOUND,绝不返回错图)。 */
+static rsdk_err_t read_blob(rsdk_dev_t *d, uint64_t off, uint64_t expect_event_id,
+                            void **jpeg, size_t *len) {
     rsdk_pic_hdr_t h;
     rsdk_rawdev_pread(rsdk_dev_raw(d), off, &h, sizeof h);
     if (memcmp(h.magic, "PIC0", 4) != 0) return RSDK_E_CORRUPT;
     rsdk_pic_hdr_t t = h; t.crc32 = 0;
     if (rsdk_crc32(&t, sizeof t) != h.crc32) return RSDK_E_CORRUPT;
+    if (expect_event_id && h.event_id != expect_event_id) return RSDK_E_NOTFOUND;  /* 已被覆盖成别的事件 */
     uint8_t *buf = malloc(h.jpeg_len); if (!buf) return RSDK_E_IO;
     rsdk_rawdev_pread(rsdk_dev_raw(d), off + sizeof h, buf, h.jpeg_len);
     if (h.enc) {
@@ -86,6 +95,14 @@ static rsdk_err_t read_blob(rsdk_dev_t *d, uint64_t off, void **jpeg, size_t *le
     return RSDK_OK;
 }
 
+/* 按 MetaRegion 绝对偏移直接读截图(供事件索引槽 snap_off 取图,不经 meta.db)。
+ * expect_event_id 校验环覆盖(0=不校验,*jpeg 需 free)。 */
+rsdk_err_t rsdk_pic_read_blob(rsdk_dev_t *d, uint64_t off, uint64_t expect_event_id,
+                              void **jpeg, size_t *len) {
+    if (!d || !jpeg || !len) return RSDK_E_PARAM;
+    return read_blob(d, off, expect_event_id, jpeg, len);
+}
+
 rsdk_err_t rsdk_pic_read(rsdk_dev_t *d, void *meta, uint64_t pic_id, void **jpeg, size_t *len) {
     if (!d || !meta || !jpeg || !len) return RSDK_E_PARAM;
     sqlite3 *db = meta; sqlite3_stmt *st;
@@ -93,7 +110,7 @@ rsdk_err_t rsdk_pic_read(rsdk_dev_t *d, void *meta, uint64_t pic_id, void **jpeg
         return RSDK_E_DB;
     sqlite3_bind_int64(st,1,(sqlite3_int64)pic_id); sqlite3_bind_int(st,2,RSDK_DOC_SNAP);
     rsdk_err_t rc = RSDK_E_NOTFOUND;
-    if (sqlite3_step(st) == SQLITE_ROW) rc = read_blob(d, (uint64_t)sqlite3_column_int64(st,0), jpeg, len);
+    if (sqlite3_step(st) == SQLITE_ROW) rc = read_blob(d, (uint64_t)sqlite3_column_int64(st,0), 0, jpeg, len);
     sqlite3_finalize(st);
     return rc;
 }
@@ -128,5 +145,5 @@ rsdk_err_t rsdk_pic_get_for_event(rsdk_dev_t *d, void *meta, uint64_t event_id,
     int n = rsdk_pic_list_event(meta, event_id, want, r, 8);
     if (n <= 0 && type < 0) n = rsdk_pic_list_event(meta, event_id, -1, r, 8); /* 无主图则取任意 */
     if (n <= 0) return RSDK_E_NOTFOUND;
-    return read_blob(d, r[0].off, jpeg, len);
+    return read_blob(d, r[0].off, event_id, jpeg, len);
 }

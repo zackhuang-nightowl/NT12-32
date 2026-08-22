@@ -34,6 +34,7 @@ def main():
       f'#define RSDK_CFG_BACKUP_FMP4       {onoff(c.get("features.backup_fmp4","off"))}',
       f'#define RSDK_CFG_CHUNK_MIB         {chunk_mib}',
       f'#define RSDK_CFG_SLOTS_PER_CHUNK   {int(c.get("layout.slots_per_chunk","4"))}',
+      f'#define RSDK_CFG_EVT_SLOTS_PER_CHUNK {int(c.get("layout.evt_slots_per_chunk","64"))}',
       f'#define RSDK_CFG_META_RATIO_PCT10  {ratio10}',
       f'#define RSDK_CFG_HDD_FULL          {1 if str(c.get("layout.hdd_full","overwrite")).lower()=="stop" else 0}',
       f'#define RSDK_CFG_META_DB_PATH      "{c.get("metadata.db_path","/config/meta.db")}"',

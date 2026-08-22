@@ -206,17 +206,18 @@ int rsdk_cloud_on_reclaim(void *meta, uint16_t disk, uint64_t chunk)
     sqlite3 *db = db_of(meta);
     if (!db) return -1;
     sqlite3_stmt *st = NULL;
-    /* 起始 chunk 命中，或 segs 中任一段命中；且未 DONE/LOST → 置 LOST */
+    /* 起始 chunk 命中，或 segs 中任一段命中；且未 DONE → 置 NONE(源已覆盖,不再上传)。
+     * 注:去掉旧 LOST 态;事件级作废由 rsdk_evtidx_invalidate_chunk 负责(Phase6 移除本 meta.db 路径)。 */
     const char *U =
         "UPDATE meta_doc SET json=json_set(json,'$.state',?) "
-        "WHERE doc_type=? AND json_extract(json,'$.state') NOT IN (3,5) AND ("
+        "WHERE doc_type=? AND json_extract(json,'$.state') NOT IN (3) AND ("
         "  (json_extract(json,'$.disk')=? AND json_extract(json,'$.start_chunk')=?)"
         "  OR EXISTS(SELECT 1 FROM json_each(json,'$.segs') je "
         "            WHERE json_extract(je.value,'$.disk')=? AND json_extract(je.value,'$.chunk')=?)"
         ");";
     if (sqlite3_prepare_v2(db, U, -1, &st, NULL) != SQLITE_OK) return -1;
     int c = 1;
-    sqlite3_bind_int  (st, c++, RSDK_CLOUD_LOST);
+    sqlite3_bind_int  (st, c++, RSDK_CLOUD_NONE);
     sqlite3_bind_int  (st, c++, DOC_CLOUD);
     sqlite3_bind_int  (st, c++, (int)disk);
     sqlite3_bind_int64(st, c++, (sqlite3_int64)chunk);
