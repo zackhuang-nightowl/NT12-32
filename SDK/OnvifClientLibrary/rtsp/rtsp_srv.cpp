@@ -1477,6 +1477,7 @@ int rtsp_msg_parser(RSSUA * p_rua)
 
     memcpy(rx_msg->msg_buf, p_rua->rcv_buf, rtsp_pkt_len);
     rx_msg->msg_buf[rtsp_pkt_len] = '\0';
+    rx_msg->ctx_body = 0;   /* set below iff a body is present (part1 tokenizes headers) */
 
     log_print(HT_LOG_DBG, "%s\r\n", rx_msg->msg_buf);
 
@@ -1499,18 +1500,31 @@ int rtsp_msg_parser(RSSUA * p_rua)
 
         memcpy(rx_msg->msg_buf+rtsp_pkt_len, p_rua->rcv_buf+rtsp_pkt_len, rx_msg->ctx_len);
         rx_msg->msg_buf[rtsp_pkt_len + rx_msg->ctx_len] = '\0';
+        /* body sits after the (about-to-be-tokenized) headers; expose the intact bytes. */
+        rx_msg->ctx_body = rx_msg->msg_buf + rtsp_pkt_len;
 
         log_print(HT_LOG_DBG, "%s\r\n\r\n", rx_msg->msg_buf+rtsp_pkt_len);
 
-        int sdp_parse_len = rtsp_msg_parse_part2(rx_msg->msg_buf+parse_len, rx_msg->ctx_len, rx_msg);
-        if (sdp_parse_len != rx_msg->ctx_len)
+        /* SET_PARAMETER carries a text/parameters body (e.g. the APP's Timeline seek:
+         * "playback_ctrl: seek" + year:/month:/...), NOT SDP. Do not run the SDP body
+         * parser on it (it would fail and drop the request); the handler reads the raw
+         * body from msg_buf. Only ANNOUNCE/other SDP-bearing requests need part2. */
+        if (rx_msg->msg_sub_type == RTSP_MT_SET_PARAMETER)
         {
-            log_print(HT_LOG_ERR, "%s, rtsp_msg_parse_part2 = %d, ctx_len = %d!!!\r\n", 
-                __FUNCTION__, sdp_parse_len, rx_msg->ctx_len);
-            rtsp_free_msg(rx_msg);
-            return RTSP_PARSE_FAIL;
+            parse_len += rx_msg->ctx_len;
         }
-        parse_len += sdp_parse_len;
+        else
+        {
+            int sdp_parse_len = rtsp_msg_parse_part2(rx_msg->msg_buf+parse_len, rx_msg->ctx_len, rx_msg);
+            if (sdp_parse_len != rx_msg->ctx_len)
+            {
+                log_print(HT_LOG_ERR, "%s, rtsp_msg_parse_part2 = %d, ctx_len = %d!!!\r\n",
+                    __FUNCTION__, sdp_parse_len, rx_msg->ctx_len);
+                rtsp_free_msg(rx_msg);
+                return RTSP_PARSE_FAIL;
+            }
+            parse_len += sdp_parse_len;
+        }
     }
 
     if (parse_len < p_rua->rcv_dlen)
@@ -2493,6 +2507,8 @@ BOOL rtsp_setup_req(RSSUA * p_rua, HRTSP_MSG * rx_msg)
     return TRUE;
 }
 
+void rtsp_pb_resume_reader(RSSUA * p_rua);   /* fwd: defined below (playback seek resume) */
+
 BOOL rtsp_play_req(RSSUA * p_rua, HRTSP_MSG * rx_msg)
 {
     char range[256];
@@ -2641,6 +2657,10 @@ BOOL rtsp_play_req(RSSUA * p_rua, HRTSP_MSG * rx_msg)
 #endif
     }
 
+    /* If the app resumes a Timeline seek with the PLAY method (rather than
+     * SET_PARAMETER play), resume the playback reader here too (no-op for live). */
+    rtsp_pb_resume_reader(p_rua);
+
     return TRUE;
 }
 
@@ -2693,10 +2713,121 @@ BOOL rtsp_get_parameter_req(RSSUA * p_rua, HRTSP_MSG * rx_msg)
     return TRUE;
 }
 
+/* ---- Playback control hook (registered by the NVR cloud_tutk layer) ----
+ * The APP drives Timeline playback seek via RTSP SET_PARAMETER (see APP_client doc):
+ *   body "playback_ctrl: seek" + year:/month:/day:/hour:/min:/sec: (UTC)  -> seek
+ *   body "playback_ctrl: play"                                            -> resume
+ * On seek the device must pause + flush, then resume on the following play (SET_PARAMETER
+ * play or the PLAY method). The hook maps the session's channel (v_index) to the NVR
+ * playback reader; op 0=seek(utc), 1=play. Returns 0 if it acted on a playback slot. */
+typedef int (*pb_ctrl_fn)(int chn, int op, unsigned int utc);
+static pb_ctrl_fn s_pb_ctrl_hook = 0;
+
+extern "C" void rtsp_set_pb_ctrl_hook(pb_ctrl_fn fn)
+{
+    s_pb_ctrl_hook = fn;
+}
+
+/* Optional diagnostic sink for the SET_PARAMETER body — routed to the NVR log as a
+ * category-gated DEBUG line (silent unless NVR_LOG_CATS includes its category). */
+static void (*s_pb_diag)(int is_live, int ctx_len, const char *body) = 0;
+extern "C" void rtsp_set_pb_diag_hook(void (*fn)(int, int, const char *))
+{
+    s_pb_diag = fn;
+}
+
+
+/* Resume the playback reader for this session (no-op for live/initial). Called by the
+ * PLAY handler so the app can resume after a SET_PARAMETER seek using either play form. */
+void rtsp_pb_resume_reader(RSSUA * p_rua)
+{
+    if (s_pb_ctrl_hook && p_rua->media_info.is_live)
+    {
+        s_pb_ctrl_hook(p_rua->media_info.v_index, 1, 0);
+    }
+}
+
+/* Parse the seek target UTC from a SET_PARAMETER body (year:/month:/... or Seek:). */
+static uint32 sp_parse_seek_utc(const char * msg)
+{
+    /* msg is the raw body (ctx_body). Tolerate an optional leading "\r\n\r\n". */
+    const char * body = strstr(msg, "\r\n\r\n");
+    body = body ? body + 4 : msg;
+
+    int y = 0, mo = 0, d = 0, h = 0, mi = 0, sec = 0;
+    const char * p;
+    if ((p = strstr(body, "year:"))  != NULL) y   = atoi(p + 5);
+    if ((p = strstr(body, "month:")) != NULL) mo  = atoi(p + 6);
+    if ((p = strstr(body, "day:"))   != NULL) d   = atoi(p + 4);
+    if ((p = strstr(body, "hour:"))  != NULL) h   = atoi(p + 5);
+    if ((p = strstr(body, "min:"))   != NULL) mi  = atoi(p + 4);
+    if ((p = strstr(body, "sec:"))   != NULL) sec = atoi(p + 4);
+
+    if (y >= 1970 && mo >= 1 && d >= 1)
+    {
+        struct tm t; memset(&t, 0, sizeof(t));
+        t.tm_year = y - 1900; t.tm_mon = mo - 1; t.tm_mday = d;
+        t.tm_hour = h; t.tm_min = mi; t.tm_sec = sec;
+        time_t u = timegm(&t);
+        if (u > 0) return (uint32)u;
+    }
+
+    /* fallback: "Seek: <unix>" or "Seek: YYYYMMDDHHMMSS" */
+    if ((p = strstr(body, "Seek:")) != NULL || (p = strstr(body, "seek:")) != NULL)
+    {
+        p += 5;
+        while (*p == ' ') p++;
+        if (strlen(p) >= 14 && p[0] == '2')
+        {
+            char buf[16]; memcpy(buf, p, 14); buf[14] = 0;
+            int Y, M, D, H, MI, S;
+            if (sscanf(buf, "%4d%2d%2d%2d%2d%2d", &Y, &M, &D, &H, &MI, &S) == 6)
+            {
+                struct tm t; memset(&t, 0, sizeof(t));
+                t.tm_year = Y - 1900; t.tm_mon = M - 1; t.tm_mday = D;
+                t.tm_hour = H; t.tm_min = MI; t.tm_sec = S;
+                time_t u = timegm(&t);
+                if (u > 0) return (uint32)u;
+            }
+        }
+        return (uint32)strtoul(p, NULL, 10);
+    }
+    return 0;
+}
+
 BOOL rtsp_set_parameter_req(RSSUA * p_rua, HRTSP_MSG * rx_msg)
 {
+    /* Use ctx_body (raw body), NOT msg_buf: part1 tokenizes headers in msg_buf, so the
+     * C-string msg_buf ends at the request line and would never contain "playback_ctrl:". */
+    const char * body = (rx_msg && rx_msg->ctx_body) ? rx_msg->ctx_body : "";
+
+    if (s_pb_diag) s_pb_diag(p_rua->media_info.is_live, rx_msg ? (int)rx_msg->ctx_len : -1, body);
+
+    if (s_pb_ctrl_hook && p_rua->media_info.is_live &&
+        (strstr(body, "playback_ctrl: seek") || strstr(body, "playback_ctrl:seek")))
+    {
+        uint32 utc = sp_parse_seek_utc(body);
+        /* pause tx + jump reader to utc (reader re-opens + holds), then flush queued frames
+         * so resume starts cleanly at the new position (no stale pre-seek tail). */
+        rtsp_pause_stream_tx(p_rua);
+        p_rua->state = RSS_PAUSE;
+        s_pb_ctrl_hook(p_rua->media_info.v_index, 0, utc);
+        usleep(100 * 1000);   /* let in-flight producer/consumer settle before flush */
+        if (p_rua->media_info.v_queue) rtsp_media_clear_queue(p_rua->media_info.v_queue);
+        if (p_rua->media_info.a_queue) rtsp_media_clear_queue(p_rua->media_info.a_queue);
+        log_print(HT_LOG_INFO, "SET_PARAMETER seek utc=%u v_index=%d\r\n", utc, p_rua->media_info.v_index);
+    }
+    else if (s_pb_ctrl_hook && p_rua->media_info.is_live &&
+             (strstr(body, "playback_ctrl: play") || strstr(body, "playback_ctrl:play")))
+    {
+        s_pb_ctrl_hook(p_rua->media_info.v_index, 1, 0);
+        rtsp_restart_stream_tx(p_rua);
+        p_rua->state = RSS_PLAYING;
+        log_print(HT_LOG_INFO, "SET_PARAMETER play v_index=%d\r\n", p_rua->media_info.v_index);
+    }
+
     HRTSP_MSG * tx_msg = rsua_build_response(p_rua, "200 OK");
-    if (tx_msg == NULL) 
+    if (tx_msg == NULL)
     {
         return FALSE;
     }

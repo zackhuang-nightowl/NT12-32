@@ -5,9 +5,11 @@
  *    startSpeaker / stopSpeaker / buildTunnel。
  *
  *  直播/回放 URL host 必须是 iotc-tunnel;端口取本机实际 RTSP 监听口。
- *    live:      rtsp://iotc-tunnel:<port>/ch{N}_{stream}.264  (N=0-based)
- *               仅音频: .../ch{N}_audio
- *    playback:  rtsp://iotc-tunnel:<port>/playback/<startTime>
+ *    live:      rtsp://iotc-tunnel:<port>/ch<N>_<stream>.<264|265>  (N=0-based;扩展名按
+ *               通道视频类型;slot==通道号;仅 startLiveStream 后才分配/服务;音频随该路发)
+ *    playback:  rtsp://iotc-tunnel:<port>/playback/<startTime>  (按文档:时间戳 URL,不含通道;
+ *               库侧 resolver 由 startTime 反查登记的通道→slot;读盘线程按 pts 实时节拍出流。
+ *               RTSP/RTP 走官方标准,URL/接口交互按文档;seek=用新起点重发 startPlayback)
  ***************************************************************************************/
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -233,13 +235,14 @@ char *cmd_startLiveStream(cJSON *a, const nvr_cmd_ctx_t *c)
     if (!sel.ok) return nvr_resp_not_support();
     int port = nvr_rtsp_live_port();
     if (port <= 0) return nvr_resp_err("not_ready");
+    /* 收到 startLiveStream 才分配 slot 并开始服务(slot == 通道号)。URL 沿用原始
+     * ch<N>_<S>.264/.265 方案,扩展名按该通道视频类型("按视频类型")。音频随该路一起发。 */
     nvr_rtsp_live_select_media(chn0, sel.stream, sel.want_video, sel.want_audio);
+    if (nvr_rtsp_live_slot_of(chn0, sel.stream) < 0)
+        return nvr_resp_err("too_many_streams");
+    const char *ext = (nvr_rtsp_live_codec_of(chn0) == 1) ? "265" : "264";  /* 未知→264 */
     char url[160];
-    if (!sel.want_video && sel.want_audio)
-        snprintf(url, sizeof(url), "rtsp://iotc-tunnel:%d/ch%d_audio", port, chn0);
-    else
-        snprintf(url, sizeof(url), "rtsp://iotc-tunnel:%d/ch%d_%d.264",
-                 port, chn0, sel.stream);
+    snprintf(url, sizeof(url), "rtsp://iotc-tunnel:%d/ch%d_%d.%s", port, chn0, sel.stream, ext);
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "url", url);
     return nvr_resp_content(o);
@@ -247,8 +250,13 @@ char *cmd_startLiveStream(cJSON *a, const nvr_cmd_ctx_t *c)
 
 char *cmd_stopLiveStream(cJSON *a, const nvr_cmd_ctx_t *c)
 {
-    (void)a; (void)c;
-    nvr_rtsp_live_select(-1);
+    (void)c;
+    /* 带 channel 时只释放该通道的 slot(不误伤其它并发观看);缺省释放全部。 */
+    int ch1 = nvr_jint(a, "channel", 0);
+    if (ch1 >= 1)
+        nvr_rtsp_live_release(ch1 - 1);
+    else
+        nvr_rtsp_live_select(-1);
     return nvr_resp_ok();
 }
 
@@ -267,11 +275,17 @@ char *cmd_startPlayback(cJSON *a, const nvr_cmd_ctx_t *c)
     int port = nvr_rtsp_live_port();
     if (port <= 0) return nvr_resp_err("not_ready");
     (void)c;
-    nvr_rtsp_pb_prepare(chn0, start, sel.stream, sel.want_audio, sel.want_video, NULL);
+    /* pb_prepare 既登记(startTime→channel)又启动读盘线程出流;返回后 URL 即可拉。
+     * URL 按文档为 rtsp://iotc-tunnel:<port>/playback/<startTime>(时间戳,不含通道)——
+     * 库侧解析器把 playback/<ts> 经 resolver 反查回通道 slot(见 nvr_pb_resolve_slot)。
+     * 无论该时间点有无录像都必须回 URL(文档要求);duration=重叠段剩余秒(无段=0)。 */
+    uint32_t dur = 0;
+    nvr_rtsp_pb_prepare(chn0, start, sel.stream, sel.want_audio, sel.want_video, &dur);
     char url[160];
     snprintf(url, sizeof(url), "rtsp://iotc-tunnel:%d/playback/%u", port, start);
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "url", url);
+    cJSON_AddNumberToObject(o, "duration", (double)dur);
     return nvr_resp_content(o);
 }
 

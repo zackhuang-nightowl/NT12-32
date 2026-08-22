@@ -140,6 +140,9 @@ typedef struct
 #endif
 } UA_MEDIA_INFO;
 
+/* drain + free all queued packets (C++ linkage; used by the seek flush path). */
+void    rtsp_media_clear_queue(HQUEUE * queue);
+
 #ifdef __cplusplus
 extern "C" {
 #endif

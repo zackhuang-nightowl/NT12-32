@@ -1,15 +1,23 @@
 # ④ cloud_tutk — 本机 live+playback RTSP(:8554) + ODC agent cgi
 # P2P 会话由 /dvr/tutk_cloud_agent/AVAPIs_Server_CLI 负责,本库不再链 IOTC/P2PTunnel。
 cmake_minimum_required(VERSION 3.13)
-project(nvr_cloud_tutk C)
+project(nvr_cloud_tutk C CXX)
 
-add_library(nvr_cloud_tutk STATIC src/nvr_rtsp_live.c)
+# 隧道直播 RTSP 服务端改用 SDK 标准 nop::NopRtspServer(有挂钟媒体时钟,修冻结 bug)。
+# nvr_rtsp_srv.cpp 是 C++ shim,nvr_rtsp_live.c 走 C API 调用它。
+add_library(nvr_cloud_tutk STATIC
+    src/nvr_rtsp_live.c
+    src/nvr_rtsp_srv.cpp)
 target_include_directories(nvr_cloud_tutk PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../../common/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/../recorder/include)
-target_link_libraries(nvr_cloud_tutk PUBLIC pthread)
-set_target_properties(nvr_cloud_tutk PROPERTIES C_STANDARD 11)
+        ${CMAKE_CURRENT_SOURCE_DIR}/../recorder/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/OnvifClientLibrary)   # nop_rtsp.h
+# onvifclient(PUBLIC 用法要求)带来 media/ + bm/ 头(live_video.h / sys_inc.h),
+# 并把 onvifclient 追加到最终可执行链接行(在 nvr_cloud_tutk 之后)→ 修 NopRtspServer
+# 符号的链接顺序,无需改 app/CMakeLists.txt。
+target_link_libraries(nvr_cloud_tutk PUBLIC pthread onvifclient)
+set_target_properties(nvr_cloud_tutk PROPERTIES C_STANDARD 11 CXX_STANDARD 14)
 if(TARGET rsdk)
     add_dependencies(nvr_cloud_tutk rsdk)
 endif()

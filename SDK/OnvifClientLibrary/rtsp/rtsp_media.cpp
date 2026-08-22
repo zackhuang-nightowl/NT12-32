@@ -748,21 +748,25 @@ void * rtsp_media_video_thread(void * argv)
             }
 #endif
 
+            /* Playback threads its real media timestamp via packet.ts (has_ts=1) so the
+             * client timeline reflects recording time; live leaves has_ts=0 → wall-clock. */
+            uint32 rtp_ts = packet.has_ts ? packet.ts : get_rtp_timestamp(90000);
+
             if (VIDEO_CODEC_H264 == p_rua->media_info.v_info.codec)
             {
-                sret = rtp_h264_video_tx(p_rua, packet.data, packet.size, get_rtp_timestamp(90000));
+                sret = rtp_h264_video_tx(p_rua, packet.data, packet.size, rtp_ts);
             }
             else if (VIDEO_CODEC_H265 == p_rua->media_info.v_info.codec)
             {
-                sret = rtp_h265_video_tx(p_rua, packet.data, packet.size, get_rtp_timestamp(90000));
+                sret = rtp_h265_video_tx(p_rua, packet.data, packet.size, rtp_ts);
             }
             else if (VIDEO_CODEC_MP4 == p_rua->media_info.v_info.codec)
             {
-                sret = rtp_video_tx(p_rua, packet.data, packet.size, get_rtp_timestamp(90000));
+                sret = rtp_video_tx(p_rua, packet.data, packet.size, rtp_ts);
             }
             else if (VIDEO_CODEC_JPEG == p_rua->media_info.v_info.codec)
             {
-                sret = rtp_jpeg_video_tx(p_rua, packet.data, packet.size, get_rtp_timestamp(90000));
+                sret = rtp_jpeg_video_tx(p_rua, packet.data, packet.size, rtp_ts);
             }
 
             free(packet.buff);
@@ -923,7 +927,8 @@ void * rtsp_media_audio_thread(void * argv)
     return NULL;
 }
 
-void rtsp_media_put_video(RSSUA * p_rua, uint8 *data, int size, int waitnext = 1)
+void rtsp_media_put_video(RSSUA * p_rua, uint8 *data, int size, int waitnext = 1,
+                          uint32 ts = 0, int has_ts = 0)
 {
     UA_PACKET packet;
 
@@ -947,6 +952,8 @@ void rtsp_media_put_video(RSSUA * p_rua, uint8 *data, int size, int waitnext = 1
             memcpy(packet.data, data, size);
             packet.size = size;
             packet.waitnext = waitnext;
+            packet.ts = ts;
+            packet.has_ts = has_ts;
 
             if (hqueue_put(p_rua->media_info.v_queue, (char *)&packet) == FALSE)
             {
@@ -2229,53 +2236,198 @@ void rtsp_media_device_send(RSSUA * p_rua)
 
 #ifdef MEDIA_LIVE
 
+/* Playback URL resolver: the app pulls rtsp://.../playback/<startTime> (a UTC timestamp,
+ * no channel — per the APP client doc). The RTSP engine has no idea which NVR channel that
+ * timestamp maps to, so the NVR registers a resolver that turns the startTime into a live
+ * slot index (== channel; the NVR pre-started a reader thread feeding that slot). Returns
+ * the slot idx, or <0 if unknown/not-ready. Kept as a plain C function pointer so the C
+ * cloud_tutk layer can register it without pulling in C++ headers. */
+typedef int (*pb_slot_resolver_fn)(unsigned int start_ts);
+static pb_slot_resolver_fn s_pb_resolver = 0;
+
+extern "C" void rtsp_set_pb_slot_resolver(pb_slot_resolver_fn fn)
+{
+    s_pb_resolver = fn;
+}
+
 BOOL rtsp_parse_live_url(RSSUA * p_rua, const char * p_url)
 {
-    // todo : parse the URL suffix, set the p_rua->media_info struct
-
-    if (strncasecmp(p_url, "live", strlen("live")) == 0 || 
-        strncasecmp(p_url, "live1", strlen("live1")) == 0)
+    // Playback: "playback/<startTime>" → resolve to a live slot via the registered resolver.
+    if (strncasecmp(p_url, "playback/", 9) == 0)
     {
+        if (!s_pb_resolver)
+        {
+            return FALSE;
+        }
+
+        const char * p_ts = p_url + 9;
+        if (!isdigit((unsigned char)*p_ts))
+        {
+            return FALSE;
+        }
+
+        unsigned int start_ts = (unsigned int)strtoul(p_ts, 0, 10);
+        int pb_idx = s_pb_resolver(start_ts);
+        if (pb_idx < 0)
+        {
+            return FALSE;
+        }
+
+        CLiveVideo * pv = CLiveVideo::getInstance(pb_idx);
+        if (!pv || !pv->isInited())
+        {
+            if (pv) pv->freeInstance(pb_idx);
+            return FALSE;
+        }
+
         p_rua->media_info.is_live = 1;
-
         p_rua->media_info.has_video = 1;
-        p_rua->media_info.v_index = 0;
-        p_rua->media_info.v_info.framerate = 25;
-        p_rua->media_info.v_info.width = 1920;
-        p_rua->media_info.v_info.height = 1080;
-        p_rua->media_info.v_info.codec = VIDEO_CODEC_H264;
+        p_rua->media_info.v_index = pb_idx;
+        p_rua->media_info.v_info.codec     = pv->getCodec();
+        p_rua->media_info.v_info.width     = pv->getWidth();
+        p_rua->media_info.v_info.height    = pv->getHeight();
+        p_rua->media_info.v_info.framerate = pv->getFramerate();
+        p_rua->media_info.v_info.bitrate   = pv->getBitrate();
+        pv->freeInstance(pb_idx);
 
-        // todo : If there is no audio, comment out the following statements
+        CLiveAudio * pa = CLiveAudio::getInstance(pb_idx);
+        if (pa && pa->isInited())
+        {
+            p_rua->media_info.has_audio = 1;
+            p_rua->media_info.a_index = pb_idx;
+            p_rua->media_info.a_info.codec      = pa->getCodec();
+            p_rua->media_info.a_info.samplerate = pa->getSamplerate();
+            p_rua->media_info.a_info.channels   = pa->getChannels();
+            p_rua->media_info.a_info.bitrate    = pa->getBitrate();
+        }
+        else
+        {
+            p_rua->media_info.has_audio = 0;
+        }
+        if (pa) pa->freeInstance(pb_idx);
 
-        p_rua->media_info.has_audio = 1;
-        p_rua->media_info.a_index = 0;
-        p_rua->media_info.a_info.samplerate = 8000;
-        p_rua->media_info.a_info.channels = 1;
-        p_rua->media_info.a_info.codec = AUDIO_CODEC_G711U;
+        return TRUE;
     }
-    else if (strncasecmp(p_url, "live2", strlen("live2")) == 0)
+
+    // Two URL schemes map to a live slot index (idx). The slot index EQUALS the NVR
+    // channel (one CLiveVideo slot per channel; only one stream served per channel at
+    // a time), so the URL is self-describing and needs no app-side lookup:
+    //   ch<N>_<S>[.264|.265]  -> idx = N       (NVR scheme: N=channel 0-based, S=stream)
+    //   live<M>               -> idx = M - 1   (M=1..; bare "live" == "live1")
+    // The .264/.265 extension and the S field are informational only; the true
+    // codec/resolution come from the slot getters (getCodec/getWidth/...).
+    int idx = -1;
+
+    if (strncasecmp(p_url, "ch", 2) == 0 && isdigit((unsigned char)p_url[2]))
     {
-        p_rua->media_info.is_live = 1;
+        const char * p = p_url + 2;
+        char num_buf[16] = { 0 };
+        int  i = 0;
 
-        p_rua->media_info.has_video = 1;
-        p_rua->media_info.v_index = 1;
-        p_rua->media_info.v_info.framerate = 25;
-        p_rua->media_info.v_info.width = 1280;
-        p_rua->media_info.v_info.height = 720;
-        p_rua->media_info.v_info.codec = VIDEO_CODEC_H264;
+        while (isdigit((unsigned char)*p) && i < (int)sizeof(num_buf) - 1)
+        {
+            num_buf[i++] = *p++;
+        }
 
-        // todo : If there is no audio, comment out the following statements
+        if (i == 0 || *p != '_')   // require "ch<digits>_"
+        {
+            return FALSE;
+        }
 
-        p_rua->media_info.has_audio = 1;
-        p_rua->media_info.a_index = 0;
-        p_rua->media_info.a_info.samplerate = 8000;
-        p_rua->media_info.a_info.channels = 1;
-        p_rua->media_info.a_info.codec = AUDIO_CODEC_G711U;
+        idx = atoi(num_buf);
+    }
+    else if (strncasecmp(p_url, "live", strlen("live")) == 0)
+    {
+        const char * p_num = p_url + strlen("live");
+        int stream_num = 1;
+
+        if (*p_num != '\0' && *p_num != '/' && *p_num != '.' && *p_num != '?')
+        {
+            char num_buf[16] = { 0 };
+            int  i = 0;
+
+            while (*p_num != '\0' && *p_num != '/' && *p_num != '.' && *p_num != '?' &&
+                   i < (int)sizeof(num_buf) - 1)
+            {
+                if (!isdigit((unsigned char)*p_num))
+                {
+                    return FALSE;
+                }
+
+                num_buf[i++] = *p_num++;
+            }
+
+            num_buf[i] = '\0';
+
+            if (i == 0)
+            {
+                return FALSE;
+            }
+
+            stream_num = atoi(num_buf);
+        }
+
+        if (stream_num < 1)
+        {
+            return FALSE;
+        }
+
+        idx = stream_num - 1;
     }
     else
     {
         return FALSE;
     }
+
+    if (idx < 0)
+    {
+        return FALSE;
+    }
+
+    // getInstance() bumps the slot refcount (and lazily allocates); this is a
+    // read-only peek to fill the SDP, so every getInstance() here is balanced
+    // by a freeInstance() before returning. Otherwise each DESCRIBE would leak
+    // a ref and the slot could never drop to refcnt 0 → never reset m_bInited
+    // → could not be re-inited at a new resolution on reuse.
+    CLiveVideo * v = CLiveVideo::getInstance(idx);
+
+    if (!v || !v->isInited())
+    {
+        if (v) v->freeInstance(idx);
+        return FALSE;
+    }
+
+    p_rua->media_info.is_live = 1;
+
+    p_rua->media_info.has_video = 1;
+    p_rua->media_info.v_index = idx;
+    p_rua->media_info.v_info.codec = v->getCodec();
+    p_rua->media_info.v_info.width = v->getWidth();
+    p_rua->media_info.v_info.height = v->getHeight();
+    p_rua->media_info.v_info.framerate = v->getFramerate();
+    p_rua->media_info.v_info.bitrate = v->getBitrate();
+
+    // balance the video peek ref (see note above)
+    v->freeInstance(idx);
+
+    CLiveAudio * a = CLiveAudio::getInstance(idx);
+
+    if (a && a->isInited())
+    {
+        p_rua->media_info.has_audio = 1;
+        p_rua->media_info.a_index = idx;
+        p_rua->media_info.a_info.codec = a->getCodec();
+        p_rua->media_info.a_info.samplerate = a->getSamplerate();
+        p_rua->media_info.a_info.channels = a->getChannels();
+        p_rua->media_info.a_info.bitrate = a->getBitrate();
+    }
+    else
+    {
+        p_rua->media_info.has_audio = 0;
+    }
+
+    // balance the audio peek ref (getInstance allocates+refs even when !isInited)
+    if (a) a->freeInstance(idx);
 
     return TRUE;
 }
@@ -2376,7 +2528,12 @@ void rtsp_media_live_video_callback(uint8 * data, int size, void * pUserdata)
 
     if (p_rua->channels[AV_VIDEO_CH].setup)
     {
-        rtsp_media_put_video(p_rua, data, size, 0);
+        /* Carry the pushed frame's real ts (playback) so the RTP timeline reflects
+         * recording time; live frames report ts_valid=0 → wall-clock. */
+        CLiveVideo * lv = p_rua->media_info.live_video;
+        uint32 ts = 0; int has_ts = 0;
+        if (lv) { ts = lv->getCurTs(); has_ts = lv->getCurTsValid(); }
+        rtsp_media_put_video(p_rua, data, size, 0, ts, has_ts);
     }
 }
 

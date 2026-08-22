@@ -26,7 +26,9 @@ typedef struct
     uint8 * data;                   // audio and video data
     int     size;                   // audio and video data size
     int     nbsamples;              // the number of audio samples
-    int     waitnext;               // wait for next packet, used to control the rate of audio and video transmission 
+    int     waitnext;               // wait for next packet, used to control the rate of audio and video transmission
+    uint32  ts;                     // caller-supplied RTP timestamp (90kHz); used only if has_ts
+    int     has_ts;                 // 1 = use ts as the RTP timestamp (playback: real media time); 0 = wall-clock
 } UA_PACKET;
 
 typedef struct

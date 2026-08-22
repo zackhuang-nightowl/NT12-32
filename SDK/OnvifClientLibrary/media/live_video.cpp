@@ -62,6 +62,12 @@ CLiveVideo::CLiveVideo()
 
     m_pCallbackMutex = sys_os_create_mutex();
     m_pCallbackList = hlist_create(FALSE);
+
+    memset(&m_paramSets, 0, sizeof(m_paramSets));
+    m_bParamsGot = FALSE;
+
+    m_curTs = 0;
+    m_curTsValid = 0;
 }
 
 CLiveVideo::~CLiveVideo()
@@ -120,6 +126,8 @@ void CLiveVideo::freeInstance(int idx)
 
             if (m_pInstance[idx]->m_nRefCnt <= 0)
             {
+                m_pInstance[idx]->m_bInited = FALSE;
+
                 delete m_pInstance[idx];
                 m_pInstance[idx] = NULL;
             }
@@ -131,10 +139,9 @@ void CLiveVideo::freeInstance(int idx)
 
 int CLiveVideo::getStreamNums()
 {
-    // todo : return the max number of streams supported, don't be more than MAX_LIVE_VIDEO_NUMS
-
-    
-    return 2;
+    // NVR serves up to one live slot per device channel (32). addStream() validates
+    // the requested idx against this; keep it == MAX_LIVE_VIDEO_NUMS.
+    return MAX_LIVE_VIDEO_NUMS;
 }
 
 BOOL CLiveVideo::initCapture(int codec, int width, int height, double framerate, int bitrate)
@@ -162,6 +169,29 @@ BOOL CLiveVideo::initCapture(int codec, int width, int height, double framerate,
 
 void CLiveVideo::getAuxSDPLine(char * buff, int size, int rtp_pt)
 {
+    if (buff && size > 0)
+    {
+        buff[0] = '\0';
+    }
+
+    if (!m_bParamsGot || NULL == buff || size <= 0)
+    {
+        return;
+    }
+
+    if (VIDEO_CODEC_H264 == m_nCodecId)
+    {
+        ht_gen_h264_sdp_line(buff, size, rtp_pt,
+                             m_paramSets.sps, m_paramSets.sps_size,
+                             m_paramSets.pps, m_paramSets.pps_size);
+    }
+    else if (VIDEO_CODEC_H265 == m_nCodecId)
+    {
+        ht_gen_h265_sdp_line(buff, size, rtp_pt,
+                             m_paramSets.sps, m_paramSets.sps_size,
+                             m_paramSets.pps, m_paramSets.pps_size,
+                             m_paramSets.vps, m_paramSets.vps_size);
+    }
 }
 
 BOOL CLiveVideo::startCapture()
@@ -280,11 +310,27 @@ void CLiveVideo::delCallback(LiveVideoDataCB pCallback, void * pUserdata)
     sys_os_mutex_leave(m_pCallbackMutex);
 }
 
-void CLiveVideo::procData(uint8 * data, int size)
+void CLiveVideo::procData(uint8 * data, int size, uint32 ts, int ts_valid)
 {
     LiveVideoCB * p_cb = NULL;
     LKNODE * p_node = NULL;
-    
+
+    /* Record this frame's caller ts for the RTSP callback (synchronous fan-out below
+     * reads it via getCurTs/getCurTsValid). Playback sets a real 90kHz ts; live leaves 0. */
+    m_curTs = ts;
+    m_curTsValid = ts_valid;
+
+    /* Sniff VPS/SPS/PPS once from the pushed Annex-B so getAuxSDPLine can emit
+     * sprop-* in the served SDP (needed by H265/DXVA clients that init the
+     * depacketizer from SDP rather than in-band). Cheap after first capture. */
+    if (!m_bParamsGot && data && size > 0)
+    {
+        if (avc_get_h26x_paramsets(data, size, m_nCodecId, &m_paramSets))
+        {
+            m_bParamsGot = TRUE;
+        }
+    }
+
     sys_os_mutex_enter(m_pCallbackMutex);
 
     p_node = hlist_lookup_start(m_pCallbackList);
@@ -303,6 +349,46 @@ void CLiveVideo::procData(uint8 * data, int size)
     sys_os_mutex_leave(m_pCallbackMutex);
 }
 
+int CLiveVideo::getCodec() const
+{
+    return m_nCodecId;
+}
+
+int CLiveVideo::getWidth() const
+{
+    return m_nWidth;
+}
+
+int CLiveVideo::getHeight() const
+{
+    return m_nHeight;
+}
+
+double CLiveVideo::getFramerate() const
+{
+    return m_nFramerate;
+}
+
+int CLiveVideo::getBitrate() const
+{
+    return m_nBitrate;
+}
+
+BOOL CLiveVideo::isInited() const
+{
+    return m_bInited;
+}
+
+uint32 CLiveVideo::getCurTs() const
+{
+    return m_curTs;
+}
+
+int CLiveVideo::getCurTsValid() const
+{
+    return m_curTsValid;
+}
+
 BOOL media_live_put_video(int idx, uint8 * data, int size)
 {
     CLiveVideo * live = CLiveVideo::getInstance(idx);
@@ -312,9 +398,24 @@ BOOL media_live_put_video(int idx, uint8 * data, int size)
     }
 
     live->procData(data, size);
-    
+
     live->freeInstance(idx);
-    
+
+    return TRUE;
+}
+
+BOOL media_live_put_video_ts(int idx, uint8 * data, int size, uint32 ts)
+{
+    CLiveVideo * live = CLiveVideo::getInstance(idx);
+    if (NULL == live)
+    {
+        return FALSE;
+    }
+
+    live->procData(data, size, ts, 1);
+
+    live->freeInstance(idx);
+
     return TRUE;
 }
 

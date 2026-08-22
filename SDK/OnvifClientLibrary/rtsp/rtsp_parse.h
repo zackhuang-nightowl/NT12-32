@@ -72,6 +72,9 @@ typedef struct hrtsp_msg_content
 
     char      * msg_buf;
     int         buf_offset;
+    char      * ctx_body;       // pointer to the raw (un-tokenized) request body in msg_buf,
+                                // NULL if none. part1 tokenizes headers in msg_buf, so the
+                                // C-string msg_buf ends at the request line; use this for the body.
 
     uint32      remote_ip;
     uint16      remote_port;

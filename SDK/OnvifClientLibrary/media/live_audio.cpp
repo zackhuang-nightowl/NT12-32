@@ -118,6 +118,8 @@ void CLiveAudio::freeInstance(int idx)
 
             if (m_pInstance[idx]->m_nRefCnt <= 0)
             {
+                m_pInstance[idx]->m_bInited = FALSE;
+
                 delete m_pInstance[idx];
                 m_pInstance[idx] = NULL;
             }
@@ -146,9 +148,8 @@ void CLiveAudio::getAuxSDPLine(char * buff, int size, int rtp_pt)
 
 int CLiveAudio::getStreamNums()
 {
-    // todo : return the max number of streams supported, don't be more than MAX_LIVE_AUDIO_NUMS
-    
-    return 2;
+    // NVR serves up to one live slot per device channel (32). Keep == MAX_LIVE_AUDIO_NUMS.
+    return MAX_LIVE_AUDIO_NUMS;
 }
 
 BOOL CLiveAudio::initCapture(int codec, int samplerate, int channels, int bitrate)
@@ -310,6 +311,31 @@ void CLiveAudio::procData(uint8 * data, int size, int nbsamples)
     hlist_lookup_end(m_pCallbackList);
 
     sys_os_mutex_leave(m_pCallbackMutex);
+}
+
+int CLiveAudio::getCodec() const
+{
+    return m_nCodecId;
+}
+
+int CLiveAudio::getSamplerate() const
+{
+    return m_nSampleRate;
+}
+
+int CLiveAudio::getChannels() const
+{
+    return m_nChannel;
+}
+
+int CLiveAudio::getBitrate() const
+{
+    return m_nBitrate;
+}
+
+BOOL CLiveAudio::isInited() const
+{
+    return m_bInited;
 }
 
 BOOL media_live_put_audio(int idx, uint8 * data, int size, int nbsamples)

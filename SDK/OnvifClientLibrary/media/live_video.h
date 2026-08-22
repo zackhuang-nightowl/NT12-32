@@ -21,10 +21,11 @@
 #define LIVE_VIDEO_H
 
 #include "linked_list.h"
+#include "media_util.h"     /* H26XParamSets (for served-SDP sprop generation) */
 
 /***************************************************************************************/
 
-#define MAX_LIVE_VIDEO_NUMS  4
+#define MAX_LIVE_VIDEO_NUMS  32
 
 typedef void (*LiveVideoDataCB)(uint8 *data, int size, void *pUserdata);
 
@@ -59,7 +60,19 @@ public:
     virtual void    getAuxSDPLine(char * buff, int size, int rtp_pt);
     virtual BOOL    captureThread();
 
-    void            procData(uint8 * data, int size);
+    void            procData(uint8 * data, int size, uint32 ts = 0, int ts_valid = 0);
+
+    // real-data getters (read-only accessors for current capture params)
+    int             getCodec() const;
+    int             getWidth() const;
+    int             getHeight() const;
+    double          getFramerate() const;
+    int             getBitrate() const;
+    BOOL            isInited() const;
+    // current frame's caller-supplied RTP timestamp (set by procData, read by the
+    // RTSP callback within the same synchronous fan-out); ts_valid=0 → use wall-clock.
+    uint32          getCurTs() const;
+    int             getCurTsValid() const;
     
 protected:
     CLiveVideo();
@@ -90,6 +103,14 @@ protected:
 
     void                  * m_pCallbackMutex;
     LKLIST                * m_pCallbackList;
+
+    /* Parameter sets (VPS/SPS/PPS) sniffed from the first decodable pushed frame,
+     * used to emit sprop-* in the served SDP (getAuxSDPLine). Populated once. */
+    H26XParamSets           m_paramSets;
+    BOOL                    m_bParamsGot;
+
+    uint32                  m_curTs;        // current frame RTP ts (playback)
+    int                     m_curTsValid;   // 1 = m_curTs valid; 0 = wall-clock
 };
 
 /*
@@ -100,6 +121,9 @@ protected:
  * implement the CLiveVideo::captureThread function 
  */
 BOOL media_live_put_video(int idx, uint8 * data, int size);
+/* Same as media_live_put_video but carries a real RTP timestamp (90kHz) for the frame,
+ * used by playback so the served timeline reflects recording time (not wall-clock). */
+BOOL media_live_put_video_ts(int idx, uint8 * data, int size, uint32 ts);
 
 #endif
 

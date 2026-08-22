@@ -26,7 +26,7 @@
 
 /***************************************************************************************/
 
-#define MAX_LIVE_AUDIO_NUMS  4
+#define MAX_LIVE_AUDIO_NUMS  32
 
 typedef void (*LiveAudioDataCB)(uint8 *data, int size, int nbsamples, void *pUserdata);
 
@@ -61,9 +61,16 @@ public:
     virtual void    addCallback(LiveAudioDataCB pCallback, void * pUserdata);
     virtual void    delCallback(LiveAudioDataCB pCallback, void * pUserdata);
 
-    virtual BOOL    captureThread();    
+    virtual BOOL    captureThread();
 
     void            procData(uint8 * data, int size, int nbsamples);
+
+    // real-data getters (read-only accessors for current capture params)
+    int             getCodec() const;
+    int             getSamplerate() const;
+    int             getChannels() const;
+    int             getBitrate() const;
+    BOOL            isInited() const;
     
 protected:
     CLiveAudio();

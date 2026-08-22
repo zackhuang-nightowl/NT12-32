@@ -74,7 +74,7 @@ enum NopRtspEvent {
  * MUST stay in sync with MAX_LIVE_VIDEO_NUMS / MAX_LIVE_AUDIO_NUMS in
  * media/live_video.h and media/live_audio.h (currently 4). addStream() validates
  * the requested idx against the real CLiveVideo/CLiveAudio stream count. */
-static const int NOP_RTSP_MAX_STREAMS = 4;
+static const int NOP_RTSP_MAX_STREAMS = 32;
 
 /***************************************************************************************
  * Library lifecycle (buffer pools).

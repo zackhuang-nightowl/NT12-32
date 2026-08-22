@@ -21,6 +21,13 @@ void nvr_rtsp_live_stop(void);
 /* 实际监听端口;未启动返回 0。URL 必须用此值,禁止写死。 */
 int  nvr_rtsp_live_port(void);
 
+/* (chn,stream) 当前占用的 slot(== chn),未分配返回 -1。 */
+int  nvr_rtsp_live_slot_of(int chn, int stream);
+/* 该通道最近观测到的视频 codec:0=H264 1=H265 -1=未知。URL 扩展名 .264/.265 用。 */
+int  nvr_rtsp_live_codec_of(int chn);
+/* 释放某通道(主+子)占用的 live slot;stopLiveStream 带 channel 时用。 */
+void nvr_rtsp_live_release(int chn);
+
 /* 热插拔后盘组指针变化时重绑;NULL=无盘(回放只推空白帧)。 */
 void nvr_rtsp_live_set_group(struct rsdk_group *group);
 
