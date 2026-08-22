@@ -240,8 +240,8 @@ int nvr_cloud_uploader_start(const nvr_cloud_uploader_cfg_t *cfg, nvr_cloud_uplo
     nvr_cloud_uploader_t *up = calloc(1, sizeof(*up));
     if (!up) return -1;
     up->cfg = *cfg;
-    if (up->cfg.poll_interval_s <= 0) up->cfg.poll_interval_s = 5;
-    if (up->cfg.slice_ms <= 0)        up->cfg.slice_ms = 15000;
+    if (up->cfg.poll_interval_s <= 0) up->cfg.poll_interval_s = NVR_CLOUD_DEF_POLL_S;
+    if (up->cfg.slice_ms <= 0)        up->cfg.slice_ms = NVR_CLOUD_DEF_SLICE_MS;
     if (up->cfg.worker_count <= 0)    up->cfg.worker_count = 1;
     if (cfg->stoken) snprintf(up->stoken, sizeof(up->stoken), "%s", cfg->stoken);
     pthread_mutex_init(&up->lk, NULL);

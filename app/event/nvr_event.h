@@ -35,8 +35,10 @@ typedef struct {
     uint32_t motion, human, face, car, animal, package, linecross, field;
 } nvr_evt_mask_set_t;
 
-/* 事件段落盘窗口(秒):mark_event 记录 [start, start+此] 的事件段末。 */
-#define NVR_EVT_POST_RECORD_S 30
+/* 事件段落盘窗口(秒):mark_event 记录 [start, start+此] 的事件段末。
+ * 单一出厂默认宏在 nvr_defaults.h(改一处即全局统一)。 */
+#include "nvr_defaults.h"
+#define NVR_EVT_POST_RECORD_S NVR_DEF_POST_RECORD_S
 
 typedef struct {
     nop_event_hub_t *nop_hub;      /* 共享事件脊柱（app 创建并传入） */

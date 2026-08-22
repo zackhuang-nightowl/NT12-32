@@ -558,7 +558,7 @@ static void maybe_start_uploader(nvr_app_t *a, const char *config_dir)
     nvr_cloud_uploader_cfg_t uc = {
         .group = a->group, .meta = a->meta, .settings = a->settings, .udid = udid, .stoken = ow.stoken,
         .stage = nvr_settings_get_int(a->settings, "cloud.stage", 0),
-        .worker_count = 2, .poll_interval_s = NVR_DEF_CLOUD_POLL_S, .slice_ms = NVR_DEF_CLOUD_SLICE_MS,
+        .worker_count = 2, .poll_interval_s = NVR_CLOUD_DEF_POLL_S, .slice_ms = NVR_CLOUD_DEF_SLICE_MS,
     };
     if (nvr_cloud_uploader_start(&uc, &a->up) == 0) {
         nvr_cloud_uploader_set_switch(a->up, nvr_settings_get_int(a->settings, "cloud.switch", 0));
@@ -927,7 +927,7 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
     }
 
     nvr_rec_sched_cfg_t rc = { .group = a->group, .meta = a->meta, .settings = a->settings,
-                               .hdd_full_policy = a->cfg.storage.hdd_full, .post_record_s = 10,
+                               .hdd_full_policy = a->cfg.storage.hdd_full, .post_record_s = NVR_DEF_POST_RECORD_S,
                                .end_user = a, .on_event_end = app_on_event_end,
                                .cloud_user = a, .on_cloud_event = app_on_cloud_event };
     nvr_rec_sched_init(&rc, &a->rs);

@@ -18,12 +18,11 @@
 #define NVR_DEF_TUTK_DEV_TYPE "videoRecorder" /* TUTK profile 设备类型(APP 向导契约) */
 #define NVR_DEF_CAPACITY    32          /* 整机通道容量(= 16 PoE + 16 LAN) */
 
-/* ================= 事件录像/云存 出厂默认(UI 设置库缺省时回退;库存在则以库为准) =====
- * 出厂值集中在此(而非散落硬编码),实机调试后可改。 */
+/* ================= 事件录像 出厂默认(UI 设置库缺省时回退;库存在则以库为准) =====
+ * ★单一出厂默认宏:改这一处即全局统一(nvr_event/record_sched/nvr_app/nvr_cmd_event 都引用)。 */
 #define NVR_DEF_POST_RECORD_S    10     /* 事件后录秒 */
 #define NVR_DEF_PRE_RECORD_S     5      /* 事件预录秒 */
-#define NVR_DEF_CLOUD_POLL_S     5      /* 云存待传轮询间隔秒 */
-#define NVR_DEF_CLOUD_SLICE_MS   15000  /* 云存 TS 切片时长毫秒 */
+/* 云存出厂默认在组件公有头 nvr_cloud_uploader.h(NVR_CLOUD_DEF_POLL_S/SLICE_MS,分层不倒挂)。 */
 
 /* ================= 通道容量缺省(GUI_CONFIG.json channels=[PoE,LAN] 读不到时用) ===== */
 #define NVR_DEF_GUI_POE_N   16          /* 缺省 PoE 通道数 */

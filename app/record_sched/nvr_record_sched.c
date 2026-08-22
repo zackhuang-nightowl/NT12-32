@@ -84,7 +84,7 @@ uint64_t nvr_rec_trigger_event(nvr_rec_sched_t *r, int chn, int rectype, uint32_
     time_t now = time(NULL);
     if (start_epoch == 0) start_epoch = (uint32_t)now;
     int post = (post_s > 0) ? post_s : r->cfg.post_record_s;
-    if (post <= 0) post = 10;
+    if (post <= 0) post = NVR_DEF_POST_RECORD_S;
 
     /* 进行中的同类型事件 → 仅延长后录窗口 */
     if (c->evt_active && c->evt_rectype == rectype) {
