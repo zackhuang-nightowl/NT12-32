@@ -80,6 +80,8 @@ RSDK_API rsdk_err_t rsdk_dev_rekey(rsdk_dev_t *d);
 RSDK_API rsdk_rawdev_t     *rsdk_dev_raw(rsdk_dev_t *d);
 RSDK_API rsdk_superblock_t *rsdk_dev_sb (rsdk_dev_t *d);
 RSDK_API rsdk_systab_t     *rsdk_dev_systab(rsdk_dev_t *d);
+RSDK_API uint8_t           *rsdk_dev_evtidx_cache(rsdk_dev_t *d);  /* 事件区内存镜像(NULL=直读盘) */
+RSDK_API void               rsdk_dev_evtidx_reload(rsdk_dev_t *d); /* 带外改盘后从盘重载镜像(一致化) */
 RSDK_API rsdk_err_t         rsdk_dev_flush(rsdk_dev_t *d);  /* 回写 SB+SysTab */
 RSDK_API struct rsdk_crypto *rsdk_dev_crypto(rsdk_dev_t *d); /* NULL 表示明文 */
 /* 分配下一个数据 chunk(环形覆盖); 返回 chunk 下标 + 盘内字节偏移 */

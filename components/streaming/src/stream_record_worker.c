@@ -12,7 +12,9 @@
 #define REC_WORKER_BYTE_BUDGET  (512 * 1024)  /* 每路每轮最多写 512KB */
 #define REC_WORKER_IDLE_MS      50
 #define REC_WORKER_FLUSH_MS     5000
-#define REC_SEG_SECONDS         60             /* 定时切片目标时长(秒); 到点后在下个 IDR 切新段 */
+/* 段切分策略:主要按 chunk 近满(rsdk_rec_chunk_near_full)在下个 IDR 切,填满大 chunk 不浪费;
+ * 此值仅作低码率兜底上限(chunk 迟迟填不满时避免单段过久)。正常码率下远早于此即因近满切段。 */
+#define REC_SEG_MAX_SECONDS     3600           /* 段最长时长(秒)兜底; 正常按 chunk 近满切 */
 #define REC_DATASYNC_SECONDS    1              /* 周期 fdatasync 间隔(秒): 掉电丢失窗口上界 */
 
 static struct {
@@ -117,9 +119,12 @@ static int worker_write_slot(stream_chan_t *c, stream_pull_t *p,
         if (p->stream == NVR_STREAM_SUB) c->rec_gated_sub = 1;
         else c->rec_gated_main = 1;
     }
-    /* ★ 定时切片(IDR 对齐): 到达目标时长后, 在下一个关键帧处切新段 → 新段从 IDR 起, 回放段界无缝。 */
+    /* ★ 切段(IDR 对齐,段填满才切): chunk 近满时在下一个关键帧处切新段 → 既填满大 chunk
+     * (不浪费容量/不缩短保留),又保证新段从 IDR 起(回放段界干净)。段内定位交给关键帧表 seek。
+     * 时长上限 REC_SEG_MAX_SECONDS 仅作低码率兜底,避免单段过久(chunk 迟迟填不满时)。 */
     if (s->is_key && p->rec_seg_start_wall &&
-        (uint32_t)(wt - p->rec_seg_start_wall) >= REC_SEG_SECONDS) {
+        (rsdk_rec_chunk_near_full(wrec) ||
+         (uint32_t)(wt - p->rec_seg_start_wall) >= REC_SEG_MAX_SECONDS)) {
         if (rsdk_rec_rotate(wrec) == RSDK_OK) p->rec_seg_start_wall = wt;
     }
     memset(&f, 0, sizeof(f));

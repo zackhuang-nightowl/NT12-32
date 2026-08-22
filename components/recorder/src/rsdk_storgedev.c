@@ -30,6 +30,12 @@ struct rsdk_dev {
     uint32_t *chunk_slot;    /* [data_chunks]; RSDK_MAP_NONE=空闲; NULL=未建(回退) */
     uint64_t  used_chunks;   /* chunk_slot 中非空条目数(真实占用 chunk 数) */
 
+    /* ★ 事件索引区内存镜像(纯内存, 写透盘): 让事件槽 find/query/invalidate 全走内存扫描,
+     * 消除覆盖回收每翻段对事件区的全区逐槽 pread(否则满盘周期性卡顿→录像队列高水位丢帧)。
+     * 开盘时一次读入; 修改时 memcpy 内存 + pwrite 落盘(写透)。NULL→回退逐槽 pread(仍正确)。 */
+    uint8_t  *evtidx_cache;      /* [evtidx_slot_count*128]; NULL=未建(回退直读盘) */
+    uint64_t  evtidx_cache_bytes;
+
     /* ★ 元数据递归锁(冻结格式外新增, 纯内存): 保护 sb/st/index/badmap/balance 的内存态与其落盘。
      * 单盘 open → lk=&self_lock; 入盘组 → 由 rsdk_group_open 调 rsdk_dev_bind_lock() 指向盘组共享锁,
      * 使整组元数据串行在一把锁上(避免多盘 writer 迁移的锁序/死锁)。数据区 pread/pwrite(写者独占
@@ -334,8 +340,31 @@ rsdk_err_t rsdk_dev_open(const char *path, rsdk_dev_t **out)
      * 一次性开盘成本, 换掉覆盖回收每翻段的全索引线性扫描。 */
     rsdk_index_load_map(d);
 
+    /* ★ 事件索引区读入内存镜像(同上目的: 事件槽扫描全走内存)。失败→NULL 回退直读盘。 */
+    if (d->st.evtidx_slot_count && d->st.evtidx_sectors) {
+        uint64_t bytes = (uint64_t)d->st.evtidx_slot_count * 128u;
+        d->evtidx_cache = malloc(bytes);
+        if (d->evtidx_cache) {
+            if (rsdk_rawdev_pread(raw, d->st.evtidx_start_sec * RSDK_SEC,
+                                  d->evtidx_cache, bytes) == RSDK_OK)
+                d->evtidx_cache_bytes = bytes;
+            else { free(d->evtidx_cache); d->evtidx_cache = NULL; }
+        }
+    }
+
     *out = d;
     return RSDK_OK;
+}
+
+/* 事件索引区内存镜像访问(供 rsdk_evtidx 走内存扫描;NULL=未建则直读盘)。 */
+uint8_t *rsdk_dev_evtidx_cache(rsdk_dev_t *d) { return d ? d->evtidx_cache : NULL; }
+
+/* 事件区被带外改写(如挂载后检测到损坏、或工具直写盘)后,从盘重载内存镜像使其一致。
+ * 正常运行不需调用(所有改动都经 rsdk_evtidx 写透);仅用于外部改盘后的一致化/测试。 */
+void rsdk_dev_evtidx_reload(rsdk_dev_t *d) {
+    if (!d || !d->evtidx_cache || !d->evtidx_cache_bytes) return;
+    rsdk_rawdev_pread(d->raw, d->st.evtidx_start_sec * RSDK_SEC,
+                      d->evtidx_cache, d->evtidx_cache_bytes);
 }
 
 rsdk_err_t rsdk_dev_info(rsdk_dev_t *d, rsdk_dev_info_t *info)
@@ -478,5 +507,6 @@ void rsdk_dev_close(rsdk_dev_t *d)
     pthread_mutex_destroy(&d->self_lock);   /* 共享锁属盘组, 由 group_close 销毁; self_lock 恒可销 */
     free(d->badmap);
     free(d->chunk_slot);
+    free(d->evtidx_cache);
     free(d);
 }

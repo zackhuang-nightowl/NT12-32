@@ -38,6 +38,8 @@ RSDK_API rsdk_err_t rsdk_rec_close(rsdk_writer_t *w);
 /* 当前段 id / chunk(供元数据/抓拍 seg_ref 绑定) */
 RSDK_API uint32_t   rsdk_rec_seg_id(rsdk_writer_t *w);
 RSDK_API uint64_t   rsdk_rec_cur_chunk(rsdk_writer_t *w);
+/* 当前 chunk 是否近满(≥90%);供"段填满才分配新 chunk"的 IDR 对齐轮转判定。 */
+RSDK_API int        rsdk_rec_chunk_near_full(rsdk_writer_t *w);
 
 /* 覆盖回收回调: overwrite 模式下某 chunk 被复用前触发(disk,chunk),
  * 供上层清理绑定到该视频 chunk 的元数据/抓拍(retention 联动)。 */

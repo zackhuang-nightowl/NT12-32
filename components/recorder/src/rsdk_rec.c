@@ -172,6 +172,14 @@ void rsdk_rec_set_stream(rsdk_writer_t *w, int stream) {
 uint32_t rsdk_rec_seg_id(rsdk_writer_t *w) { return w ? w->seg_id : 0; }
 uint64_t rsdk_rec_cur_chunk(rsdk_writer_t *w) { return w ? w->chunk : 0; }
 
+/* 当前段所在 chunk 是否已近满(≥90%)。供上层"段填满才切新段"的 IDR 对齐轮转:
+ * 近满且来了 IDR 时切段 → 既填满 chunk(不浪费大 chunk),又保证新段从 IDR 起(回放段界干净)。 */
+int rsdk_rec_chunk_near_full(rsdk_writer_t *w) {
+    if (!w || !w->d) return 0;
+    uint64_t chunk_bytes = rsdk_dev_sb(w->d)->chunk_sectors * RSDK_SEC;
+    return (uint64_t)w->cur_off >= chunk_bytes - chunk_bytes / 10;   /* 剩余 <10% */
+}
+
 rsdk_err_t rsdk_rec_write_frame(rsdk_writer_t *w, const rsdk_frame_t *f) {
     if (!w || !f || !f->data || f->len == 0) return RSDK_E_PARAM;
     uint64_t chunk_bytes = rsdk_dev_sb(w->d)->chunk_sectors * RSDK_SEC;

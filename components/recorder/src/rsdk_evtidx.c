@@ -10,10 +10,16 @@
 static uint64_t evt_off(rsdk_dev_t *d, uint32_t i) {
     return rsdk_dev_systab(d)->evtidx_start_sec * RSDK_SEC + (uint64_t)i * EVT_SZ;
 }
+/* 优先走内存镜像(消除全区逐槽 pread 的满盘卡顿);无镜像则直读盘。 */
 static void rd_evt(rsdk_dev_t *d, uint32_t i, rsdk_evt_slot_t *s) {
-    rsdk_rawdev_pread(rsdk_dev_raw(d), evt_off(d, i), s, EVT_SZ);
+    uint8_t *cache = rsdk_dev_evtidx_cache(d);
+    if (cache) memcpy(s, cache + (uint64_t)i * EVT_SZ, EVT_SZ);
+    else rsdk_rawdev_pread(rsdk_dev_raw(d), evt_off(d, i), s, EVT_SZ);
 }
+/* 写透:更新内存镜像 + 落盘。 */
 static void wr_evt(rsdk_dev_t *d, uint32_t i, const rsdk_evt_slot_t *s) {
+    uint8_t *cache = rsdk_dev_evtidx_cache(d);
+    if (cache) memcpy(cache + (uint64_t)i * EVT_SZ, s, EVT_SZ);
     rsdk_rawdev_pwrite(rsdk_dev_raw(d), evt_off(d, i), s, EVT_SZ);
 }
 static uint32_t evt_crc(const rsdk_evt_slot_t *s) {

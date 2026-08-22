@@ -65,6 +65,7 @@ int main(int argc, char **argv) {
     for (uint64_t s = 0; s < st->evtidx_sectors; s++)
         rsdk_rawdev_pwrite(rsdk_dev_raw(d), (st->evtidx_start_sec + s) * 512, zero, 512);
     st->evtidx_next = 0; rsdk_dev_flush(d);
+    rsdk_dev_evtidx_reload(d);   /* 带外直写盘 → 重载内存镜像(模拟挂载时从损坏盘载入) */
     rsdk_evt_slot_t g;
     CHECK(rsdk_evtidx_get(d, eid, &g) == RSDK_E_NOTFOUND, "event gone after wipe");
 
