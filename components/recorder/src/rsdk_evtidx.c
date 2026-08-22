@@ -40,10 +40,13 @@ rsdk_err_t rsdk_evtidx_write(rsdk_dev_t *d, const rsdk_evt_slot_t *in) {
     rsdk_evt_slot_t s = *in;
     s.crc32 = 0; s.crc32 = rsdk_crc32(&s, EVT_SZ);
 
+    /* 与段索引 rsdk_index_write 同锁纪律(递归 dev 锁):find+write 原子,防并发通道 evtidx_next 竞争。 */
+    rsdk_dev_lock(d);
     long hit = find_slot(d, in->event_id);
     if (hit >= 0) {
         wr_evt(d, (uint32_t)hit, &s);
         rsdk_rawdev_sync(rsdk_dev_raw(d));
+        rsdk_dev_unlock(d);
         return RSDK_OK;
     }
     /* append at evtidx_next(环形) */
@@ -51,6 +54,7 @@ rsdk_err_t rsdk_evtidx_write(rsdk_dev_t *d, const rsdk_evt_slot_t *in) {
     st->evtidx_next = (st->evtidx_next + 1) % st->evtidx_slot_count;
     rsdk_rawdev_sync(rsdk_dev_raw(d));
     rsdk_dev_flush(d);
+    rsdk_dev_unlock(d);
     return RSDK_OK;
 }
 
@@ -90,28 +94,32 @@ int rsdk_evtidx_query(rsdk_dev_t *d, uint32_t t0, uint32_t t1, int chn,
 rsdk_err_t rsdk_evtidx_patch_snap(rsdk_dev_t *d, uint64_t event_id,
                                   uint16_t disk, uint64_t off, uint32_t len, uint32_t ts) {
     if (!d) return RSDK_E_PARAM;
+    rsdk_dev_lock(d);
     long hit = find_slot(d, event_id);
-    if (hit < 0) return RSDK_E_NOTFOUND;
+    if (hit < 0) { rsdk_dev_unlock(d); return RSDK_E_NOTFOUND; }
     rsdk_evt_slot_t s; rd_evt(d, (uint32_t)hit, &s);
     s.snap_disk = disk; s.snap_off = off; s.snap_len = len; s.snap_ts = ts;
     s.flags |= RSDK_EVT_HAS_SNAP;
     s.crc32 = 0; s.crc32 = rsdk_crc32(&s, EVT_SZ);
     wr_evt(d, (uint32_t)hit, &s);
     rsdk_rawdev_sync(rsdk_dev_raw(d));
+    rsdk_dev_unlock(d);
     return RSDK_OK;
 }
 
 rsdk_err_t rsdk_evtidx_patch_state(rsdk_dev_t *d, uint64_t event_id,
                                    int state, int32_t err, uint32_t now) {
     if (!d) return RSDK_E_PARAM;
+    rsdk_dev_lock(d);
     long hit = find_slot(d, event_id);
-    if (hit < 0) return RSDK_E_NOTFOUND;
+    if (hit < 0) { rsdk_dev_unlock(d); return RSDK_E_NOTFOUND; }
     rsdk_evt_slot_t s; rd_evt(d, (uint32_t)hit, &s);
     if (state == RSDK_CLOUD_UPLOADING) s.attempts++;   /* 转上传中记一次尝试 */
     s.state = (uint8_t)state; s.last_err = err; s.updated = now;
     s.crc32 = 0; s.crc32 = rsdk_crc32(&s, EVT_SZ);
     wr_evt(d, (uint32_t)hit, &s);
     rsdk_rawdev_sync(rsdk_dev_raw(d));
+    rsdk_dev_unlock(d);
     return RSDK_OK;
 }
 
@@ -119,6 +127,7 @@ int rsdk_evtidx_invalidate_chunk(rsdk_dev_t *d, uint64_t chunk) {
     if (!d) return 0;
     rsdk_systab_t *st = rsdk_dev_systab(d);
     int cleared = 0;
+    rsdk_dev_lock(d);   /* 与 evtidx_write 互斥: 同一事件区扫描+作废原子 */
     for (uint32_t i = 0; i < st->evtidx_slot_count; i++) {
         rsdk_evt_slot_t s; rd_evt(d, i, &s);
         if ((s.flags & (RSDK_EVT_VALID | RSDK_EVT_OPEN)) && s.av_chunk == chunk) {
@@ -128,5 +137,6 @@ int rsdk_evtidx_invalidate_chunk(rsdk_dev_t *d, uint64_t chunk) {
         }
     }
     if (cleared) rsdk_rawdev_sync(rsdk_dev_raw(d));
+    rsdk_dev_unlock(d);
     return cleared;
 }

@@ -37,7 +37,7 @@ rsdk_err_t rsdk_play_seek_pts(rsdk_player_t *p, uint64_t pts) {
     while (off <= p->end_off) {
         rsdk_frame_hdr_t h;
         if (read_hdr(p, off, &h) != RSDK_OK) break;
-        if (h.rec_kind == RSDK_RK_FRAME) { if (h.pts <= pts) best = off; else break; }
+        if (h.pts <= pts) best = off; else break;
         off = (uint32_t)rsdk_align_up(off + 64 + h.payload_len, RSDK_FRAME_ALIGN);
     }
     p->cur_off = best;
@@ -91,30 +91,28 @@ rsdk_err_t rsdk_play_seek(rsdk_player_t *p, uint32_t wall) {
 rsdk_err_t rsdk_play_next_frame(rsdk_player_t *p, rsdk_frame_hdr_t *hdr,
                                 const uint8_t **data, uint32_t *len) {
     if (!p || !hdr || !data || !len) return RSDK_E_PARAM;
-    for (;;) {
-        if (p->cur_off > p->end_off) return RSDK_E_NOTFOUND;
-        rsdk_frame_hdr_t h;
-        rsdk_err_t rc = read_hdr(p, p->cur_off, &h);
-        if (rc) return rc;
-        uint32_t adv = (uint32_t)rsdk_align_up(p->cur_off + 64 + h.payload_len, RSDK_FRAME_ALIGN);
-        if (h.rec_kind != RSDK_RK_FRAME) { p->cur_off = adv; continue; }  /* 跳内联标记(事件/云存/关键帧表) */
-        if (h.payload_len > p->cap) { p->buf = realloc(p->buf, h.payload_len); p->cap = h.payload_len; if(!p->buf) return RSDK_E_IO; }
-        rsdk_rawdev_pread(rsdk_dev_raw(p->d), p->base_off + p->cur_off + 64, p->buf, h.payload_len);
-        if (h.enc) {
-            struct rsdk_crypto *cr = rsdk_dev_crypto(p->d);
-            if (!cr) return RSDK_E_CRYPTO;              /* 加密帧但无密钥(需加密固件/正确SN) */
-            rsdk_crypto_xcrypt(cr, h.seg_id, h.frame_seq, 0, p->buf, h.payload_len);
-        }
-        /* v2: 校验明文载荷 CRC(掉电/坏块撕裂 → 头 CRC 过但载荷坏 → 此处拦截)。v1 盘不校验。 */
-        if (rsdk_dev_version(p->d) >= 2 &&
-            rsdk_crc32(p->buf, h.payload_len) != h.payload_crc32) {
-            p->cur_off = adv;
-            return RSDK_E_CORRUPT;                      /* 跳过坏载荷帧 */
-        }
-        *hdr = h; *data = p->buf; *len = h.payload_len;
-        p->cur_off = adv;
-        return RSDK_OK;
+    if (p->cur_off > p->end_off) return RSDK_E_NOTFOUND;
+    rsdk_frame_hdr_t h;
+    rsdk_err_t rc = read_hdr(p, p->cur_off, &h);
+    if (rc) return rc;
+    if (h.payload_len > p->cap) { p->buf = realloc(p->buf, h.payload_len); p->cap = h.payload_len; if(!p->buf) return RSDK_E_IO; }
+    rsdk_rawdev_pread(rsdk_dev_raw(p->d), p->base_off + p->cur_off + 64, p->buf, h.payload_len);
+    if (h.enc) {
+        struct rsdk_crypto *cr = rsdk_dev_crypto(p->d);
+        if (!cr) return RSDK_E_CRYPTO;              /* 加密帧但无密钥(需加密固件/正确SN) */
+        rsdk_crypto_xcrypt(cr, h.seg_id, h.frame_seq, 0, p->buf, h.payload_len);
     }
+    /* v2: 校验明文载荷 CRC(掉电/坏块撕裂 → 头 CRC 过但载荷坏 → 此处拦截, 不把坏帧喂解码器)。
+     * v1 盘该字段为旧 nonce 尾字节, 不校验。注:内联标记(RK_EVENT/CLOUD)payload_crc32=0,
+     * 仅对 RK_FRAME 校验;标记照常返回(collect_from_disk/扫描依赖看到标记)。 */
+    if (rsdk_dev_version(p->d) >= 2 && h.rec_kind == RSDK_RK_FRAME &&
+        rsdk_crc32(p->buf, h.payload_len) != h.payload_crc32) {
+        p->cur_off = (uint32_t)rsdk_align_up(p->cur_off + 64 + h.payload_len, RSDK_FRAME_ALIGN);
+        return RSDK_E_CORRUPT;                      /* 跳过坏载荷帧 */
+    }
+    *hdr = h; *data = p->buf; *len = h.payload_len;
+    p->cur_off = (uint32_t)rsdk_align_up(p->cur_off + 64 + h.payload_len, RSDK_FRAME_ALIGN);
+    return RSDK_OK;
 }
 
 void rsdk_play_close(rsdk_player_t *p) { if (p) { free(p->buf); free(p); } }
