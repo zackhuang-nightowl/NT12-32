@@ -19,6 +19,14 @@ deploy/rootfs/dvr/tutk_cloud_agent/nvr_tutk_cgi
 
 # ---- vendored 源码压缩包（构建不需要，用系统/预编译库）----
 *.tar.gz
+*.zip
+
+# ---- 构建日志（可再生）----
+build_full.log
+*.build.log
+
+# ---- 已弃用：happytime rtsp-server（项目改用 NT12-SDK/OnvifClientLibrary）----
+third_party/happytime_onvif_rtsp/
 
 # ---- ffmpeg 预编译库(备而未用)：整机不链接，解码走硬件 VPU、MP4 导出走自研 rsdk muxer。
 #      如需软解兜底再从 NT12-SDK/rtsp-server/source/ffmpeg 取回。----
