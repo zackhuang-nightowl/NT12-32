@@ -170,6 +170,24 @@ static int ip_seg3(const char *ip)
     return -1;
 }
 
+/* W0: 合法点分 IPv4?(拦截 ONVIF 发现回的 IPv6 链路本地 fe80:: 等脏地址,见 PoE 脏数据根因)。 */
+static int is_ipv4(const char *ip)
+{
+    int a, b, c, d; char extra;
+    if (!ip || !ip[0]) return 0;
+    if (sscanf(ip, "%d.%d.%d.%d%c", &a, &b, &c, &d, &extra) != 4) return 0;   /* 多字符=非纯IPv4 */
+    return a >= 0 && a <= 255 && b >= 0 && b <= 255 &&
+           c >= 0 && c <= 255 && d >= 0 && d <= 255;
+}
+
+/* W0: 该地址是否为 PoE 口 <port> 的合法段内 IPv4(段=口号,198.18.<port>.x)。 */
+static int is_ipv4_in_poe_seg(const char *ip, int port)
+{
+    int a, b, c, d;
+    if (!is_ipv4(ip) || sscanf(ip, "%d.%d.%d.%d", &a, &b, &c, &d) != 4) return 0;
+    return a == NVR_POE_NET_A && b == NVR_POE_NET_B && c == port;
+}
+
 /* 置 ChannelStatusNotify 位并唤醒挂起的 GUI_longPolling。 */
 static void chan_notify(nvr_chan_mgr_t *m, int chn)
 {
@@ -565,6 +583,14 @@ int nvr_chan_load_config(nvr_chan_mgr_t *m, const nvr_config_t *cfg)
         if (e->chn < 0 || e->chn >= NVR_MAX_CH) continue;
         nvr_channel_t d = *e;
         if (d.enabled == 0 && e->enabled == 0) d.enabled = 0; else d.enabled = 1;
+        /* W7: 清洗历史脏数据——PoE 口若持久化了非段内 IPv4(如误写的 fe80::)→ 回占位 198.18.<口>.1,
+         * 防脏地址复活并毒化按段发现/清口逻辑(段内合法 IPv4/占位本身不受影响)。 */
+        if (d.poe_port > 0 && !is_ipv4_in_poe_seg(d.onvif_ip, d.poe_port)) {
+            NVR_LOGW("chan", "load: PoE ch%d 脏 onvif_ip=%s → 回占位 198.18.%d.1",
+                     d.chn, d.onvif_ip[0] ? d.onvif_ip : "(空)", d.poe_port);
+            snprintf(d.onvif_ip, sizeof(d.onvif_ip), "%d.%d.%d.1",
+                     NVR_POE_NET_A, NVR_POE_NET_B, d.poe_port);
+        }
         if (install_slot(m, &d) >= 0) n++;
     }
     CM_UNLOCK(m);
@@ -616,6 +642,17 @@ static int arp_mac_of_ip(const char *ip, char *out, size_t cap)
     }
     fclose(f);
     return rc;
+}
+
+/* W4: PoE 相机在场探测(二层,鲁棒于相机屏蔽 ICMP)。先 ping 触发 ARP 解析(即便 ICMP 被丢,
+ * 内核仍会发 ARP 请求),再查 /proc/net/arp 是否有该 IP 的完整表项。有=在场。 */
+static int poe_cam_reachable(const char *ip)
+{
+    if (!is_ipv4(ip)) return 0;
+    char cmd[96], mac[24];
+    snprintf(cmd, sizeof(cmd), "ping -c1 -W1 %s >/dev/null 2>&1", ip);
+    (void)!system(cmd);
+    return arp_mac_of_ip(ip, mac, sizeof(mac)) == 0 && mac[0];
 }
 
 /* 取接口(如 eth0)的 IPv4,作 WS-Discovery 的多播源(选接口:eth0 查 LAN)。找到返 0。 */
@@ -805,7 +842,9 @@ int nvr_chan_apply_discovery(nvr_chan_mgr_t *m, int chn, const char *scopes)
 /* ---- PoE/LAN 自动发现绑定 ---- */
 /* recall_only=1:掉线召回模式——只按 host/mac 更新已知通道的 IP,不新增外部设备
  * (LAN 策略:eth0 上不自动把别人的相机绑进来)。 */
-typedef struct { nvr_chan_mgr_t *m; int bound; int recall_only; } disc_ctx_t;
+/* poe_seg>0:本次发现是从某 PoE 段(198.18.<poe_seg>.100)定向广播发出的 → 命中相机必属该口,
+ * 按物理口/段绑定(即使相机只报 IPv6 也不误当 LAN 走 MAC 找回)。0=LAN/非定向。 */
+typedef struct { nvr_chan_mgr_t *m; int bound; int recall_only; int poe_seg; } disc_ctx_t;
 
 static int chn_by_host(nvr_chan_mgr_t *m, const char *host)
 {
@@ -835,6 +874,14 @@ static void on_discovered(const nvr_onvif_cam_t *cam, void *user)
     nvr_chan_mgr_t *m = ctx->m;
     if (!cam->host[0]) return;
 
+    /* ★ 只接受合法 IPv4 的发现结果。fe80:: 等 IPv6 链路本地/非法地址:无从判 PoE 口(WS-Discovery
+     * 回包会跨段)、不可路由,且历史上被误写进 onvif_ip 毒化"按段发现/清口"逻辑(PoE ch1 卡死+乱码 IP
+     * 根因)→ 一律忽略。相机取到段内 DHCP IPv4(见 dhcpd_vlan.conf)后自然被正确发现绑定。 */
+    if (!is_ipv4(cam->host)) {
+        NVR_LOGW("chan", "发现非IPv4地址 host=%s → 忽略(防脏数据/误绑)", cam->host);
+        return;
+    }
+
     nvr_dev_class_t cls; nvr_dev_classify(cam->scopes, &cls);
 
     /* ★ MAC 权威化:按发现到的 IP 从 ARP 表取物理 mac,统一覆盖 scope mac —— 使"按 mac 找回"
@@ -844,6 +891,11 @@ static void on_discovered(const nvr_onvif_cam_t *cam, void *user)
           snprintf(cls.mac, sizeof(cls.mac), "%s", amac);
       else if (cls.mac[0] && mac_norm(cls.mac, nm, sizeof(nm)) == 0)
           snprintf(cls.mac, sizeof(cls.mac), "%s", nm); }
+
+    /* ★ 关键:PoE 相机所属口由"相机自身 IPv4 段"(ip_seg3(cam->host))决定,不能用探测源段——
+     * WS-Discovery 多播回包会跨段(段10 探测能收到段15 相机的 ProbeMatch)。故按段绑口的逻辑一律
+     * 走下方 ip_seg3(cam->host);只报 fe80、无段内 IPv4 的相机则无从判口 → W3/新增守卫直接拒绝,
+     * 不误绑、不写脏地址(相机取到 DHCP IPv4 后自然被正确发现)。 */
 
     /* 已绑定同 IP → 更新分类 + 重算待激活标志（周期性重发现是清零 inactive 的唯一路径） */
     int chn = chn_by_host(m, cam->host);
@@ -871,7 +923,7 @@ static void on_discovered(const nvr_onvif_cam_t *cam, void *user)
       if (sscanf(cam->host, "%d.%d.%d.%d", &oa, &ob, &oc, &od) == 4 &&
           oa == NVR_POE_NET_A && ob == NVR_POE_NET_B)
           is_poe_net = 1; }
-    int mchn = is_poe_net ? -1 : chn_by_mac(m, cls.mac);
+    int mchn = is_poe_net ? -1 : chn_by_mac(m, cls.mac);   /* host 已保证 IPv4(函数入口守卫) */
     if (mchn >= 0) {
         slot_t *s = &m->slots[mchn];
         NVR_LOGI("chan", "mac=%s IP 变更 %s→%s,ch%d 找回", cls.mac, s->d.onvif_ip, cam->host, mchn);
@@ -1593,26 +1645,29 @@ void nvr_chan_tick(nvr_chan_mgr_t *m)
         if (s->status == NVR_CHAN_ONLINE) continue;      /* 真正在线出图才停发现;在线无流(掉线/NOSIGNAL/
                                                           * 未解析)都继续发现→刷新在场/IP→重连(不只看 url 缓存) */
         if (now < s->poe_disc_next) continue;
-        int seg = ip_seg3(s->d.onvif_ip);                /* 网段第3段(VLAN 2001=NVR,口 P→段 P+1) */
-        if (seg < 0) continue;
+        /* W4: 段=物理口号(段↔口 1:1)。★不再用 ip_seg3(onvif_ip):脏 IP/fe80 会得 -1 而
+         * `continue` 永久跳过该口 → 拔了永不清空(PoE ch1 卡死根因)。物理口恒有效,循环永远覆盖。 */
+        int seg = s->d.poe_port;
         s->poe_disc_next = now + 10;
         m->poe_scan_cursor = (i + 1) % poe_n;            /* 下轮从下一口起 */
         char src[64];                                     /* 发现源=NVR 在该 VLAN 的 IP 198.18.<seg>.100 */
         snprintf(src, sizeof(src), "%d.%d.%d.100", NVR_POE_NET_A, NVR_POE_NET_B, seg);
-        disc_ctx_t ctx = { m, 0, 0 };                    /* 非 recall:允许绑定/更新口通道 */
+        disc_ctx_t ctx = { m, 0, 0, seg };               /* poe_seg=seg:on_discovered 按段绑口(W2) */
         int had_dev = s->poe_present || s->d.mac[0] || s->d.serial[0];
         s->poe_seen = 0;                                  /* 本轮探测前清;命中由 on_discovered 置1 */
         NVR_LOGI("chan", "PoE ch%d(口%d,段198.18.%d)ONVIF 发现广播 src=%s", s->d.chn, s->d.poe_port, seg, src);
         nvr_onvif_discover(src, 2, on_discovered, &ctx);
         /* WS-Discovery 多播偶发丢包会漏发现在场相机 → 不能仅凭"未发现"就清口(会误清+抖动)。
-         * 未命中时再用 ping 主动确认该口已绑相机 IP 是否可达:可达=在场(清零计数);
-         * 不可达累计达阈值 → 判定拔除,清空该口(PoE 拔线即清)。 */
+         * 未命中时再用 ARP 二层探测该口相机段内地址确认在场(鲁棒于相机屏蔽 ICMP):
+         * 可达=在场(清零计数);不可达累计达阈值 → 判定拔除,清空该口(PoE 拔线即清)。 */
         if (!s->poe_seen && had_dev) {
-            char pcmd[96];
-            snprintf(pcmd, sizeof(pcmd), "ping -c1 -W1 %s >/dev/null 2>&1", s->d.onvif_ip);
-            int reachable = (s->d.onvif_ip[0] && system(pcmd) == 0);
-            if (reachable) {
-                s->poe_miss = 0;                          /* ping 通 → 相机在场,勿清 */
+            char camip[32];                               /* 探测目标:已绑段内 IPv4;否则该口默认段内地址 .1 */
+            if (is_ipv4_in_poe_seg(s->d.onvif_ip, seg))
+                snprintf(camip, sizeof(camip), "%s", s->d.onvif_ip);
+            else
+                snprintf(camip, sizeof(camip), "%d.%d.%d.1", NVR_POE_NET_A, NVR_POE_NET_B, seg);
+            if (poe_cam_reachable(camip)) {
+                s->poe_miss = 0;                          /* ARP 可达 → 相机在场,勿清 */
             } else if (++s->poe_miss >= NVR_POE_MISS_CLEAR) {
                 clear_poe_port(m, s);
             }

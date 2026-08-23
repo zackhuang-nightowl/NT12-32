@@ -281,7 +281,19 @@ BOOL onvif_parse_device_binfo(XMLN * p_node, DEVICE_BINFO * p_res)
     p_XAddrs = xml_node_soap_get(p_node, "XAddrs");
     if (p_XAddrs && p_XAddrs->data)
     {
-        parse_XAddr(p_XAddrs->data, &p_res->XAddr);
+        /* W1: XAddrs 可能含多个空格分隔地址(IPv4 与 IPv6 链路本地并存)。优先选 IPv4——
+         * IPv6 URI 形如 http://[fe80::..]/..(含 '['),IPv4 URI 不含 '['。全是 IPv6 才退回首个。
+         * 避免把不可路由的 fe80:: 当设备地址(会毒化 PoE 按段发现/清口逻辑,见根因)。 */
+        char xbuf[512];
+        strncpy(xbuf, p_XAddrs->data, sizeof(xbuf) - 1);
+        xbuf[sizeof(xbuf) - 1] = '\0';
+        char *save = NULL, *first = NULL, *best = NULL;
+        for (char *tok = strtok_r(xbuf, " \t\r\n", &save); tok; tok = strtok_r(NULL, " \t\r\n", &save))
+        {
+            if (!first) first = tok;
+            if (!strchr(tok, '[')) { best = tok; break; }   /* 无 '[' → IPv4 URI,选它 */
+        }
+        parse_XAddr(best ? best : (first ? first : p_XAddrs->data), &p_res->XAddr);
 
         if (p_res->XAddr.host[0] == '\0' || p_res->XAddr.port == 0)
         {

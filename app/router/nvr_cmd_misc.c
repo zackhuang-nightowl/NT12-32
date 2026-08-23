@@ -242,7 +242,10 @@ char *cmd_X_NightOwl_getChannelInfo(cJSON *a, const nvr_cmd_ctx_t *c)
                                                strncmp(ch.mac, "54:2B:57", 8) == 0))
                                 ? "NightOwl" : "");
         cJSON_AddStringToObject(o, "type", dtype);
-        cJSON_AddStringToObject(o, "ip", ch.onvif_ip);
+        /* W5: 只暴露 IPv4;含 ':' 的 IPv6 链路本地(fe80::)等非法/不可路由地址一律返回空,
+         * 绝不把脏地址透给 GUI(W3/W7 已从源头拦截,这里再兜一层)。 */
+        cJSON_AddStringToObject(o, "ip",
+                                (ch.onvif_ip[0] && !strchr(ch.onvif_ip, ':')) ? ch.onvif_ip : "");
         cJSON_AddStringToObject(o, "storageType", "none");
         cJSON_AddStringToObject(o, "network", net);
         cJSON_AddNumberToObject(o, "signalStrength", signal);
