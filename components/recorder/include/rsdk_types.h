@@ -121,14 +121,15 @@ typedef struct __attribute__((packed)) {
     uint32_t _rsvi;
     uint64_t meta_next_off;      /* MetaRegion 追加分配器写指针(区内字节偏移, 环形) */
     uint64_t meta_bytes;         /* MetaRegion 大小(字节; 0=未启用) */
-    /* 事件索引区(段索引区之后的相邻数组;128B 事件槽环形数组)。
-     * 事件的"音视频/截图/云存态"权威落点,可 rsdk_scan_rebuild 扫盘重建。 */
-    uint64_t evtidx_start_sec;   /* 事件索引区起始扇区(0=未启用) */
+    struct { uint64_t cur_chunk; uint32_t cur_off; uint32_t seg_seq; } chn[32];
+    /* ★事件索引区字段放在 chn[] 之后的保留区(而非之前)——不移动既有字段偏移,
+     * 保证旧格式盘(此处原为清零的 _rsv)被新代码打开时读到 0=未启用,安全回退,不误读 chn[]。
+     * 事件索引区=段索引区之后的相邻 128B 事件槽环形数组;事件音视频/截图/云存态权威,可扫盘重建。 */
+    uint64_t evtidx_start_sec;   /* 事件索引区起始扇区(0=未启用/旧盘) */
     uint64_t evtidx_sectors;     /* 事件索引区扇区数 */
     uint32_t evtidx_slot_count;  /* 事件槽总数(sectors*512/128) */
     uint32_t evtidx_next;        /* 下一个可写事件槽(环形) */
-    struct { uint64_t cur_chunk; uint32_t cur_off; uint32_t seg_seq; } chn[32];
-    uint8_t  _rsv[4096 - 112 - 32*16];  /* 精确补足到 4096(冻结: ≤4096;+24B 事件区字段) */
+    uint8_t  _rsv[4096 - 88 - 32*16 - 24];  /* 补足 4096(冻结: ≤4096;chn 偏移不变,+24B 事件区字段占 _rsv) */
 } rsdk_systab_t;
 
 /* 记录种类(数据区自描述):帧 + 4 类内联标记。marker 专有数据放 64B 头后的 payload。 */
