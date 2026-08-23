@@ -181,12 +181,14 @@ static void evt_sink(void *sink_ctx, const nop_event_t *ev)
         if (pre_s  < 0) pre_s  = NVR_DEF_PRE_RECORD_S;
         {
         uint32_t start = (pre_s > 0 && ts > (uint32_t)pre_s) ? (ts - (uint32_t)pre_s) : ts;
-        eid = nvr_rec_trigger_event(h->cfg.rs, chn, rectype, start, post_s);
+        int cloud = 0;
+        eid = nvr_rec_trigger_event(h->cfg.rs, chn, rectype, start, post_s, &cloud);
         /* ★ 事件录像落盘:连续轨打标,或仅事件待命时开片段(预录 flush + 后录)。
-         * 索引窗 [ts-pre, ts+post];puller 过 pend_event_end 自动清标签/关片段。 */
+         * 索引窗 [ts-pre, ts+post];puller 过 pend_event_end 自动清标签/关片段。
+         * cloud=1 时录像器建槽后置事件槽云存态=PENDING(上传器据盘上权威枚举待传)。 */
         if (eid && h->cfg.sm)
             nvr_stream_set_event(h->cfg.sm, chn, eid, rectype, start,
-                                 ts + (uint32_t)post_s);
+                                 ts + (uint32_t)post_s, cloud);
         }
         }
     }

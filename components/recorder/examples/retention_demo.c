@@ -1,6 +1,7 @@
 /***************************************************************************************
  *  retention_demo.c —— 覆盖回收生命周期(设计 §12.6): 视频循环覆盖时,
- *  经 rec 覆盖回收回调联动清理绑定到被覆盖 chunk 的元数据/抓拍(retention 一致)。
+ *  经 rec 覆盖回收回调联动清理绑定到被覆盖 chunk 的 AI 元数据(meta.db,retention 一致)。
+ *  (抓拍/云存态已迁事件索引槽,随事件区 reclaim 失效,不经 meta_purge。)
  *  运行:  ./retention_demo
  ***************************************************************************************/
 #include "rsdk.h"
@@ -44,7 +45,6 @@ int main(void){
     rsdk_rec_set_reclaim(w, on_reclaim, meta);       /* 联动清理 */
 
     uint32_t flen=(1<<20)-256; uint8_t*buf=malloc(flen); memset(buf,0xCD,flen);
-    uint8_t jpeg[512]={0xFF,0xD8,0xFF};
     uint64_t total=cap+6, first_eid=0, last_eid=0;
     for(uint64_t i=0;i<total;i++){
         rsdk_frame_t f={ .chn=13,.codec=RSDK_CODEC_H265,.frame_type=RSDK_FRAME_I,
@@ -56,9 +56,6 @@ int main(void){
             .doc_type=RSDK_DOC_AI_EVENT, .seg={.disk=0,.chunk=cur,.off=0,.pts=0} };
         char js[64]; int jl=snprintf(js,sizeof js,"{\"event\":\"human\",\"i\":%llu}",(unsigned long long)i);
         rsdk_meta_put(meta,&mk,js,jl,NULL);
-        rsdk_pic_key_t pk={ .chn=13,.ts=(uint32_t)(1784486200+i),.event_id=eid,
-            .type=RSDK_PIC_MAIN,.w=320,.h=240,.seg={.disk=0,.chunk=cur} };
-        rsdk_pic_write(d,meta,&pk,jpeg,sizeof jpeg,NULL);
         if(i==0) first_eid=eid; last_eid=eid;
     }
     rsdk_rec_close(w); free(buf);
@@ -68,14 +65,14 @@ int main(void){
     int last_here  =  has_event(meta,last_eid);
     uint32_t earliest=0; rsdk_index_earliest(d,&earliest);
     printf("data_chunks=%llu 写入=%llu(超容量6)\n",(unsigned long long)cap,(unsigned long long)total);
-    printf("元数据+抓拍 存活行数=%d (期望≈2*容量=%llu, 旧的随覆盖已清理)\n", rows,(unsigned long long)cap*2);
+    printf("AI 元数据 存活行数=%d (期望≈容量=%llu, 旧的随覆盖已清理)\n", rows,(unsigned long long)cap);
     printf("最旧事件(chunk被覆盖) 已清理: %s\n", first_gone?"是 ✓":"否 ✗");
     printf("最新事件 仍在: %s\n", last_here?"是 ✓":"否 ✗");
     printf("视频最早时间前移: base+%d\n", earliest-1784486200);
 
     rsdk_meta_close(meta); rsdk_dev_close(d);
-    int ok=(first_gone && last_here && rows<=(int)(cap*2)+2 && rows>0);
-    printf("\n结果: %s\n", ok?"覆盖回收生命周期 PASS (视频覆盖→绑定的元数据/抓拍同步清理)":"FAIL");
+    int ok=(first_gone && last_here && rows<=(int)cap+2 && rows>0);
+    printf("\n结果: %s\n", ok?"覆盖回收生命周期 PASS (视频覆盖→绑定的 AI 元数据同步清理)":"FAIL");
     return ok?0:1;
 #endif
 }

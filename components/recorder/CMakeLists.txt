@@ -31,7 +31,7 @@ set(RSDK_SRC
   src/rsdk_scan.c    # rsdk_evtidx.c=事件索引区; rsdk_scan.c=自描述扫描重建(索引丢失可扫盘重建)
   src/rsdk_repair.c) # 开机自检 + 分级修复(Tier1 封口 / Tier2 后台重建)
 if(RSDK_WITH_METADATA)
-  list(APPEND RSDK_SRC src/rsdk_meta.c src/rsdk_pic.c src/rsdk_cloud.c)  # 元数据/抓拍/云存态(真实现)
+  list(APPEND RSDK_SRC src/rsdk_meta.c src/rsdk_pic.c)  # 元数据(可丢)/抓拍(盘上权威=事件槽)
 endif()
 
 add_library(rsdk STATIC ${RSDK_SRC})
@@ -80,9 +80,6 @@ if(RSDK_BUILD_EXAMPLES)
   target_include_directories(meta_demo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
   if(RSDK_WITH_METADATA)
-    add_executable(cloud_demo examples/cloud_demo.c)   # 云存状态: begin/set_state/enumerate/reclaim
-    target_link_libraries(cloud_demo rsdk)
-
     add_executable(rebuild_demo examples/rebuild_demo.c)  # 统一扫盘重建: 抹事件区→rebuild→全链回来
     target_link_libraries(rebuild_demo rsdk)
   endif()

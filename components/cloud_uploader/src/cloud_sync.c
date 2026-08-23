@@ -6,7 +6,6 @@
 #include "uploader_internal.h"
 #include "http_vsaas.h"
 #include "ts_mux.h"
-#include "rsdk_cloud.h"
 #include "nvr_log.h"
 
 #include <pthread.h>
@@ -153,7 +152,7 @@ static int finish_sess(struct nvr_cloud_uploader *up, sync_sess_t *s, const char
         NVR_LOGW("cloud", "ch%d sync update_tags 失败 eid=%llu", s->chn,
                  (unsigned long long)s->event_id);
 
-    rsdk_cloud_set_state(up->cfg.meta, s->event_id, RSDK_CLOUD_DONE, 0);
+    /* sync(无盘)模式:上传实时随事件发生完成,状态机全在内存会话,无盘上事件槽需推进。 */
     NVR_LOGI("cloud", "ch%d sync 上传完成 eid=%llu dur=%us", s->chn,
              (unsigned long long)s->event_id, dur);
 #else
@@ -194,16 +193,9 @@ static int process_sess(struct nvr_cloud_uploader *up, sync_sess_t *s, const cha
         }
         if (rc == 0)
             finish_sess(up, s, stoken);
-        else {
-#if RSDK_CFG_METADATA
-            rsdk_cloud_set_state(up->cfg.meta, s->event_id, RSDK_CLOUD_RETRY, -5);
-#endif
-            sess_free(s);
-        }
+        else
+            sess_free(s);   /* sync 失败即弃会话(无盘上态);下个事件重开 */
     } else if (rc != 0) {
-#if RSDK_CFG_METADATA
-        rsdk_cloud_set_state(up->cfg.meta, s->event_id, RSDK_CLOUD_RETRY, -5);
-#endif
         sess_free(s);
     }
     return rc;
@@ -246,9 +238,6 @@ int cloud_sync_event_begin(struct nvr_cloud_uploader *up, int chn, uint64_t eid,
                       event_id_code(rectype), s->tags, &vu) != 0 ||
         !vu.http_ok) {
         NVR_LOGW("cloud", "ch%d sync GET url 失败", chn);
-#if RSDK_CFG_METADATA
-        rsdk_cloud_set_state(up->cfg.meta, eid, RSDK_CLOUD_RETRY, -3);
-#endif
         sess_free(s);
         pthread_mutex_unlock(&up->lk);
         return -1;
@@ -261,9 +250,6 @@ int cloud_sync_event_begin(struct nvr_cloud_uploader *up, int chn, uint64_t eid,
     }
     snprintf(s->url, sizeof(s->url), "%s", vu.url);
     s->url_ok = 1;
-#if RSDK_CFG_METADATA
-    rsdk_cloud_set_state(up->cfg.meta, eid, RSDK_CLOUD_UPLOADING, 0);
-#endif
     NVR_LOGI("cloud", "ch%d sync 事件开始 eid=%llu stream=%d", chn,
              (unsigned long long)eid, rec_stream);
     pthread_mutex_unlock(&up->lk);

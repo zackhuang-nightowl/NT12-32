@@ -151,7 +151,7 @@ static void app_on_snap(void *user, int chn, uint64_t eid, uint32_t ts,
             memset(&k, 0, sizeof(k));
             k.chn = chn; k.ts = ts; k.event_id = eid; k.type = RSDK_PIC_MAIN;
             uint64_t pid = 0;
-            if (rsdk_pic_write(dev, a->meta, &k, jpeg, (size_t)jlen, &pid) != RSDK_OK)
+            if (rsdk_pic_write(dev, &k, jpeg, (size_t)jlen, &pid) != RSDK_OK)
                 printf("[app] 事件抓拍落盘失败 ch%d eid=%llu\n", chn, (unsigned long long)eid);
         }
     }
@@ -556,7 +556,7 @@ static void maybe_start_uploader(nvr_app_t *a, const char *config_dir)
     if (a->settings) nvr_settings_owner_get(a->settings, &ow);
 
     nvr_cloud_uploader_cfg_t uc = {
-        .group = a->group, .meta = a->meta, .settings = a->settings, .udid = udid, .stoken = ow.stoken,
+        .group = a->group, .settings = a->settings, .udid = udid, .stoken = ow.stoken,
         .stage = nvr_settings_get_int(a->settings, "cloud.stage", 0),
         .worker_count = 2, .poll_interval_s = NVR_CLOUD_DEF_POLL_S, .slice_ms = NVR_CLOUD_DEF_SLICE_MS,
     };
@@ -926,7 +926,7 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
         /* 8089 命令路由在通道管理器就绪后启动（见 §8 后）——它需要 cm 做 channel→设备 解析 */
     }
 
-    nvr_rec_sched_cfg_t rc = { .group = a->group, .meta = a->meta, .settings = a->settings,
+    nvr_rec_sched_cfg_t rc = { .group = a->group, .settings = a->settings,
                                .hdd_full_policy = a->cfg.storage.hdd_full, .post_record_s = NVR_DEF_POST_RECORD_S,
                                .end_user = a, .on_event_end = app_on_event_end,
                                .cloud_user = a, .on_cloud_event = app_on_cloud_event };

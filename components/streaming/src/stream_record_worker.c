@@ -49,10 +49,16 @@ static void worker_apply_event_tags(stream_chan_t *c)
     if (pend != c->applied_event_id) {
         if (c->writer_main) {
             rsdk_rec_set_event(c->writer_main, pend);
-            if (pend)
+            if (pend) {
                 rsdk_rec_mark_event(c->writer_main, pend, c->pend_event_rectype,
                                     c->pend_event_start, c->pend_event_end,
                                     (uint32_t)(1u << (c->pend_event_rectype & 31)), 0);
+                /* 云存事件:建槽后置事件槽云存态=PENDING(盘上权威,上传器据此枚举待传)。 */
+                if (c->pend_event_cloud)
+                    rsdk_rec_mark_cloud(c->writer_main, pend, RSDK_CLOUD_PENDING,
+                                        c->pend_event_start ? c->pend_event_start
+                                                            : (uint32_t)time(NULL));
+            }
         }
         if (c->writer_sub) rsdk_rec_set_event(c->writer_sub, pend);
         c->applied_event_id = pend;

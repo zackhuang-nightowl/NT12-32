@@ -177,11 +177,9 @@ typedef struct __attribute__((packed)) {
     uint32_t chunk_off;   /* IDR 记录在 chunk 内偏移 */
 } rsdk_kf_entry_t;
 
-/* Index Slot 64B (冻结 §3;_pad 首字节命名为 stream)。
- * 注:v2 事件权威改用独立 128B 事件索引区(rsdk_evt_slot_t,见下),不再复用 _pad 存 event_id;
- *     RSDK_SLOT_CLOUD_DONE 仅保留兼容(云存态改由事件槽 state 承载,见 event-storage-onwire-index-v2.md)。 */
-enum { RSDK_SLOT_VALID = 0x01, RSDK_SLOT_EVENT = 0x02, RSDK_SLOT_OPEN = 0x04,
-       RSDK_SLOT_CLOUD_DONE = 0x08 };
+/* Index Slot 64B(段索引;_pad 首字节命名为 stream)。事件的 event_id/音视频定位/截图/云存态
+ * 全在独立的 128B 事件索引区(rsdk_evt_slot_t,见下)。 */
+enum { RSDK_SLOT_VALID = 0x01, RSDK_SLOT_EVENT = 0x02, RSDK_SLOT_OPEN = 0x04 };
 typedef struct __attribute__((packed)) {
     uint32_t seg_id;
     uint16_t chn;
@@ -207,7 +205,7 @@ typedef struct __attribute__((packed)) {
  * state 取 rsdk_cloud_state_t;snap_off=0 表示无截图。 */
 enum { RSDK_EVT_VALID = 0x01, RSDK_EVT_HAS_SNAP = 0x02, RSDK_EVT_OPEN = 0x04 };
 typedef struct __attribute__((packed)) {
-    uint64_t event_id;       /* 0x00 事件唯一 id(铸造见 rsdk_cloud_make_event_id) */
+    uint64_t event_id;       /* 0x00 事件唯一 id(铸造见 rsdk_evtidx_make_event_id) */
     uint16_t chn;            /* 0x08 通道 */
     uint8_t  rectype;        /* 0x0A 事件类型(RSDK_REC_*) */
     uint8_t  state;          /* 0x0B 云存态 rsdk_cloud_state_t */

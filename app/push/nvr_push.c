@@ -1,5 +1,5 @@
 /***************************************************************************************
- *  nvr_push.c — 推送：策略 → 读 rsdk_pic → POST 图床 → GET TPNS。见 nvr_push.h。
+ *  nvr_push.c — 推送：策略 → 经事件槽 snap_off 取图 → POST 图床 → GET TPNS。见 nvr_push.h。
  ***************************************************************************************/
 #include "nvr_push.h"
 #include "nvr_urls.h"
@@ -219,17 +219,18 @@ static int load_event_jpeg(nvr_push_t *p, uint64_t eid, nop_detect_type_t type,
     (void)p; (void)eid; (void)type; (void)jpeg; (void)len;
     return -1;
 #else
-    if (!p->opt.meta || !p->opt.group || !eid) return -1;
-    int want = is_ai_photo(type) ? RSDK_PIC_TARGET : RSDK_PIC_MAIN;
-    rsdk_pic_ref_t r[4];
-    int n = rsdk_pic_list_event(p->opt.meta, eid, want, r, 4);
-    if (n <= 0) n = rsdk_pic_list_event(p->opt.meta, eid, RSDK_PIC_MAIN, r, 4);
-    if (n <= 0) n = rsdk_pic_list_event(p->opt.meta, eid, -1, r, 4);
-    if (n <= 0) return -1;
-    rsdk_dev_t *d = rsdk_group_dev(p->opt.group, (int)r[0].disk);
-    if (!d) d = rsdk_group_dev(p->opt.group, 0);
-    if (!d) return -1;
-    return rsdk_pic_read(d, p->opt.meta, r[0].pic_id, jpeg, len) == RSDK_OK ? 0 : -1;
+    (void)type;
+    if (!p->opt.group || !eid) return -1;
+    /* 事件截图指针在事件槽内(权威,不经 meta.db)。逐盘找到该事件槽,按 snap_off 取图。 */
+    int nd = rsdk_group_count(p->opt.group);
+    for (int i = 0; i < nd; i++) {
+        rsdk_dev_t *d = rsdk_group_dev(p->opt.group, i);
+        rsdk_evt_slot_t s;
+        if (!d || rsdk_evtidx_get(d, eid, &s) != RSDK_OK) continue;
+        if (!(s.flags & RSDK_EVT_HAS_SNAP) || !s.snap_off) return -1;
+        return rsdk_pic_read_blob(d, s.snap_off, eid, jpeg, len) == RSDK_OK ? 0 : -1;
+    }
+    return -1;
 #endif
 }
 

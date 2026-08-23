@@ -7,6 +7,16 @@
 
 #define EVT_SZ ((uint64_t)sizeof(rsdk_evt_slot_t))   /* 128 */
 
+/* 确定性铸造 64 位 event_id:[chn:8][rectype:8][salt:16][starttime:32]。 */
+uint64_t rsdk_evtidx_make_event_id(int chn, uint32_t starttime, int rectype, uint16_t salt) {
+    uint64_t id = 0;
+    id |= ((uint64_t)(chn     & 0xFF)) << 56;
+    id |= ((uint64_t)(rectype & 0xFF)) << 48;
+    id |= ((uint64_t)(salt    & 0xFFFF)) << 32;
+    id |=  (uint64_t)starttime;
+    return id;
+}
+
 static uint64_t evt_off(rsdk_dev_t *d, uint32_t i) {
     return rsdk_dev_systab(d)->evtidx_start_sec * RSDK_SEC + (uint64_t)i * EVT_SZ;
 }

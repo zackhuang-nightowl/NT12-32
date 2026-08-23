@@ -21,10 +21,9 @@ enum rsdk_doc_type {
     RSDK_DOC_AI_FRAME = 2,   /* 逐帧目标框/轨迹 */
     RSDK_DOC_LPR      = 3,   /* 车牌 */
     RSDK_DOC_FACE     = 4,   /* 人脸 */
-    RSDK_DOC_SNAP     = 5,   /* 抓拍描述 */
     RSDK_DOC_ALARM    = 6,   /* 报警/联动 */
-    RSDK_DOC_POS      = 7,   /* POS 交易 */
-    RSDK_DOC_CLOUD    = 8    /* 云存上传状态(见 rsdk_cloud.h;仅追加,不改盘上格式) */
+    RSDK_DOC_POS      = 7     /* POS 交易 */
+    /* 抓拍(SNAP)/云存态(CLOUD)已迁事件索引槽(盘上权威),不再入 meta.db。 */
 };
 
 /* ---- 写入键: 全部由调用方提供, SDK 不从 JSON 里猜 ---- */
@@ -97,7 +96,7 @@ RSDK_API int        rsdk_meta_purge_chunk(void *ctx, int disk, uint64_t chunk);
 
 RSDK_API void       rsdk_meta_free_list(rsdk_metadoc_list_t *lst);
 
-/* 取内部 sqlite3*(ctx 即 db;供 rsdk_cloud 等自跑 SQL)。 */
+/* 取内部 sqlite3*(ctx 即 db;供上层自跑 SQL)。 */
 RSDK_API void      *rsdk_meta_db(void *ctx);
 
 #ifdef __cplusplus

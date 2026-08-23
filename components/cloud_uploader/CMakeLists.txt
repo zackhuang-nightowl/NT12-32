@@ -18,7 +18,7 @@ add_library(nvr_cloud_uploader STATIC
 )
 target_include_directories(nvr_cloud_uploader PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
-  ${NVR_ROOT}/components/recorder/include      # rsdk.h / rsdk_cloud.h
+  ${NVR_ROOT}/components/recorder/include      # rsdk.h / rsdk_evtidx.h
   ${NVR_ROOT}/components/config/include        # nvr_record_policy.h / nvr_settings.h
   ${NVR_ROOT}/common/include                   # nvr_log.h
 )

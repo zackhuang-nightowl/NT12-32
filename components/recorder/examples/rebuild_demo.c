@@ -26,8 +26,6 @@ int main(int argc, char **argv) {
     rsdk_dev_t *d = NULL;
     CHECK(rsdk_dev_open(img, &d) == RSDK_OK && d, "open dev");
 
-    void *meta = NULL; rsdk_meta_open(":memory:", &meta);   /* 抓拍索引需 meta 句柄(仅 blob 落盘要用) */
-
     /* ---- 写一段事件录像: 打事件标签的连续帧 + 事件标记 + 云存"上传中"标记 ---- */
     uint64_t eid = 0xABCDEF01;
     uint32_t t0 = 1784486100, t1 = 1784486120;
@@ -50,7 +48,7 @@ int main(int argc, char **argv) {
     uint8_t jpeg[600]; memset(jpeg, 0x7A, sizeof jpeg); memcpy(jpeg, "\xFF\xD8\xFF", 3);
     rsdk_pic_key_t pk = { .chn = 7, .ts = t0, .event_id = eid, .type = RSDK_PIC_MAIN, .w = 320, .h = 240 };
     uint64_t pid = 0;
-    CHECK(rsdk_pic_write(d, meta, &pk, jpeg, sizeof jpeg, &pid) == RSDK_OK, "pic_write");
+    CHECK(rsdk_pic_write(d, &pk, jpeg, sizeof jpeg, &pid) == RSDK_OK, "pic_write");
 
     /* ---- 正常路径也写一条事件槽(模拟运行期已建槽) ---- */
     rsdk_evt_slot_t live; memset(&live, 0, sizeof live);
@@ -89,7 +87,6 @@ int main(int argc, char **argv) {
     int n = rsdk_evtidx_query(d, t0 - 10, t1 + 10, 7, -1, out, 8);
     CHECK(n == 1 && out[0].event_id == eid, "query recovered event");
 
-    rsdk_meta_close(meta);
     rsdk_dev_close(d);
     printf("rebuild_demo: ALL PASS\n");
     return 0;

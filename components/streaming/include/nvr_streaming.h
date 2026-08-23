@@ -70,7 +70,7 @@ rsdk_err_t nvr_stream_set_event_arm(nvr_stream_mgr_t *m, int chn, int arm, int p
  * 由 puller 线程应用到 writer)。供事件(8012/ONVIF)→事件录像落盘。
  * 若 event_arm:同时启动事件片段写盘(含预录 flush)。 */
 rsdk_err_t nvr_stream_set_event    (nvr_stream_mgr_t *m, int chn, uint64_t event_id,
-                                    int rectype, uint32_t start, uint32_t end);
+                                    int rectype, uint32_t start, uint32_t end, int cloud);
 /* 运行时更新录像盘组 + 对录像通道补开 writer(格式化后重组装盘组、免重启启用录像)。 */
 rsdk_err_t nvr_stream_mgr_set_group(nvr_stream_mgr_t *m, rsdk_group_t *group);
 

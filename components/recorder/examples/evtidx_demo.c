@@ -3,7 +3,6 @@
  * 退出码 0=全部断言通过。 */
 #include "rsdk_storgedev.h"
 #include "rsdk_evtidx.h"
-#include "rsdk_cloud.h"
 #include "rsdk_types.h"
 #include <stdio.h>
 #include <string.h>

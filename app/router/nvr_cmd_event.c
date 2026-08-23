@@ -4,9 +4,8 @@
  *  0-based chn,见 nvr_channel.c "内部 0-based");协议 channel 1-based → chn0=channel-1。
  *  日历/时间轴按**本地时区**(mktime)换 epoch —— 录像 start_time 是 UTC epoch,GUI 日历是本地。
  *
- *  事件来源(优先顺序):
- *    1) meta.db 中 RSDK_DOC_CLOUD 行(record_sched 触发时登记,含 rectype/starttime)
- *    2) 连续轨内联 RSDK_RK_EVENT 标记(mark_event)扫描 — meta 缺失时的兜底
+ *  事件来源:事件索引区(rsdk_evtidx,盘上权威)。索引丢失由挂载 rsdk_scan_rebuild 从
+ *  数据区自描述 RK_EVENT 标记重建 → 查询恒读事件区,无需查询期兜底扫盘。
  ***************************************************************************************/
 #include "nvr_cmd_internal.h"
 #include "nvr_cmd_util.h"
@@ -181,59 +180,6 @@ static int collect_from_evtidx(rsdk_group_t *g, uint32_t t0, uint32_t t1,
     return n;
 }
 
-/* 兜底:扫描连续轨 EVENT 标记(窗口不宜过大)。 */
-static int collect_from_disk(rsdk_group_t *g, uint32_t t0, uint32_t t1,
-                             const int *chs0, int nch,
-                             const int *want, int nw,
-                             evt_rec_t *out, int cap)
-{
-    if (!g || cap <= 0) return 0;
-    int n = 0;
-    rsdk_index_slot_t segs[128];
-    for (int ci = 0; ci < nch && n < cap; ci++) {
-        int ch = chs0[ci];
-        int ns = rsdk_group_query_stream(g, t0, t1 ? t1 : t0 + 86400, ch,
-                                         RSDK_REC_CONTINUOUS, NVR_STREAM_MAIN, segs, 128);
-        if (ns <= 0)
-            ns = rsdk_group_query_stream(g, t0, t1 ? t1 : t0 + 86400, ch,
-                                         RSDK_REC_CONTINUOUS, -1, segs, 128);
-        if (ns <= 0) continue;
-        rsdk_group_player_t *gp = NULL;
-        if (rsdk_group_play_open(g, segs, ns, &gp) != RSDK_OK || !gp) continue;
-        for (int guard = 0; guard < 200000 && n < cap; guard++) {
-            rsdk_frame_hdr_t h; const uint8_t *data = NULL; uint32_t len = 0; int disk = 0;
-            if (rsdk_group_play_next(gp, &h, &data, &len, &disk) != RSDK_OK) break;
-            if (h.rec_kind != RSDK_RK_EVENT) continue;
-            uint32_t estart = (uint32_t)h.wall_time, eend = estart + NVR_EVT_POST_RECORD_S;
-            uint32_t mask = 0; int rectype = (int)h.rectype;
-            if (data && len >= sizeof(rsdk_mk_event_t)) {
-                const rsdk_mk_event_t *mk = (const rsdk_mk_event_t *)data;
-                estart = mk->event_start ? mk->event_start : estart;
-                if (mk->event_end > estart) eend = mk->event_end;
-                mask = mk->type_mask;
-            }
-            if (estart < t0 || (t1 && estart > t1)) continue;
-            if (!filter_types_hit(want, nw, rectype, mask)) continue;
-            /* 去重:同 event_id / 同秒同通道 */
-            int dup = 0;
-            for (int k = 0; k < n; k++) {
-                if (out[k].event_id && h.event_id && out[k].event_id == h.event_id) { dup = 1; break; }
-                if (out[k].chn0 == (int)h.chn && out[k].ts == estart) { dup = 1; break; }
-            }
-            if (dup) continue;
-            out[n].chn0 = (int)h.chn;
-            out[n].ts = estart;
-            out[n].duration = (eend > estart) ? (eend - estart) : (uint32_t)NVR_EVT_POST_RECORD_S;
-            out[n].rectype = rectype;
-            out[n].type_mask = mask ? mask : ((rectype > 0 && rectype < 32) ? (1u << rectype) : 0);
-            out[n].event_id = h.event_id;
-            n++;
-        }
-        rsdk_group_play_close(gp);
-    }
-    return n;
-}
-
 static void emit_event_item(cJSON *list, const evt_rec_t *r, const nvr_cmd_ctx_t *c, int duration_ms)
 {
     cJSON *e = cJSON_CreateObject();
@@ -304,10 +250,6 @@ static char *query_event_list_common(cJSON *a, const nvr_cmd_ctx_t *c, int speci
     int n = 0;
     if (buf) {
         n = collect_from_evtidx(c->group, t0, t1, chs0, nch, want, nw, buf, CAP);
-        if (n <= 0 && c->group)
-            n = collect_from_disk(c->group, (t0 > 0) ? t0 :
-                                  ((start > 7 * 86400u) ? (start - 7 * 86400u) : 0),
-                                  t1, chs0, nch, want, nw, buf, CAP);
         if (n > 1) qsort(buf, (size_t)n, sizeof(evt_rec_t), evt_cmp_desc);
     }
 
@@ -480,8 +422,6 @@ char *cmd_X_NightOwl_queryEventCalendar(cJSON *a, const nvr_cmd_ctx_t *c)
     int n = 0;
     if (buf) {
         n = collect_from_evtidx(c->group, t0, t1, chs0, nch, NULL, 0, buf, CAP);
-        if (n <= 0 && c->group)
-            n = collect_from_disk(c->group, t0, t1, chs0, nch, NULL, 0, buf, CAP);
     }
 
     if (strcmp(res, "month") == 0) {

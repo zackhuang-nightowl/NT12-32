@@ -43,7 +43,6 @@
 #if RSDK_CFG_METADATA
 #include "rsdk_meta.h"
 #include "rsdk_pic.h"
-#include "rsdk_cloud.h"
 #endif
 
 #ifdef __cplusplus

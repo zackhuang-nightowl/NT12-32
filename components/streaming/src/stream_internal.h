@@ -150,6 +150,7 @@ typedef struct stream_chan {
     volatile uint64_t pend_event_id;    /* 待应用的事件 id(0=清除) */
     uint64_t          applied_event_id; /* 已应用到 writer 的事件 id */
     uint8_t           pend_event_rectype;
+    uint8_t           pend_event_cloud;   /* 1=云存事件:建槽后置事件槽 state=PENDING(盘上权威) */
     uint32_t          pend_event_start, pend_event_end;
     int              router_open;   /* 1=已开 writer/就绪 */
     int              fed_since_open; /* 开解码后已喂给解码器的帧数(供"出图就绪"判定:切宫格阻塞回复用) */

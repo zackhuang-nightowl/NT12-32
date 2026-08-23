@@ -5,7 +5,7 @@
 #include "nvr_record_sched.h"
 #include "nvr_record_policy.h"
 #include "nvr_defaults.h"   /* 出厂默认(NVR_DEF_POST_RECORD_S 等) */
-#include "rsdk_cloud.h"   /* 云存工作队列(meta.db,可丢) */
+#include "rsdk_evtidx.h"   /* event_id 铸造(盘上事件权威) */
 #include "nvr_log.h"
 
 #include <stdio.h>
@@ -20,6 +20,7 @@ typedef struct {
     int      codec;
     int      evt_active;       /* 有进行中的事件时窗 */
     int      evt_rectype;
+    uint8_t  evt_cloud;        /* 本事件需云存(供延长/结束沿用) */
     uint64_t evt_id;
     uint32_t evt_start;        /* 事件起始 epoch */
     time_t   evt_until;        /* 后录截止 */
@@ -77,8 +78,10 @@ static const char *rectype_trigger(int rectype)
     }
 }
 
-uint64_t nvr_rec_trigger_event(nvr_rec_sched_t *r, int chn, int rectype, uint32_t start_epoch, int post_s)
+uint64_t nvr_rec_trigger_event(nvr_rec_sched_t *r, int chn, int rectype, uint32_t start_epoch,
+                               int post_s, int *cloud_out)
 {
+    if (cloud_out) *cloud_out = 0;
     rec_ch_t *c = ch_of(r, chn);
     if (!c || !c->in_use) return 0;
     time_t now = time(NULL);
@@ -89,42 +92,34 @@ uint64_t nvr_rec_trigger_event(nvr_rec_sched_t *r, int chn, int rectype, uint32_
     /* 进行中的同类型事件 → 仅延长后录窗口 */
     if (c->evt_active && c->evt_rectype == rectype) {
         c->evt_until = now + post;
+        if (cloud_out) *cloud_out = c->evt_cloud;
         return c->evt_id;
     }
 
-    uint64_t eid = 0;
+    /* 每个事件都铸造唯一 event_id(盘上事件槽由录像器建;不再写 meta.db)。 */
+    uint64_t eid = rsdk_evtidx_make_event_id(chn, start_epoch, rectype, (uint16_t)(now & 0xFFFF));
+    int cloud = 0;
 #if RSDK_CFG_METADATA
     int cloud_stream = 1;
     int cloud_ok = r->cfg.settings &&
         nvr_cloud_ch_upload_stream(r->cfg.settings, chn, rectype_trigger(rectype), &cloud_stream);
-    if (cloud_ok) {
+    if (cloud_ok && !r->stopped) {
         int async = (r->cfg.group != NULL);
-        int reg = 1;
+        cloud = 1;
         if (async && r->cfg.settings &&
             !nvr_cloud_async_upload_allowed(r->cfg.settings, start_epoch))
-            reg = 0;
-        if (reg) {
-            eid = rsdk_cloud_make_event_id(chn, start_epoch, rectype, (uint16_t)(now & 0xFFFF));
-            /* 登记云存事件（PENDING）——连续录像轨按时窗，start_chunk 未知置 0，上传器按时窗取片 */
-            if (r->cfg.meta && !r->stopped) {
-                rsdk_cloud_event_t ev; memset(&ev, 0, sizeof(ev));
-                ev.event_id = eid; ev.chn = chn; ev.rectype = (uint32_t)rectype;
-                ev.starttime = start_epoch; ev.state = RSDK_CLOUD_PENDING;
-                rsdk_cloud_event_begin(r->cfg.meta, &ev);
-                if (r->cfg.on_cloud_event)
-                    r->cfg.on_cloud_event(r->cfg.cloud_user, chn, eid, start_epoch, rectype);
-            }
-        }
-    } else {
+            cloud = 0;    /* 早于 async_upload_since:不上传(仅本地录像) */
         (void)cloud_stream;
+        /* sync 模式(无盘组):即时开上传会话 */
+        if (cloud && r->cfg.on_cloud_event)
+            r->cfg.on_cloud_event(r->cfg.cloud_user, chn, eid, start_epoch, rectype);
     }
-#else
-    (void)start_epoch;
 #endif
-    c->evt_active = 1; c->evt_rectype = rectype; c->evt_id = eid;
+    c->evt_active = 1; c->evt_rectype = rectype; c->evt_id = eid; c->evt_cloud = (uint8_t)cloud;
     c->evt_start = start_epoch; c->evt_until = now + post;
+    if (cloud_out) *cloud_out = cloud;
     NVR_LOGI("rec", "ch%d 事件录像 rectype=%d event_id=%llu post=%ds%s", chn, rectype,
-             (unsigned long long)eid, post, (r->cfg.meta && eid) ? " (已登记云存)" : "");
+             (unsigned long long)eid, post, cloud ? " (云存待传)" : "");
     return eid;
 }
 
@@ -146,16 +141,8 @@ void nvr_rec_tick(nvr_rec_sched_t *r)
         if (c->evt_active && now >= c->evt_until) {
             uint64_t eid = c->evt_id;
             uint32_t start = c->evt_start;
-#if RSDK_CFG_METADATA
-            if (eid && r->cfg.meta) {
-                rsdk_cloud_event_t ev;
-                if (rsdk_cloud_get(r->cfg.meta, eid, &ev) == RSDK_OK) {
-                    ev.end_time = (uint32_t)now;
-                    rsdk_cloud_event_begin(r->cfg.meta, &ev);
-                }
-            }
-#endif
-            c->evt_active = 0; c->evt_id = 0;
+            /* 事件槽 end_time/OPEN 由录像器在事件窗结束时 rsdk_rec_end_event 闭合(盘上权威)。 */
+            c->evt_active = 0; c->evt_id = 0; c->evt_cloud = 0;
             if (eid && r->cfg.on_event_end)
                 r->cfg.on_event_end(r->cfg.end_user, i, eid, start);
         }

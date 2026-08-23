@@ -9,7 +9,7 @@
 #ifndef NVR_CLOUD_UPLOADER_H
 #define NVR_CLOUD_UPLOADER_H
 
-#include "rsdk.h"             /* rsdk_group_t / rsdk_cloud（meta ctx） */
+#include "rsdk.h"             /* rsdk_group_t / rsdk_evtidx（云存态=事件槽） */
 
 typedef struct nvr_settings nvr_settings_t;
 
@@ -21,7 +21,6 @@ typedef struct nvr_cloud_uploader nvr_cloud_uploader_t;
 
 typedef struct {
     rsdk_group_t    *group;          /* 读事件段的盘组；NULL=同步(无盘)模式 */
-    void            *meta;           /* rsdk_meta ctx（云存状态权威） */
     nvr_settings_t  *settings;       /* borrowed：cloud_channel.stream_type / triggers */
     const char   *udid;           /* 设备 UID（stream_url 路径） */
     const char   *stoken;         /* 初始 stoken（可后续 set_stoken 更新） */

@@ -11,7 +11,6 @@
 #include "rsdk_feature.h"    /* RSDK_CFG_METADATA(否则整个元数据/事件槽块被编译掉) */
 #include "rsdk_util.h"
 #if RSDK_CFG_METADATA
-#include "rsdk_meta.h"
 #include "rsdk_pic.h"     /* rsdk_pic_hdr_t: 顺扫 MetaRegion 回填截图指针 */
 #endif
 #include <stdlib.h>
@@ -187,36 +186,25 @@ rsdk_err_t rsdk_scan_rebuild2(rsdk_dev_t *d, void *meta, int *out_segs, int *out
 
 #if RSDK_CFG_METADATA
     if (want_events) {
+        /* 事件索引槽(盘上权威:音视频定位 + 云存态)。无对应视频帧的纯标记事件跳过。
+         * meta.db 是可丢的富 AI 元数据边车,rebuild 不重建它(数据已随 meta.db 一起丢,不造假)。 */
         for (int i = 0; i < evm.n; i++) {
             if (abort && *abort) break;
             evt_acc_t *e = &evm.a[i];
-            uint32_t t0 = (e->t0 == 0xFFFFFFFFu) ? 0 : e->t0;
-            /* 1) 事件索引槽(盘上权威:音视频定位 + 云存态)。无对应视频帧的纯标记事件跳过。 */
-            if (e->have_av) {
-                rsdk_evt_slot_t es; memset(&es, 0, sizeof es);
-                es.event_id = e->event_id; es.chn = e->chn; es.rectype = e->rectype;
-                es.state = e->state; es.type_mask = e->type_mask;
-                es.start_time = t0; es.end_time = e->t1;
-                es.av_disk = e->av_disk; es.av_chunk = e->av_chunk;
-                es.av_off = e->av_off; es.av_end_off = e->av_end_off;
-                es.flags = RSDK_EVT_VALID;
-                rsdk_evtidx_write(d, &es);
-            }
-            /* 2) meta.db 事件骨架(AI_EVENT;富元数据兼容,可丢)——仅当调用方给了 meta。 */
-            if (meta) {
-                uint32_t dur = (e->t1 > t0) ? (e->t1 - t0) : 0;
-                char json[128];
-                int jl = snprintf(json, sizeof json,
-                    "{\"rectype\":%u,\"type_mask\":%u,\"duration\":%u,\"rebuilt\":1}",
-                    e->rectype, e->type_mask, dur);
-                rsdk_meta_key_t k; memset(&k, 0, sizeof k);
-                k.ts = t0; k.chn = (int16_t)e->chn; k.event_id = e->event_id; k.doc_type = RSDK_DOC_AI_EVENT;
-                rsdk_meta_put(meta, &k, json, (size_t)jl, NULL);
-            }
+            if (!e->have_av) continue;
+            rsdk_evt_slot_t es; memset(&es, 0, sizeof es);
+            es.event_id = e->event_id; es.chn = e->chn; es.rectype = e->rectype;
+            es.state = e->state; es.type_mask = e->type_mask;
+            es.start_time = (e->t0 == 0xFFFFFFFFu) ? 0 : e->t0; es.end_time = e->t1;
+            es.av_disk = e->av_disk; es.av_chunk = e->av_chunk;
+            es.av_off = e->av_off; es.av_end_off = e->av_end_off;
+            es.flags = RSDK_EVT_VALID;
+            rsdk_evtidx_write(d, &es);
         }
-        /* 3) 顺扫 MetaRegion PIC0 → 回填事件槽截图指针(全链恢复的最后一步)。 */
+        /* 顺扫 MetaRegion PIC0 → 回填事件槽截图指针(全链恢复的最后一步)。 */
         scan_metaregion_pics(d);
     }
+    (void)meta;   /* rebuild 不写 meta.db(元数据可丢) */
 #else
     (void)meta;
 #endif

@@ -192,11 +192,12 @@ extern "C" rsdk_err_t nvr_stream_switch_stream(nvr_stream_mgr_t *m, int chn, int
  * event_id=0 清除标签;否则打标 + 写内联 EVENT 记录(供 queryEventList/scan)。end 为事件窗口末(自动清)。
  * 若 event_arm:启动事件片段(预录 flush + 开写盘)。 */
 extern "C" rsdk_err_t nvr_stream_set_event(nvr_stream_mgr_t *m, int chn, uint64_t event_id,
-                                           int rectype, uint32_t start, uint32_t end)
+                                           int rectype, uint32_t start, uint32_t end, int cloud)
 {
     stream_chan_t *c = slot(m, chn);
     if (!c) return RSDK_E_NOTFOUND;
     c->pend_event_rectype = (uint8_t)rectype;
+    c->pend_event_cloud   = (uint8_t)(cloud ? 1 : 0);
     c->pend_event_start   = start;
     c->pend_event_end     = end;
     c->pend_event_id      = event_id;   /* 最后置 id(puller 见 pend!=applied 触发应用) */

@@ -22,6 +22,10 @@
 extern "C" {
 #endif
 
+/* 由 (chn, starttime, rectype, salt) 确定性铸造 64 位 event_id(事件唯一 id)。
+ * 布局:[chn:8][rectype:8][salt:16][starttime:32]。salt 用于同秒去碰撞。 */
+RSDK_API uint64_t rsdk_evtidx_make_event_id(int chn, uint32_t starttime, int rectype, uint16_t salt);
+
 /* upsert 一条事件槽(按 event_id)。s->crc32 由本函数计算,调用方不必填。 */
 RSDK_API rsdk_err_t rsdk_evtidx_write(rsdk_dev_t *d, const rsdk_evt_slot_t *s);
 
