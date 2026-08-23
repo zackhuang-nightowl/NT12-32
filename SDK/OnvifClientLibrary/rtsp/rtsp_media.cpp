@@ -29,6 +29,7 @@
 #include "net_util.h"
 #ifdef MEDIA_FILE
 #include "media_codec.h"
+#include "media_util.h"   /* avc_split_nalu / avc_h264_nalu_type / avc_h265_nalu_type (live keyframe chase) */
 #endif
 
 
@@ -927,6 +928,41 @@ void * rtsp_media_audio_thread(void * argv)
     return NULL;
 }
 
+/* Does this Annex-B access unit start a fresh decodable GOP (IDR/CRA or a param set that
+ * precedes one)? Used only by the live frame-chase while resyncing, so the per-NAL walk
+ * cost is paid only when a client is behind, never on the steady-state path. */
+static BOOL live_is_keyframe(uint8 *data, int len, int codec)
+{
+    int s_len = 0, n_len = 0, parse_len = len;
+    uint8 *p_cur = data;
+    uint8 *p_end = data + len;
+
+    while (p_cur && p_cur < p_end && parse_len > 0)
+    {
+        uint8 *p_next = avc_split_nalu(p_cur, parse_len, &s_len, &n_len);
+
+        if (n_len > 0)
+        {
+            if (VIDEO_CODEC_H264 == codec)
+            {
+                uint8 t = avc_h264_nalu_type(p_cur, n_len);
+                if (t == 5 /*IDR*/ || t == 7 /*SPS*/) return TRUE;
+            }
+            else if (VIDEO_CODEC_H265 == codec)
+            {
+                uint8 t = avc_h265_nalu_type(p_cur, n_len);
+                if ((t >= 16 && t <= 21) /*BLA/IDR/CRA*/ || t == 32 /*VPS*/ || t == 33 /*SPS*/)
+                    return TRUE;
+            }
+        }
+
+        parse_len = p_next ? (int)(p_end - p_next) : 0;
+        p_cur = p_next;
+    }
+
+    return FALSE;
+}
+
 void rtsp_media_put_video(RSSUA * p_rua, uint8 *data, int size, int waitnext = 1,
                           uint32 ts = 0, int has_ts = 0)
 {
@@ -945,6 +981,24 @@ void rtsp_media_put_video(RSSUA * p_rua, uint8 *data, int size, int waitnext = 1
     }
     else if (p_rua->rtp_tx)
     {
+        /* LIVE frame-chase (追帧): the producer here is the shared stream_router feed thread,
+         * so it must never block. When a slow client backs the queue up (hqueue_put returns
+         * FALSE below), we set v_resync and then DROP every frame until the next keyframe;
+         * on that keyframe we flush the stale backlog and resume from it. The client thus
+         * skips forward one GOP and resyncs cleanly at an IDR (no mid-GOP artifacts), staying
+         * within ~1 GOP of live. Scoped to is_live; playback/proxy keep their blocking queues. */
+        if (p_rua->media_info.is_live && p_rua->media_info.v_resync)
+        {
+            int codec = p_rua->media_info.live_video ?
+                        p_rua->media_info.live_video->getCodec() : VIDEO_CODEC_H264;
+            if (!live_is_keyframe(data, size, codec))
+            {
+                return;                                  /* still chasing: drop non-key frame */
+            }
+            rtsp_media_clear_queue(p_rua->media_info.v_queue);   /* jump to newest GOP */
+            p_rua->media_info.v_resync = 0;              /* resync: enqueue this keyframe below */
+        }
+
         packet.buff = (uint8*)malloc(size + RTSP_RESV_HDR_SIZE);
         if (packet.buff)
         {
@@ -958,6 +1012,10 @@ void rtsp_media_put_video(RSSUA * p_rua, uint8 *data, int size, int waitnext = 1
             if (hqueue_put(p_rua->media_info.v_queue, (char *)&packet) == FALSE)
             {
                 free(packet.buff);
+                if (p_rua->media_info.is_live)
+                {
+                    p_rua->media_info.v_resync = 1;      /* fell behind → chase next keyframe */
+                }
             }
         }
     }
@@ -2556,7 +2614,13 @@ void rtsp_media_live_video_send(RSSUA * p_rua)
         return;
     }
     
-    rtsp_media_create_video_queue(p_rua, RTSP_QUEUE_SIZE, HQ_GET_WAIT | HQ_PUT_WAIT);
+    /* LIVE: non-blocking put (drop-on-full, NO HQ_PUT_WAIT). The producer here is the
+     * shared stream_router feed thread (nvr_rtsp_live_feed -> procData -> put_video). If a
+     * slow/stuck APP client fills v_queue, HQ_PUT_WAIT would block that thread, starving the
+     * SAME channel's local live view + recording. Drop stale frames instead; real-time
+     * playback favors fresh frames. (Playback/proxy paths keep HQ_PUT_WAIT: own reader thread.) */
+    rtsp_media_create_video_queue(p_rua, RTSP_QUEUE_SIZE, HQ_GET_WAIT);
+    p_rua->media_info.v_resync = 0;   /* start in-sync; set when the client falls behind */
 
     capture->addCallback(rtsp_media_live_video_callback, p_rua);
     capture->startCapture();
@@ -2582,7 +2646,9 @@ void rtsp_media_live_audio_send(RSSUA * p_rua)
         return;
     }
     
-    rtsp_media_create_audio_queue(p_rua, RTSP_QUEUE_SIZE, HQ_GET_WAIT | HQ_PUT_WAIT);
+    /* LIVE: non-blocking put (drop-on-full) — same rationale as live video: never block the
+     * shared router feed thread (would starve local live view + recording on this channel). */
+    rtsp_media_create_audio_queue(p_rua, RTSP_QUEUE_SIZE, HQ_GET_WAIT);
 
     capture->addCallback(rtsp_media_live_audio_callback, p_rua);
     capture->startCapture();

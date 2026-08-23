@@ -82,7 +82,8 @@ typedef struct
     uint32          video_tx    : 1;    // video tx flag
     uint32          audio_tx    : 1;    // audio tx flag
     uint32          metadata_tx : 1;    // metadata tx flag
-    uint32          reserved    : 16;
+    uint32          v_resync    : 1;    // live: chasing next keyframe (drop until key, then flush+resume)
+    uint32          reserved    : 15;
 
     char            filename[256];      // file name
     int64           duration;           // media duration, unit is millisecond

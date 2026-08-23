@@ -43,7 +43,10 @@
 #define MAX_NUM_RUA         4
 #else
 #   ifdef MEDIA_LIVE
-#define MAX_NUM_RUA         10
+/* NVR tunnel-serve pool: APP may pull all channels (NVR_MAX_CH=32) at once, plus headroom
+ * for stream switch / reconnect overlap / playback / multiple app clients. Was 10 (blocked
+ * >~9 concurrent). Cost is tiny: net_buf 2048B each, bufs=MAX_NUM_RUA*2 -> 128 bufs ~256KB. */
+#define MAX_NUM_RUA         64
 #   else
 #define MAX_NUM_RUA         100
 #   endif

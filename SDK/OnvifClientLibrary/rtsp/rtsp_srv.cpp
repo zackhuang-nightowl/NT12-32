@@ -1132,6 +1132,20 @@ void rtsp_listen_rx(RTSP_SRV * p_srv, int sfd, int family)
         log_print(HT_LOG_WARN, "%s, setsockopt SO_RCVBUF error[%d]\r\n", __FUNCTION__, errno);
     }
 
+    /* Bound send() so a dead/half-open peer (e.g. a dropped P2P tunnel that sends no FIN/RST)
+     * cannot hang the per-session tx thread forever holding an RUA slot. On timeout send()
+     * returns EAGAIN/EWOULDBLOCK; the session then ages out via the 1s session-timeout reaper
+     * (rtsp_timer), so the pool self-heals instead of leaking until reboot. */
+    {
+        struct timeval sndto;
+        sndto.tv_sec  = 8;
+        sndto.tv_usec = 0;
+        if (setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, (char*)&sndto, sizeof(sndto)) < 0)
+        {
+            log_print(HT_LOG_WARN, "%s, setsockopt SO_SNDTIMEO error[%d]\r\n", __FUNCTION__, errno);
+        }
+    }
+
 #ifdef RTSPS
     if (p_srv->ssl_ctx)
     {
