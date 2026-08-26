@@ -54,6 +54,7 @@ typedef struct {
     pthread_t    pb_tid;         /* 读线程句柄(pb_mode 时有效) */
     volatile int pb_run;         /* 停止标志:置 0 让读线程退出 */
     uint32_t     pb_start;       /* 回放起点 UTC 秒 */
+    uint32_t     pb_end;         /* 事件回放止点 UTC 秒(0=不限,时间轴回放) */
     int          pb_stream;      /* 回放码流 0主/1子 */
     int          pb_want_audio;  /* 音频意向(v1 暂不出音,见报告) */
     int          pb_want_video;  /* 视频意向(恒 1) */
@@ -146,6 +147,34 @@ static uint32_t pb_duration_of(struct rsdk_group *grp, int chn, uint32_t start)
     return dur;
 }
 
+/* 事件回放:按 fileName(=事件起点 UTC,即 evtidx 槽 start_time,含预录)在盘上事件索引区
+ * 查该通道的事件,返回事件时长(end-start),并把止点写 *end_out。找不到=0(调用方回落连续段)。 */
+static uint32_t pb_event_window_of(struct rsdk_group *grp, int chn, uint32_t start, uint32_t *end_out)
+{
+    if (end_out) *end_out = 0;
+    if (!grp) return 0;
+    rsdk_evt_slot_t *slots = (rsdk_evt_slot_t *)calloc(64, sizeof(*slots));
+    if (!slots) return 0;
+    uint32_t dur = 0;
+    for (int di = 0; di < rsdk_group_count(grp) && !dur; di++) {
+        rsdk_dev_t *d = rsdk_group_dev(grp, di);
+        if (!d) continue;
+        /* 窗口取 [start, start+1]:fileName 恰为事件槽 start_time,精确命中即可。 */
+        int m = rsdk_evtidx_query(d, start, start + 1, chn, -1, slots, 64);
+        for (int i = 0; i < m; i++) {
+            if ((int)slots[i].chn != chn || slots[i].start_time != start) continue;
+            uint32_t end = slots[i].end_time;
+            if (end == 0 || end == 0xFFFFFFFFu || end <= start)
+                end = start + 30u;  /* 未闭合/异常 → 兜底 30s(出厂后录窗量级) */
+            if (end_out) *end_out = end;
+            dur = end - start;
+            break;
+        }
+    }
+    free(slots);
+    return dur;
+}
+
 /* 按起点/最近一次 startPlayback 找回登记的通道/码流/音视频意向。Task 5 出流时使用。 */
 __attribute__((unused))
 static void lookup_pb_bind(uint32_t start, int *chn, int *stream, int *want_audio, int *want_video)
@@ -200,6 +229,7 @@ static void *pb_reader(void *arg)
     pthread_mutex_lock(&g.lock);
     struct rsdk_group *grp = g.group;
     uint32_t start        = g.slot[chn].pb_start;
+    uint32_t pb_end       = g.slot[chn].pb_end;    /* 事件回放止点(0=时间轴回放不限) */
     int      pbstream     = g.slot[chn].pb_stream;
     pthread_mutex_unlock(&g.lock);
 
@@ -252,6 +282,16 @@ static void *pb_reader(void *arg)
         if (h.rec_kind != RSDK_RK_FRAME) continue;        /* 跳过段起/止/事件等标记记录 */
         if ((int)h.stream != pbstream) continue;          /* 只出视频(音频 stream==2 忽略,见报告) */
 
+        /* 事件回放:播到事件止点(end_time)即暂停——停在最后一帧,读线程存活以响应 seek/重播。
+         * wall_time=0(未写)时条件不成立,不会误停。 */
+        if (pb_end && (uint32_t)h.wall_time >= pb_end) {
+            rsdk_group_play_close(pl); pl = NULL;
+            g.slot[chn].pb_paused = 1;
+            NVR_LOGD("playback", "pb ch%d 事件录像播完 @%u(止%u)→ 暂停", chn,
+                     (uint32_t)h.wall_time, pb_end);
+            continue;
+        }
+
         int vcodec = (h.codec == RSDK_CODEC_H265) ? 1 : 0;
 
         if (!inited) {
@@ -299,7 +339,7 @@ static void *pb_reader(void *arg)
 
 /* 启动某通道回放(调用方不得持 g.lock;内部自锁)。先夺回该 slot(释放任何直播占用),
  * 置 pb_mode 并起读线程。codec 首帧才知 → 不在此 addStream。 */
-static int pb_start(int chn, uint32_t start, int stream, int want_audio, int want_video)
+static int pb_start(int chn, uint32_t start, uint32_t end, int stream, int want_audio, int want_video)
 {
     if (chn < 0 || chn >= NVR_SRV_MAX_SLOTS) return -1;
     int st = stream ? 1 : 0;
@@ -316,6 +356,7 @@ static int pb_start(int chn, uint32_t start, int stream, int want_audio, int wan
     g.slot[chn].pb_mode      = 1;
     g.slot[chn].pb_run       = 1;
     g.slot[chn].pb_start     = start;
+    g.slot[chn].pb_end       = end;
     g.slot[chn].pb_stream    = st;
     g.slot[chn].pb_want_audio = want_audio ? 1 : 0;
     g.slot[chn].pb_want_video = want_video ? 1 : 0;
@@ -463,7 +504,7 @@ void nvr_rtsp_live_set_group(struct rsdk_group *group)
 }
 
 int nvr_rtsp_pb_prepare(int chn, uint32_t start_utc, int stream, int want_audio, int want_video,
-                        uint32_t *duration_out)
+                        int by_event, uint32_t *duration_out)
 {
     pthread_mutex_lock(&g.lock);
     int i = g.pb_bind_i % 8;
@@ -476,7 +517,13 @@ int nvr_rtsp_pb_prepare(int chn, uint32_t start_utc, int stream, int want_audio,
     g.pb_bind_i = i + 1;
     struct rsdk_group *grp = g.group;
     pthread_mutex_unlock(&g.lock);
-    uint32_t d = pb_duration_of(grp, chn, start_utc);
+
+    /* 事件回放(带 fileName):duration=事件时长,止点=事件 end;找不到事件则回落连续段(不设止点)。
+     * 时间轴回放:duration=连续段剩余秒,不设止点。 */
+    uint32_t end_utc = 0;
+    uint32_t d = 0;
+    if (by_event) d = pb_event_window_of(grp, chn, start_utc, &end_utc);
+    if (d == 0) { d = pb_duration_of(grp, chn, start_utc); end_utc = 0; }
     if (duration_out) *duration_out = d;
 
     /* 真正出流:先停掉本通道任何在跑的回放(seek = 用新起点重发 startPlayback → 重启读线程),
@@ -485,7 +532,7 @@ int nvr_rtsp_pb_prepare(int chn, uint32_t start_utc, int stream, int want_audio,
     if (!g.run) return 0;
     if (chn < 0 || chn >= NVR_SRV_MAX_SLOTS) return -1;
     pb_stop_one(chn);
-    return pb_start(chn, start_utc, stream, want_audio, want_video);
+    return pb_start(chn, start_utc, end_utc, stream, want_audio, want_video);
 }
 
 void nvr_rtsp_pb_stop(void)

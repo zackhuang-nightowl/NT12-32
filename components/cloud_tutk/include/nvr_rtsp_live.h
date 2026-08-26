@@ -42,10 +42,13 @@ void nvr_rtsp_live_feed(int chn, int stream, const uint8_t *data, int len,
 /* 主流音频(AAC,可带 ADTS)→ 正在看该路 live 且 streamType 含 audio 的会话。 */
 void nvr_rtsp_live_feed_audio(int chn, const uint8_t *data, int len, uint32_t ts_ms);
 
-/* startPlayback:登记通道/码流/是否音频/起点。duration=重叠段剩余秒(无段=0)。
+/* startPlayback:登记通道/码流/是否音频/起点。
+ * by_event=1(请求带 fileName)→ 事件回放:duration=该事件时长(含预录~后录),
+ *   且读线程只播到事件止(end_time)即停;找不到事件则回落连续段。
+ * by_event=0 → 时间轴回放:duration=重叠连续段剩余秒(无段=0),不设止点。
  * 无论有无录像都返回 0,App 随后 DESCRIBE /playback/<startTime>。 */
 int  nvr_rtsp_pb_prepare(int chn, uint32_t start_utc, int stream, int want_audio, int want_video,
-                         uint32_t *duration_out);
+                         int by_event, uint32_t *duration_out);
 void nvr_rtsp_pb_stop(void);
 
 #ifdef __cplusplus

@@ -279,8 +279,12 @@ char *cmd_startPlayback(cJSON *a, const nvr_cmd_ctx_t *c)
      * URL 按文档为 rtsp://iotc-tunnel:<port>/playback/<startTime>(时间戳,不含通道)——
      * 库侧解析器把 playback/<ts> 经 resolver 反查回通道 slot(见 nvr_pb_resolve_slot)。
      * 无论该时间点有无录像都必须回 URL(文档要求);duration=重叠段剩余秒(无段=0)。 */
+    /* 带 fileName = 事件回放:只播该事件音视频(含预录~后录),duration=事件时长,播完暂停。
+     * 不带 = 时间轴回放:duration=连续段剩余秒,连续播放。 */
+    const char *fname = nvr_jstr(a, "fileName", NULL);
+    int by_event = (fname && fname[0]) ? 1 : 0;
     uint32_t dur = 0;
-    nvr_rtsp_pb_prepare(chn0, start, sel.stream, sel.want_audio, sel.want_video, &dur);
+    nvr_rtsp_pb_prepare(chn0, start, sel.stream, sel.want_audio, sel.want_video, by_event, &dur);
     char url[160];
     snprintf(url, sizeof(url), "rtsp://iotc-tunnel:%d/playback/%u", port, start);
     cJSON *o = cJSON_CreateObject();
