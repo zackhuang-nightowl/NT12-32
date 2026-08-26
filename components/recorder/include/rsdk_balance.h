@@ -28,6 +28,9 @@ RSDK_API void       rsdk_group_close(rsdk_group_t *g);
 /* 运行时把一块**已格式化**的盘原地加入盘组(★group 指针不变——避免关组重开导致各模块借用的
  * group 指针悬空;数组在锁内 realloc 追加)。已在组内→RSDK_OK;未格式化/外来→rsdk_dev_open 失败原样返回。 */
 RSDK_API rsdk_err_t rsdk_group_add_disk(rsdk_group_t *g, const char *path);
+
+/* 带外改盘(format 直写盘区)后原地重载整组,不换 group 指针(借用者立即见新态,免重启)。停写后调用。 */
+RSDK_API rsdk_err_t rsdk_group_reload(rsdk_group_t *g);
 /* 按 devpath 查组内下标(供热插拔判断是否已入组);无则返回 -1。 */
 RSDK_API int        rsdk_group_find_path(rsdk_group_t *g, const char *path);
 
@@ -63,6 +66,8 @@ RSDK_API rsdk_err_t rsdk_group_play_next2(rsdk_group_player_t *p, rsdk_frame_hdr
                                           const uint8_t **data, uint32_t *len,
                                           int *disk_out, int *gap_out);
 RSDK_API rsdk_err_t rsdk_group_play_seek_pts(rsdk_group_player_t *p, uint64_t pts);
+/* 按墙钟 epoch 定位:选覆盖 wall 的段 + 段内读 RK_KEYIDX 跳到 ≤wall 最近 IDR(大段回放必用)。 */
+RSDK_API rsdk_err_t rsdk_group_play_seek(rsdk_group_player_t *p, uint32_t wall);
 RSDK_API void       rsdk_group_play_close(rsdk_group_player_t *p);
 
 #ifdef __cplusplus

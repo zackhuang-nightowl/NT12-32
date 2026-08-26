@@ -226,8 +226,8 @@ static rsdk_group_player_t *pb_open_audio_player(nvr_playback_t *pb, int chn0, u
                              pb->day_end_wall ? pb->day_end_wall + 1 : start_wall + 24 * 3600,
                              segs, PB_MAX_SEGS);
     rsdk_group_player_t *gp = NULL;
-    if (nseg > 0)
-        rsdk_group_play_open(pb->cfg.group, segs, nseg, &gp);
+    if (nseg > 0 && rsdk_group_play_open(pb->cfg.group, segs, nseg, &gp) == RSDK_OK && gp)
+        rsdk_group_play_seek(gp, start_wall);   /* ★ 音轨也定位到 start_wall,与视频对齐 */
     free(segs);
     return gp;
 }
@@ -259,6 +259,7 @@ static int pb_peek_codec(nvr_playback_t *pb, int chn0, int want_stream,
     rsdk_group_player_t *gp = NULL;
     if (rsdk_group_play_open(g, segs, nseg, &gp) != RSDK_OK || !gp) { free(segs); return -1; }
     free(segs);
+    rsdk_group_play_seek(gp, start_wall);   /* ★ 段内直达 start_wall 的 IDR(大段必须,否则顺读到不了) */
     int rc = -1;
     for (int guard = 0; guard < 4096; guard++) {
         rsdk_frame_hdr_t h; const uint8_t *data = NULL; uint32_t len = 0; int disk = 0, gap = 0;
@@ -266,7 +267,8 @@ static int pb_peek_codec(nvr_playback_t *pb, int chn0, int want_stream,
         if (h.rec_kind != RSDK_RK_FRAME) continue;
         if (h.frame_type == RSDK_FRAME_AUDIO) continue;
         if ((int)h.stream != want_stream) continue;
-        if ((uint32_t)h.wall_time < start_wall) continue;
+        /* 已 seek 到 ≤start_wall 的 IDR,首个 I 帧即正确起点,直接取 codec(不再要求 ≥start_wall,
+         * 否则大段里 seek 落点略早于 start_wall 时又要多读一个 GOP)。 */
         if (h.frame_type != RSDK_FRAME_I) continue;
         *codec = h.codec; rc = 0; break;
     }
@@ -405,6 +407,7 @@ static void *pb_feeder_fwd(void *arg)
     rsdk_group_player_t *gp = NULL;
     if (rsdk_group_play_open(g, segs, nseg, &gp) != RSDK_OK || !gp) { free(segs); return NULL; }
     free(segs);
+    rsdk_group_play_seek(gp, start_wall);   /* ★ 从 start_wall 的 IDR 起播(否则从段头最多早播 1 小时) */
 
     uint8_t *par = (uint8_t *)malloc(65536);
     if (!par) { rsdk_group_play_close(gp); __sync_sub_and_fetch(&pb->alive_feeders, 1); return NULL; }

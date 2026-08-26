@@ -134,6 +134,24 @@ rsdk_err_t rsdk_group_add_disk(rsdk_group_t *g, const char *path) {
     return RSDK_OK;
 }
 
+/* 带外改盘(formatStorage 直写盘区)后原地重载整组: 逐盘重载运行态(SB/事件区镜像/索引映射),
+ * 复位 balance 落盘游标。同一 group 指针不变 → router/playback/rec 等借用者即时看到清空后的盘态,
+ * 免重启且不产生"新建 group 致读路径读旧句柄"的陈旧数据。调用方须先停写(writer 关闭)。 */
+rsdk_err_t rsdk_group_reload(rsdk_group_t *g) {
+    if (!g) return RSDK_E_PARAM;
+    pthread_mutex_lock(&g->lock);
+    rsdk_err_t rc = RSDK_OK;
+    for (int i = 0; i < g->n; i++) {
+        if (!g->devs[i]) continue;
+        rsdk_err_t r = rsdk_dev_reload(g->devs[i]);
+        if (r) rc = r;
+    }
+    for (int i = 0; i < 32; i++) g->chn_last[i] = -1;   /* 每通道落盘游标复位 */
+    g->rr = 0;
+    pthread_mutex_unlock(&g->lock);
+    return rc;
+}
+
 /* ==================== 新 API ==================== */
 
 /* SMART 健康刷新: 对每块盘读 SMART 并更新 health_ok[].
@@ -379,6 +397,25 @@ rsdk_err_t rsdk_group_play_seek_pts(rsdk_group_player_t *p, uint64_t pts) {
     p->cur = idx; p->seek_pts = pts; p->seek_pending = 1;
     p->have_prev = 0;  /* seek 后重置间隙上下文 */
     return open_cur(p);
+}
+
+/* 按墙钟 epoch 定位:选覆盖 wall 的段,再段内读 RK_KEYIDX 表跳到 ≤wall 的最近 IDR。
+ * 大段(3600s/近满 chunk)必须用它——否则从段头顺读几万帧才到 wall(回放"无录像"根因)。 */
+rsdk_err_t rsdk_group_play_seek(rsdk_group_player_t *p, uint32_t wall) {
+    if (!p || p->nseg <= 0) return RSDK_E_PARAM;
+    int idx = 0, found = -1;
+    for (int i = 0; i < p->nseg; i++) {
+        uint32_t e = (p->segs[i].end_time == 0xFFFFFFFFu) ? 0xFFFFFFFFu : p->segs[i].end_time;
+        if (p->segs[i].start_time <= wall && wall <= e) { found = i; break; }
+        if (p->segs[i].start_time <= wall) idx = i;   /* 兜底:最后一个起点≤wall(落 gap 时) */
+    }
+    p->cur = (found >= 0) ? found : idx;
+    p->seek_pending = 0;      /* 不走 pts seek,改用段内墙钟 seek */
+    p->have_prev = 0;
+    rsdk_err_t rc = open_cur(p);
+    if (rc) return rc;
+    if (p->pl) rsdk_play_seek(p->pl, wall);   /* 段内 RK_KEYIDX 直达 ≤wall 的 IDR */
+    return RSDK_OK;
 }
 
 void rsdk_group_play_close(rsdk_group_player_t *p) {
