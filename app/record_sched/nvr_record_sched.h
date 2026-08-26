@@ -27,8 +27,10 @@ typedef struct {
     int           hdd_full_policy;/* RSDK_HDDFULL_OVERWRITE / _STOP */
     int           post_record_s;  /* 事件时窗后录秒（默认 10） */
     void         *end_user;       /* on_event_end 上下文（nvr_app）；可 NULL */
-    /* 后录窗口结束：编排层去 NOP 相机取 EventExtInfo。不在本模块 HTTP。 */
-    void        (*on_event_end)(void *user, int chn, uint64_t event_id, uint32_t start_epoch);
+    /* 事件窗结束(后录到期/达10min上限/被别的事件顶替):end_epoch=真实结束墙钟。
+     * 编排层据此闭合事件槽(rsdk_rec_end_event 写真实 end_time)+ 去 NOP 相机取 EventExtInfo。 */
+    void        (*on_event_end)(void *user, int chn, uint64_t event_id, uint32_t start_epoch,
+                                uint32_t end_epoch);
     void         *cloud_user;     /* on_cloud_event 上下文；可 NULL */
     /* 云存资格判定后回调：同步(无盘)模式由 app 启实时上传会话。 */
     void        (*on_cloud_event)(void *user, int chn, uint64_t event_id, uint32_t start_epoch, int rectype);
@@ -41,10 +43,15 @@ void nvr_rec_sched_deinit(nvr_rec_sched_t *r);
 int  nvr_rec_channel_up  (nvr_rec_sched_t *r, int chn, int codec);
 int  nvr_rec_channel_down(nvr_rec_sched_t *r, int chn);
 
-/* AI 事件触发:铸造 event_id 并判定云存资格。post_s≤0 用 cfg.post_record_s。返回 event_id(0=未触发)。
- * cloud_out(可空):置 1 表示本事件需云存 → 事件槽建后由录像器置 state=PENDING(盘上权威)。 */
+/* AI 事件触发:铸造/续接 event_id 并判定云存资格。post_s≤0 用 cfg.post_record_s。返回 event_id(0=未触发)。
+ * 续录语义:进行中同类型事件且未达 NVR_DEF_EVENT_MAX_S(10min)→ 沿用同 event_id、延长窗口;
+ *           达上限则先闭合旧事件再切割成新事件。
+ * cloud_out(可空):置 1 表示本事件需云存 → 事件槽建后由录像器置 state=PENDING。
+ * win_start_out/win_end_out(可空):本事件规范时窗 [起, 止](起=首次触发固定;止=延长后的后录截止),
+ *           供上层喂给录像器写事件槽 end_time(真实时长,非固定 pre+post)。 */
 uint64_t nvr_rec_trigger_event(nvr_rec_sched_t *r, int chn, int rectype, uint32_t start_epoch,
-                               int post_s, int *cloud_out);
+                               int post_s, int *cloud_out,
+                               uint32_t *win_start_out, uint32_t *win_end_out);
 
 /* 满盘/盘事件（app on_storage_evt 转发）：STOP 策略下置全局停录标志。 */
 void nvr_rec_on_storage_evt(nvr_rec_sched_t *r, nvr_stg_evt_t e);

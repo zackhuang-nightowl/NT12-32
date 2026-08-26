@@ -79,9 +79,12 @@ static const char *rectype_trigger(int rectype)
 }
 
 uint64_t nvr_rec_trigger_event(nvr_rec_sched_t *r, int chn, int rectype, uint32_t start_epoch,
-                               int post_s, int *cloud_out)
+                               int post_s, int *cloud_out,
+                               uint32_t *win_start_out, uint32_t *win_end_out)
 {
     if (cloud_out) *cloud_out = 0;
+    if (win_start_out) *win_start_out = start_epoch;
+    if (win_end_out) *win_end_out = 0;
     rec_ch_t *c = ch_of(r, chn);
     if (!c || !c->in_use) return 0;
     time_t now = time(NULL);
@@ -89,11 +92,21 @@ uint64_t nvr_rec_trigger_event(nvr_rec_sched_t *r, int chn, int rectype, uint32_
     int post = (post_s > 0) ? post_s : r->cfg.post_record_s;
     if (post <= 0) post = NVR_DEF_POST_RECORD_S;
 
-    /* 进行中的同类型事件 → 仅延长后录窗口 */
-    if (c->evt_active && c->evt_rectype == rectype) {
+    /* 续录:进行中同类型事件且未达 10min 上限 → 沿用同 event_id、延长后录窗口(起点固定=首次触发)。 */
+    if (c->evt_active && c->evt_rectype == rectype &&
+        ((uint32_t)now - c->evt_start) < (uint32_t)NVR_DEF_EVENT_MAX_S) {
         c->evt_until = now + post;
         if (cloud_out) *cloud_out = c->evt_cloud;
+        if (win_start_out) *win_start_out = c->evt_start;
+        if (win_end_out)   *win_end_out   = (uint32_t)c->evt_until;
         return c->evt_id;
+    }
+
+    /* 需要开新事件(首个/换类型/达10min上限切割):先闭合进行中的旧事件(写真实结束=now)。 */
+    if (c->evt_active && c->evt_id) {
+        if (r->cfg.on_event_end)
+            r->cfg.on_event_end(r->cfg.end_user, chn, c->evt_id, c->evt_start, (uint32_t)now);
+        c->evt_active = 0; c->evt_id = 0; c->evt_cloud = 0;
     }
 
     /* 每个事件都铸造唯一 event_id(盘上事件槽由录像器建;不再写 meta.db)。 */
@@ -118,6 +131,8 @@ uint64_t nvr_rec_trigger_event(nvr_rec_sched_t *r, int chn, int rectype, uint32_
     c->evt_active = 1; c->evt_rectype = rectype; c->evt_id = eid; c->evt_cloud = (uint8_t)cloud;
     c->evt_start = start_epoch; c->evt_until = now + post;
     if (cloud_out) *cloud_out = cloud;
+    if (win_start_out) *win_start_out = start_epoch;
+    if (win_end_out)   *win_end_out   = (uint32_t)c->evt_until;
     NVR_LOGI("rec", "ch%d 事件录像 rectype=%d event_id=%llu post=%ds%s", chn, rectype,
              (unsigned long long)eid, post, cloud ? " (云存待传)" : "");
     return eid;
@@ -138,13 +153,17 @@ void nvr_rec_tick(nvr_rec_sched_t *r)
     time_t now = time(NULL);
     for (int i = 0; i < REC_MAX_CH; i++) {
         rec_ch_t *c = &r->ch[i];
-        if (c->evt_active && now >= c->evt_until) {
+        /* 后录到期,或达 10min 上限 → 闭合事件(带真实结束墙钟)。 */
+        int expired = (uint32_t)now >= (uint32_t)c->evt_until;
+        int capped   = ((uint32_t)now - c->evt_start) >= (uint32_t)NVR_DEF_EVENT_MAX_S;
+        if (c->evt_active && (expired || capped)) {
             uint64_t eid = c->evt_id;
             uint32_t start = c->evt_start;
-            /* 事件槽 end_time/OPEN 由录像器在事件窗结束时 rsdk_rec_end_event 闭合(盘上权威)。 */
+            uint32_t end = capped ? (uint32_t)now : (uint32_t)c->evt_until;   /* 真实结束 */
             c->evt_active = 0; c->evt_id = 0; c->evt_cloud = 0;
+            /* 事件槽 end_time 由 on_event_end→录像器 rsdk_rec_end_event 写真实值(盘上权威)。 */
             if (eid && r->cfg.on_event_end)
-                r->cfg.on_event_end(r->cfg.end_user, i, eid, start);
+                r->cfg.on_event_end(r->cfg.end_user, i, eid, start, end);
         }
     }
 }

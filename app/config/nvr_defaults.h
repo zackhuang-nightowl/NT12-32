@@ -22,6 +22,13 @@
  * ★单一出厂默认宏:改这一处即全局统一(nvr_event/record_sched/nvr_app/nvr_cmd_event 都引用)。 */
 #define NVR_DEF_POST_RECORD_S    10     /* 事件后录秒 */
 #define NVR_DEF_PRE_RECORD_S     5      /* 事件预录秒 */
+#define NVR_DEF_EVENT_MAX_S      600    /* 单事件最长时长(秒);同类型续录达此上限即切割成新事件 */
+
+/* ================= 时钟有效性(断电保时 + 防 1970 脏录像) ==========================
+ * RTC(pcf8563,纽扣电池)断电保时;丢电则 VL=1、时钟回 1970。低于此阈值视为"时钟未就绪":
+ * 不落事件、不开录像段;并用 flash 地板抬到最后已知时刻(永不倒退回 1970)。 */
+#define NVR_CLOCK_MIN_EPOCH      1577836800u        /* 2020-01-01 UTC:低于此=时钟无效 */
+#define NVR_CLOCK_FLOOR_FILE     "/flash/last_time" /* 运行期持久"最后已知时刻"(掉电/无网兜底地板) */
 /* 云存出厂默认在组件公有头 nvr_cloud_uploader.h(NVR_CLOUD_DEF_POLL_S/SLICE_MS,分层不倒挂)。 */
 
 /* ================= 通道容量缺省(GUI_CONFIG.json channels=[PoE,LAN] 读不到时用) ===== */

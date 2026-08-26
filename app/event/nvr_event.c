@@ -21,6 +21,7 @@
 #define SNAP_Q_CAP   8
 #define SNAP_JPEG_MAX (256u * 1024u)
 #define META_Q_CAP   16
+#define CAMTS_N      32     /* eid→相机8012时间戳 环形缓存(触发时记,取数时查) */
 
 typedef struct {
     int      chn;
@@ -50,6 +51,8 @@ struct nvr_evt_hub {
     volatile int    snap_run;
     meta_job_t      meta_q[META_Q_CAP];
     int             meta_head, meta_tail, meta_n;
+    struct { uint64_t eid; uint32_t cam_ts; } camts[CAMTS_N];  /* eid→相机上报ts */
+    int             camts_i;
     pthread_cond_t  meta_cv;
     pthread_t       meta_tid;
     int             meta_started;
@@ -159,6 +162,11 @@ static void evt_sink(void *sink_ctx, const nop_event_t *ev)
         /* 事件录像周排程门控；无保存规则=不录(GET 仍可回 7×24 给 GUI) */
         const char *sensor = sensor_of(ev->type);
         int allow_rec = 1;
+        /* 时钟未就绪(RTC 掉电/首启无网,now<2020)→ 不落盘,绝不产生 1970 事件时间戳。 */
+        if ((uint32_t)time(NULL) < NVR_CLOCK_MIN_EPOCH) {
+            NVR_LOGW("event", "ch%d 时钟未就绪(now<2020),事件不落盘(等授时)", chn);
+            allow_rec = 0;
+        }
         if (h->cfg.settings && sensor) {
             time_t now = time(NULL);
             struct tm tmv;
@@ -181,14 +189,26 @@ static void evt_sink(void *sink_ctx, const nop_event_t *ev)
         if (pre_s  < 0) pre_s  = NVR_DEF_PRE_RECORD_S;
         {
         uint32_t start = (pre_s > 0 && ts > (uint32_t)pre_s) ? (ts - (uint32_t)pre_s) : ts;
-        int cloud = 0;
-        eid = nvr_rec_trigger_event(h->cfg.rs, chn, rectype, start, post_s, &cloud);
+        int cloud = 0; uint32_t win_start = start, win_end = 0;
+        eid = nvr_rec_trigger_event(h->cfg.rs, chn, rectype, start, post_s, &cloud,
+                                    &win_start, &win_end);
         /* ★ 事件录像落盘:连续轨打标,或仅事件待命时开片段(预录 flush + 后录)。
-         * 索引窗 [ts-pre, ts+post];puller 过 pend_event_end 自动清标签/关片段。
-         * cloud=1 时录像器建槽后置事件槽云存态=PENDING(上传器据盘上权威枚举待传)。 */
+         * 规范时窗 [win_start, win_end] 由 record_sched 给(续录时 win_start 固定=首触发、win_end 延长);
+         * 录像器据此写事件槽 end_time(真实时长)。cloud=1 时置事件槽云存态=PENDING。 */
         if (eid && h->cfg.sm)
-            nvr_stream_set_event(h->cfg.sm, chn, eid, rectype, start,
-                                 ts + (uint32_t)post_s, cloud);
+            nvr_stream_set_event(h->cfg.sm, chn, eid, rectype, win_start, win_end, cloud);
+        /* 记相机 8012 时间戳,供事件结束后 getEventExt 取数用(缺=0→取数回落 start_epoch)。
+         * 打印相机上报 timestamp 与盘上索引 start_epoch(含预录)是否一致,便于核对。 */
+        if (eid) {
+            uint32_t cam = ev->src_ts;
+            NVR_LOGI("event", "ch%d 8012事件 相机timestamp=%u start_epoch(含预录)=%u 一致=%d",
+                     chn, cam, start, (int)(cam == start));
+            pthread_mutex_lock(&h->lock);
+            h->camts[h->camts_i].eid = eid;
+            h->camts[h->camts_i].cam_ts = cam;
+            h->camts_i = (h->camts_i + 1) % CAMTS_N;
+            pthread_mutex_unlock(&h->lock);
+        }
         }
         }
     }
@@ -363,6 +383,17 @@ void nvr_evt_queue_meta_pull(nvr_evt_hub_t *h, int chn, uint64_t event_id, uint3
     memset(&j, 0, sizeof(j));
     j.kind = 1; j.chn = chn; j.eid = event_id; j.start = start_ts;
     meta_enqueue(h, &j);
+}
+
+uint32_t nvr_evt_cam_ts(nvr_evt_hub_t *h, uint64_t event_id)
+{
+    uint32_t ts = 0;
+    if (!h || !event_id) return 0;
+    pthread_mutex_lock(&h->lock);
+    for (int i = 0; i < CAMTS_N; i++)
+        if (h->camts[i].eid == event_id) { ts = h->camts[i].cam_ts; break; }
+    pthread_mutex_unlock(&h->lock);
+    return ts;
 }
 
 void nvr_evt_deinit(nvr_evt_hub_t *h)

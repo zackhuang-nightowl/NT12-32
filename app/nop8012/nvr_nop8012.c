@@ -216,7 +216,8 @@ static int handle_frame(nvr_nop8012_t *c, slot_t *s, time_t now)
             if (type == NOP_DETECT_TYPE_MAX) break;           /* 未知类型忽略 */
             nop_event_t ev; memset(&ev, 0, sizeof(ev));
             ev.channel = s->chn; ev.type = type;
-            ev.timestamp_ms = (uint64_t)now * 1000u;
+            ev.timestamp_ms = (uint64_t)now * 1000u;   /* NVR 收到时刻:录像时间轴 + 取数回落 */
+            ev.src_ts = h.timestamp;                   /* 相机 8012 上报时间戳:getEventExt 取数用(0=无) */
             if (h.data_size > 0) {
                 const uint8_t *jpeg = NULL; uint32_t jlen = 0;
                 if (nvr_n8012_extract_jpeg(h.extend_flag, s->buf + NVR_N8012_HDR_SIZE,

@@ -81,6 +81,9 @@ void nvr_evt_set_push(nvr_evt_hub_t *h,
 void nvr_evt_queue_meta_enable(nvr_evt_hub_t *h, int chn);
 void nvr_evt_queue_meta_pull(nvr_evt_hub_t *h, int chn, uint64_t event_id, uint32_t start_ts);
 
+/** 取事件的相机 8012 上报时间戳(getEventExt 取数用);无=0。 */
+uint32_t nvr_evt_cam_ts(nvr_evt_hub_t *h, uint64_t event_id);
+
 /* 归一化的入站事件（来自 8012 客户端回调 / ONVIF PullMessages 桥）：
  *   发布到 nop_hub（扇出 NOP 侧）+ 触发事件录像 + 更新 longPolling 位图。 */
 int  nvr_evt_ingest(nvr_evt_hub_t *h, int chn, nop_detect_type_t type, uint64_t ts_ms);

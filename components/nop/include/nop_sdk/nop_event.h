@@ -29,6 +29,7 @@ typedef struct nop_event {
     int               channel;
     nop_detect_type_t type;          /* human/vehicle/animal/lineCross/... */
     uint64_t          timestamp_ms;
+    uint32_t          src_ts;        /* 8012 头 timestamp(相机上报 epoch,秒;0=无);getEventExt 取数用 */
     const uint8_t    *jpeg;          /* snapshot, extendDataFlag=1 (may be NULL) */
     size_t            jpeg_len;
     const char       *extra_json;    /* extendDataFlag=2, e.g. lineCross name (may be NULL) */
