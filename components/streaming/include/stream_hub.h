@@ -51,8 +51,11 @@ typedef enum {
     STREAM_REC_RECORDING       /* 连续写, disc/gen 只打 gap 标记 */
 } stream_rec_state_t;
 
-#define STREAM_RECORD_Q_CAP      256  /* 加大缓冲: 磁盘抖动/回收时先积压不丢帧(仅真正跟不上才 GOP 丢) */
-#define STREAM_RECORD_Q_HIGH_WM  192  /* 超过则 stall 告警 */
+/* 抗磁盘抖动缓冲:主队列音视频共享,须容 10s 的(主视频+音频)帧。
+ * 30fps 主 + ~47fps 音频 = 77fps × 10s = 770 帧 → 取 1024(约 13s 余量;音频不拆队列,同步零风险)。
+ * 固定 RAM:1024 槽 × ~40B × 64 路(32ch×2) ≈ 2.6MB;实数据按码率×时长动态占用。 */
+#define STREAM_RECORD_Q_CAP      1024 /* 加大缓冲: 磁盘抖动/回收时先积压不丢帧(仅真正跟不上才 GOP 丢) */
+#define STREAM_RECORD_Q_HIGH_WM  768  /* 超过则 stall 告警(约 3/4 满) */
 
 #define STREAM_REC_MEDIA_VIDEO   0
 #define STREAM_REC_MEDIA_AUDIO   1

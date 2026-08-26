@@ -237,6 +237,11 @@ static void stream_apply_event_tags_puller(stream_chan_t *c)
     if (!c) return;
     if (c->applied_event_id && c->pend_event_end &&
         (uint32_t)time(NULL) > c->pend_event_end && c->event_clip) {
+        /* event-only(无持续录像):writer 即将 flush+关,趁其还开着把真实 end_time 写进事件槽
+         * (否则 worker 侧闭合会遇到 writer 已关而漏写)。已闭合则清 pending 避免 worker 重复。 */
+        if (c->writer_main)
+            rsdk_rec_end_event(c->writer_main, c->applied_event_id, c->pend_event_end);
+        c->pend_event_close_id = 0;
         stream_close_writer(c);
         c->event_clip = 0;
         c->pmain.pre_flushed = 0;

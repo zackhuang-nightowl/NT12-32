@@ -46,22 +46,34 @@ static int worker_drain_pull(stream_chan_t *c, stream_pull_t *p, int byte_budget
 static void worker_apply_event_tags(stream_chan_t *c)
 {
     uint64_t pend = c->pend_event_id;
-    if (pend != c->applied_event_id) {
+    uint32_t pend_end = c->pend_event_end;
+    int new_event = (pend != c->applied_event_id);
+    /* 续录延长:同 event_id 但窗口止推进 → 重打 mark_event 延事件槽 end_time(非新事件,不重置云存态)。 */
+    int extended  = (!new_event && pend && pend_end != c->applied_event_end);
+    if (new_event || extended) {
         if (c->writer_main) {
-            rsdk_rec_set_event(c->writer_main, pend);
+            if (new_event) rsdk_rec_set_event(c->writer_main, pend);
             if (pend) {
                 rsdk_rec_mark_event(c->writer_main, pend, c->pend_event_rectype,
                                     c->pend_event_start, c->pend_event_end,
                                     (uint32_t)(1u << (c->pend_event_rectype & 31)), 0);
-                /* 云存事件:建槽后置事件槽云存态=PENDING(盘上权威,上传器据此枚举待传)。 */
-                if (c->pend_event_cloud)
+                /* 云存事件:仅新建时置事件槽云存态=PENDING(盘上权威,上传器据此枚举待传)。 */
+                if (new_event && c->pend_event_cloud)
                     rsdk_rec_mark_cloud(c->writer_main, pend, RSDK_CLOUD_PENDING,
                                         c->pend_event_start ? c->pend_event_start
                                                             : (uint32_t)time(NULL));
             }
         }
-        if (c->writer_sub) rsdk_rec_set_event(c->writer_sub, pend);
+        if (new_event && c->writer_sub) rsdk_rec_set_event(c->writer_sub, pend);
         c->applied_event_id = pend;
+        c->applied_event_end = pend_end;
+    }
+    /* 事件窗结束:把真实 end_time 写进事件槽(rsdk_rec_end_event 更新 end + 清 OPEN)。 */
+    uint64_t close_id = c->pend_event_close_id;
+    if (close_id) {
+        uint32_t close_end = c->pend_event_close_time;
+        if (c->writer_main) rsdk_rec_end_event(c->writer_main, close_id, close_end);
+        c->pend_event_close_id = 0;
     }
     /* 事件窗结束关 writer 由 puller 调 stream_close_writer(flush+close),避免 worker 重复关 */
 }

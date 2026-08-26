@@ -214,6 +214,20 @@ extern "C" rsdk_err_t nvr_stream_set_event(nvr_stream_mgr_t *m, int chn, uint64_
     return RSDK_OK;
 }
 
+extern "C" rsdk_err_t nvr_stream_end_event(nvr_stream_mgr_t *m, int chn, uint64_t event_id,
+                                           uint32_t end_epoch)
+{
+    stream_chan_t *c = slot(m, chn);
+    if (!c || !event_id) return RSDK_E_NOTFOUND;
+    /* 置待闭合(worker 调 rsdk_rec_end_event 写真实 end_time + 清 OPEN)。 */
+    c->pend_event_close_time = end_epoch;
+    c->pend_event_close_id   = event_id;
+    /* 仅当当前标签正是本事件才清(避免顶替:新事件已接管则不动其标签)。 */
+    if (c->pend_event_id == event_id) c->pend_event_id = 0;
+    stream_rec_mask_poke(c);
+    return RSDK_OK;
+}
+
 extern "C" rsdk_err_t nvr_stream_set_record_mask(nvr_stream_mgr_t *m, int chn, int main_on, int sub_on)
 {
     stream_chan_t *c = slot(m, chn);

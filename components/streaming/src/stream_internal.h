@@ -152,6 +152,9 @@ typedef struct stream_chan {
     uint8_t           pend_event_rectype;
     uint8_t           pend_event_cloud;   /* 1=云存事件:建槽后置事件槽 state=PENDING(盘上权威) */
     uint32_t          pend_event_start, pend_event_end;
+    uint32_t          applied_event_end;  /* 已应用的窗口止(变化=续录延长→重打 mark_event 延事件槽 end_time) */
+    volatile uint64_t pend_event_close_id;   /* 待闭合事件 id(0=无);worker 调 rsdk_rec_end_event 写真实 end */
+    volatile uint32_t pend_event_close_time; /* 待闭合事件真实结束墙钟 */
     int              router_open;   /* 1=已开 writer/就绪 */
     int              fed_since_open; /* 开解码后已喂给解码器的帧数(供"出图就绪"判定:切宫格阻塞回复用) */
     int              bootstrap_pending; /* 1=open 时 commit 未就绪未喂 kf;commit 后在 puller 补喂缓存 IDR */
