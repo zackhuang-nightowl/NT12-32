@@ -449,51 +449,61 @@ char *cmd_X_NightOwl_queryEventCalendar(cJSON *a, const nvr_cmd_ctx_t *c)
     return nvr_resp_content(o);
 }
 
-/* ---------- EventExtInfo（套包：NVR 本地库，不透传到相机） ---------- */
+/* ---------- EventExtInfo 配置：get/set 均"先透传相机、返回相机实际回复"----------
+ * · 一律透传给相机(NOP 私有 8089),不读 NVR 本地存储值兜底;
+ * · 相机不可达 / 非 NOP(dev_post 返回 NULL)→ 回 501 NOT_SUPPORT;
+ * · 相机回 200 → 按相机实际回复记录本地元数据开关(get 用 content 真值;set 用请求值);
+ * · 返回值 = 相机原始回复(透传结果),不重新包装。 */
 
-static int extinfo_cfg_on(const nvr_cmd_ctx_t *c, int chn0)
+/* 相机回复(raw JSON)statusCode==200 时,把 enable/collectionIntervalMs 落进 NVR settings。
+ * get:相机 content 里带真值;set:回复通常无 content,按本次请求值记录。 */
+static void extinfo_record_from_reply(const nvr_cmd_ctx_t *c, int chn0, const char *raw,
+                                      int has_en_req, int en_req, int has_ms_req, int ms_req)
 {
-#if !RSDK_CFG_METADATA
-    (void)c; (void)chn0; return 0;
-#else
-    if (!c || !c->meta) return 0;
-    if (!c->settings) return 1;
-    char k[72];
-    snprintf(k, sizeof(k), "ai.event_ext_info.ch.%d.enable", chn0);
-    int v = nvr_settings_get_int(c->settings, k, -1);
-    if (v >= 0) return v != 0;
-    return nvr_settings_get_int(c->settings, "ai.event_ext_info.enable", 1) != 0;
-#endif
-}
-
-static int extinfo_cfg_ms(const nvr_cmd_ctx_t *c, int chn0)
-{
-    int ms = 1000;
-    if (c && c->settings) {
+    if (!c || !c->settings || !raw) return;
+    cJSON *reply = cJSON_Parse(raw);
+    if (!reply) return;
+    if (nvr_jint(reply, "statusCode", 0) == 200) {
+        cJSON *content = cJSON_GetObjectItem(reply, "content");
+        int have_en = 0, en = 0, have_ms = 0, ms = 0;
+        if (content) {
+            if (nvr_jhas(content, "enable"))               { have_en = 1; en = nvr_jbool(content, "enable", 0); }
+            if (nvr_jhas(content, "collectionIntervalMs")) { have_ms = 1; ms = nvr_jint(content, "collectionIntervalMs", 1000); }
+        }
+        if (!have_en && has_en_req) { have_en = 1; en = en_req; }
+        if (!have_ms && has_ms_req) { have_ms = 1; ms = ms_req; }
         char k[80];
-        snprintf(k, sizeof(k), "ai.event_ext_info.ch.%d.interval_ms", chn0);
-        ms = nvr_settings_get_int(c->settings, k, 0);
-        if (ms <= 0) ms = nvr_settings_get_int(c->settings, "ai.event_ext_info.interval_ms", 1000);
+        if (have_en) {
+            snprintf(k, sizeof(k), "ai.event_ext_info.ch.%d.enable", chn0);
+            nvr_settings_set_int(c->settings, k, en ? 1 : 0);
+        }
+        if (have_ms) {
+            if (ms < 1000) ms = 1000;
+            if (ms > 10000) ms = 10000;
+            snprintf(k, sizeof(k), "ai.event_ext_info.ch.%d.interval_ms", chn0);
+            nvr_settings_set_int(c->settings, k, ms);
+        }
     }
-    if (ms < 1000) ms = 1000;
-    if (ms > 10000) ms = 10000;
-    return ms;
+    cJSON_Delete(reply);
 }
 
 char *cmd_AI_getEventExtInfoConfig(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     int ch1 = nvr_jint(a, "channel", 1);
     if (ch1 < 1) return nvr_resp_err("invalid_param");
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddBoolToObject(o, "enable", extinfo_cfg_on(c, ch1 - 1));
-    cJSON_AddNumberToObject(o, "collectionIntervalMs", extinfo_cfg_ms(c, ch1 - 1));
-    return nvr_resp_content(o);
+    if (!c || !c->cm) return nvr_resp_not_support();
+    /* 透传相机(args 用默认 {channel:dev_ch});不可达/非 NOP → dev_post 返回 NULL → 501。 */
+    char *resp = nvr_chan_dev_post(c->cm, ch1 - 1, "AI_getEventExtInfoConfig", NULL);
+    if (!resp) return nvr_resp_not_support();
+    extinfo_record_from_reply(c, ch1 - 1, resp, 0, 0, 0, 0);
+    return resp;                                     /* 返回相机实际回复(透传) */
 }
 
 char *cmd_AI_setEventExtInfoConfig(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     int ch1 = nvr_jint(a, "channel", 1);
     if (ch1 < 1) return nvr_resp_err("invalid_param");
+    if (!c || !c->cm) return nvr_resp_not_support();
     int chn0 = ch1 - 1;
     int has_en = nvr_jhas(a, "enable");
     int has_ms = nvr_jhas(a, "collectionIntervalMs");
@@ -501,34 +511,22 @@ char *cmd_AI_setEventExtInfoConfig(cJSON *a, const nvr_cmd_ctx_t *c)
     int ms = nvr_jint(a, "collectionIntervalMs", 1000);
     if (ms < 1000) ms = 1000;
     if (ms > 10000) ms = 10000;
-    if (c && c->settings) {
-        char k[80];
-        if (has_en) {
-            snprintf(k, sizeof(k), "ai.event_ext_info.ch.%d.enable", chn0);
-            nvr_settings_set_int(c->settings, k, en);
-        }
-        if (has_ms) {
-            snprintf(k, sizeof(k), "ai.event_ext_info.ch.%d.interval_ms", chn0);
-            nvr_settings_set_int(c->settings, k, ms);
-        }
-    }
-    if (c && c->cm) {
-        nvr_channel_t ch;
-        if (nvr_chan_get(c->cm, chn0, &ch) == 0 && ch.backend == 0 && ch.onvif_ip[0]) {
-            int dev_ch = ch.dev_chn > 0 ? ch.dev_chn : 1;
-            cJSON *fwd = cJSON_CreateObject();
-            cJSON_AddNumberToObject(fwd, "channel", dev_ch);
-            if (has_en) cJSON_AddBoolToObject(fwd, "enable", en);
-            if (has_ms) cJSON_AddNumberToObject(fwd, "collectionIntervalMs", ms);
-            char *aj = cJSON_PrintUnformatted(fwd);
-            cJSON_Delete(fwd);
-            if (aj) {
-                char *resp = nvr_chan_dev_post(c->cm, chn0, "AI_setEventExtInfoConfig", aj);
-                free(aj); free(resp);
-            }
-        }
-    }
-    return nvr_resp_ok();
+    /* 组转发 args:channel 用相机侧 dev_chn;透传本次 enable/collectionIntervalMs。 */
+    nvr_channel_t ch;
+    if (nvr_chan_get(c->cm, chn0, &ch) != 0) return nvr_resp_not_support();
+    int dev_ch = ch.dev_chn > 0 ? ch.dev_chn : 1;
+    cJSON *fwd = cJSON_CreateObject();
+    cJSON_AddNumberToObject(fwd, "channel", dev_ch);
+    if (has_en) cJSON_AddBoolToObject(fwd, "enable", en);
+    if (has_ms) cJSON_AddNumberToObject(fwd, "collectionIntervalMs", ms);
+    char *aj = cJSON_PrintUnformatted(fwd);
+    cJSON_Delete(fwd);
+    if (!aj) return nvr_resp_err("internal");
+    char *resp = nvr_chan_dev_post(c->cm, chn0, "AI_setEventExtInfoConfig", aj);
+    free(aj);
+    if (!resp) return nvr_resp_not_support();        /* 不可达/非 NOP → 501 */
+    extinfo_record_from_reply(c, chn0, resp, has_en, en, has_ms, ms);
+    return resp;                                     /* 返回相机实际回复(透传) */
 }
 
 char *cmd_AI_getEventExtInfo(cJSON *a, const nvr_cmd_ctx_t *c)
