@@ -72,8 +72,7 @@ void nvr_ipc_ota_set_status(int chn, int status, int error)
 static int nop_need_auth(const char *user, const char *pass)
 {
     if (!user || !user[0]) return 0;
-    if (!pass || !pass[0]) return 0;
-    if (strcmp(pass, "123456") == 0) return 0;
+    if (!pass || !pass[0]) return 0;   /* 空=无鉴权;123456 视为真实口令 */
     return 1;
 }
 

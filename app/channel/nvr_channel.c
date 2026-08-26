@@ -40,12 +40,11 @@ static size_t chan_http_sink(void *p, size_t sz, size_t nm, void *u)
     b->buf = nb; memcpy(b->buf + b->len, p, n); b->len += n; b->buf[b->len] = 0;
     return n;
 }
-/* admin/123456 与空口令 = 无鉴权，不带 HTTP Digest。 */
+/* 空口令 = 无鉴权，不带 HTTP Digest；123456 视为真实口令(带鉴权)。 */
 static int chan_nop_need_auth(const char *user, const char *pass)
 {
     if (!user || !user[0]) return 0;
     if (!pass || !pass[0]) return 0;
-    if (strcmp(pass, "123456") == 0) return 0;
     return 1;
 }
 

@@ -69,12 +69,11 @@ static size_t on_write(void *p, size_t sz, size_t n, void *u)
 { size_t a = sz * n; mem_t *m = u; char *nb = realloc(m->buf, m->len + a + 1); if (!nb) return 0;
   m->buf = nb; memcpy(m->buf + m->len, p, a); m->len += a; m->buf[m->len] = 0; return a; }
 
-/* 发现口 = 命令口。admin/123456 与空口令 = 无鉴权，不带 HTTP Digest（否则先 401 再重试）。 */
+/* 发现口 = 命令口。空口令 = 无鉴权，不带 HTTP Digest;123456 视为真实口令(带鉴权)。 */
 static int nop_http_need_auth(const char *user, const char *pass)
 {
     if (!user || !user[0]) return 0;
     if (!pass || !pass[0]) return 0;
-    if (strcmp(pass, "123456") == 0) return 0;
     return 1;
 }
 

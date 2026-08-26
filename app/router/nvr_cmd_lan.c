@@ -530,12 +530,12 @@ char *cmd_GUI_LanAddDevice(cJSON *a, const nvr_cmd_ctx_t *c){
     const char *argpass = nvr_jstr(a, "password", NULL);
     const char *serial = nvr_jstr(a, "serial", NULL);
     /* 先入库。nopOnvif 不能凭 SN 猜，只能 Discovery/GetScopes 有 nopOnvif 标识后再分类。
-     * GUI protocol=="nop" 才是 NOP；其余先当通用 ONVIF。用户密码原样保存（123456/空=空密）。 */
+     * GUI protocol=="nop" 才是 NOP；其余先当通用 ONVIF。用户密码原样保存(空=空密;123456=真实口令)。 */
     if (!strcmp(protocol, "nop")) {
         kind = NVR_DEV_KIND_NOP;
     } else {
         kind = NVR_DEV_KIND_ONVIF;
-        if (argpass && argpass[0] && strcmp(argpass, "123456") != 0)
+        if (argpass && argpass[0])
             snprintf(pass, sizeof(pass), "%s", argpass);
     }
 
@@ -797,7 +797,7 @@ char *cmd_X_NightOwl_attachIPDevices(cJSON *a, const nvr_cmd_ctx_t *c)
         snprintf(d.mac, sizeof(d.mac), "%s", nmac);
         snprintf(d.model, sizeof(d.model), "%s", model ? model : "");
         snprintf(d.user, sizeof(d.user), "%s", acct && acct[0] ? acct : "admin");
-        if (pw && pw[0] && strcmp(pw, "123456") != 0)
+        if (pw && pw[0])
             snprintf(d.pass, sizeof(d.pass), "%s", pw);
         snprintf(d.name, sizeof(d.name), "Camera %d", chn + 1);
         if (nvr_chan_add(c->cm, &d) < 0) {

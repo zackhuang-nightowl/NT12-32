@@ -99,8 +99,7 @@ static char *do_post(const char *ip, int port, const char *json_in,
 
 static int is_user_pass(const char *pass)
 {
-    if (!pass || !pass[0]) return 0;
-    if (strcmp(pass, "123456") == 0) return 0;
+    if (!pass || !pass[0]) return 0;   /* 空=无口令;123456 视为真实口令 */
     return 1;
 }
 
