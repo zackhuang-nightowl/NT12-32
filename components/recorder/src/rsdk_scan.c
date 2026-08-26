@@ -168,6 +168,14 @@ rsdk_err_t rsdk_scan_rebuild2(rsdk_dev_t *d, void *meta, int *out_segs, int *out
     uint64_t chunk_bytes = sb->chunk_sectors * RSDK_SEC;
     if (chunk_bytes < 64) return RSDK_E_PARAM;
 
+    /* ★ 只扫"本次格式化以来确实写过"的数据范围,不能扫全体 ncc:
+     * 分配是环形(write_ptr_chunk + seq_epoch),没有 free/used 位图。format 会把
+     * write_ptr=0、seq_epoch=1(未绕盘)重置。未绕盘 → 有效数据只在 [0, write_ptr);绕盘 →
+     * 全数据区都是当前数据。若扫到 write_ptr 之后,会把**格式化前残留、物理未擦除**的旧 chunk
+     * 误当有效段/事件复活(format 后旧录像/事件复活、与已释放空间矛盾 的根因)。 */
+    uint64_t scan_end = rsdk_dev_is_wrapped(d) ? ncc : sb->write_ptr_chunk;
+    if (scan_end > ncc) scan_end = ncc;
+
     evt_map_t evm = { NULL, 0, 0 };
     int nseg = 0;
     chunk_seg_t seg;
@@ -175,7 +183,7 @@ rsdk_err_t rsdk_scan_rebuild2(rsdk_dev_t *d, void *meta, int *out_segs, int *out
      * 事件槽重建不依赖 meta.db(掉库也要恢复事件全链)。 */
     int want_events = (rsdk_dev_systab(d)->evtidx_slot_count > 0) || (meta != NULL);
 
-    for (uint64_t c = 0; c < ncc; c++) {
+    for (uint64_t c = 0; c < scan_end; c++) {
         if (abort && *abort) break;
         if (rsdk_dev_is_bad_chunk(d, c)) continue;         /* 坏 chunk 跳过 */
         int fc = parse_chunk(d, c, 0, &seg, want_events ? &evm : NULL);

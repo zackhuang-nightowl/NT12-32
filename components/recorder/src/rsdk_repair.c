@@ -157,23 +157,12 @@ rsdk_err_t rsdk_group_check_and_repair(rsdk_group_t *g, void *meta)
         }
     }
 
+    /* ★ 已删除"meta 空 → 每次挂载全盘重扫回填事件"触发:meta.db 已废弃(事件权威在盘上 evtidx),
+     * meta_doc 恒空 → 该触发会在每次开机对有数据的盘做全量扫描(满盘=扫全盘,拖慢开机),且扫描
+     * 会把格式化前残留、物理未擦除的旧 chunk 误当有效数据复活(format 后旧录像/事件复活根因)。
+     * evtidx 重建随"段索引丢失"(CLS_FULL)一并进行,并已被 scan 的 [0,write_ptr) 边界护住。 */
     int pass_meta = 0;
-#if RSDK_CFG_METADATA
-    if (meta && any_data && meta_is_empty(meta)) {
-        pass_meta = 1;                                     /* meta 空 → 后台数据扫描顺带回填事件 */
-        for (int i = 0; i < ndisk; i++) {
-            rsdk_dev_t *d = rsdk_group_dev(g, i);
-            if (!d) continue;
-            rsdk_superblock_t *sb = rsdk_dev_sb(d);
-            int dp = sb && (sb->write_ptr_chunk > 0 || rsdk_dev_is_wrapped(d));
-            if (dp && !(scan_mask & (1u << i))) {
-                scan_mask |= (1u << i);
-                total_chunks += sb ? sb->chunk_count : 0;
-            }
-        }
-        fprintf(stderr, "[rsdk_repair] meta 空但有录像 → 后台扫描回填事件\n");
-    }
-#endif
+    (void)any_data; (void)meta_is_empty;   /* 保留(诊断可用);不再据 meta.db 触发全盘重扫 */
 
     if (!scan_mask) return RSDK_OK;                        /* 仅 Tier1,已同步完成 */
 

@@ -70,6 +70,8 @@ RSDK_API rsdk_err_t rsdk_peek_superblock(const char *devpath, rsdk_superblock_t 
 
 /* 打开(若未格式化返回 RSDK_E_FORMAT, 需先 rsdk_format) */
 RSDK_API rsdk_err_t rsdk_dev_open (const char *path, rsdk_dev_t **out);
+/* 带外改盘(如 format 直写盘区)后原地重载运行态,不换 dev 指针(借用者立即见新态,免重启)。停写后调用。 */
+RSDK_API rsdk_err_t rsdk_dev_reload(rsdk_dev_t *d);
 RSDK_API rsdk_err_t rsdk_format   (const char *path, const rsdk_format_opt_t *opt);
 RSDK_API rsdk_err_t rsdk_dev_info (rsdk_dev_t *d, rsdk_dev_info_t *info);
 RSDK_API void       rsdk_dev_close(rsdk_dev_t *d);

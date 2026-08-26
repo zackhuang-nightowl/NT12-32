@@ -154,6 +154,25 @@ char *cmd_formatStorage(cJSON *a, const nvr_cmd_ctx_t *c)
     rsdk_err_t frc = nvr_storage_format(c->stg, disk.path, 0, 1);
     /* 无论成败都要恢复写盘:重扫 → 重组装盘组 → 恢复录像通道并在新组补开 writer。 */
     nvr_storage_scan(c->stg);
+
+    /* ★ 重格式化在役盘:原地重载**同一** group 指针(SB/事件区镜像/索引映射),不新建 group。
+     * 否则新建 group 只更新了录像器/RTSP,而 router 的查询上下文(c->group)、playback 等借用者仍持
+     * 旧句柄(旧 evtidx 内存镜像)→ 格式化后不重启查询会读到已被清空的旧事件(真机复现)。原地重载后
+     * 所有借用者即时看到空盘,免重启。 */
+    if (frc == RSDK_OK && c->group && rsdk_group_find_path(c->group, disk.path) >= 0) {
+        rsdk_err_t rrc = rsdk_group_reload(c->group);
+        nvr_stream_mgr_resume_recording(c->sm, c->group, was);
+        nvr_rtsp_live_set_group(c->group);
+        if (c->settings) nvr_settings_set_int(c->settings, "storage.has_disk", 1);
+        if (rrc == RSDK_OK) {
+            NVR_LOGW("router", "格式化 %s → 原地重载盘组(同 group 指针,查询即时生效免重启)", disk.path);
+            return nvr_resp_ok();
+        }
+        NVR_LOGW("router", "格式化 %s 后原地重载失败(%d),录像已按原组恢复", disk.path, (int)rrc);
+        return nvr_resp_err("format_failed");
+    }
+
+    /* 首盘(此前无盘组)→ 组装新组(此路径下无旧借用者句柄需同步)。 */
     rsdk_group_t *g = NULL;
     if (c->sm && nvr_storage_assemble(c->stg, &g) == RSDK_OK && g) {
         nvr_stream_mgr_resume_recording(c->sm, g, was);

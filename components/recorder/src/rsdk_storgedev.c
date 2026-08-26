@@ -283,25 +283,21 @@ static void badmap_save(rsdk_dev_t *d) {
     rsdk_rawdev_sync(d->raw);
 }
 
-rsdk_err_t rsdk_dev_open(const char *path, rsdk_dev_t **out)
+/* 从 d->raw 装载设备运行态(SB/ST/派生量/坏块位图/加密/索引映射/事件区镜像)。
+ * 供首次开盘(rsdk_dev_open)与带外改盘后重载(rsdk_dev_reload)复用。失败返回错误码,不关闭设备。
+ * reload 路径调用前须先把 badmap/chunk_slot/evtidx_cache/crypto 释放为 NULL(否则本函数重新 malloc 会泄漏)。 */
+static rsdk_err_t dev_load_state(rsdk_dev_t *d)
 {
-    rsdk_rawdev_t *raw;
-    rsdk_err_t rc = rsdk_rawdev_open(path, &raw);
-    if (rc) return rc;
-    rsdk_dev_t *d = calloc(1, sizeof *d);
-    if (!d) { rsdk_rawdev_close(raw); return RSDK_E_IO; }
-    d->raw = raw;
-    mtx_init_recursive(&d->self_lock);   /* 默认自锁; 入盘组后由 bind_lock 改指共享锁 */
-    d->lk = &d->self_lock;
+    rsdk_rawdev_t *raw = d->raw;
     rsdk_rawdev_pread(raw, SB_MAIN_SEC*RSDK_SEC, &d->sb, sizeof d->sb);
     if (memcmp(d->sb.magic, RSDK_SB_MAGIC, 8) != 0) {  /* 主坏取备 */
         rsdk_rawdev_pread(raw, SB_BAK_SEC*RSDK_SEC, &d->sb, sizeof d->sb);
-        if (memcmp(d->sb.magic, RSDK_SB_MAGIC, 8) != 0) { rsdk_dev_close(d); return RSDK_E_FORMAT; }
+        if (memcmp(d->sb.magic, RSDK_SB_MAGIC, 8) != 0) return RSDK_E_FORMAT;
     }
     { rsdk_superblock_t t = d->sb; t.sb_crc32 = 0;
-      if (rsdk_crc32(&t, sizeof t) != d->sb.sb_crc32) { rsdk_dev_close(d); return RSDK_E_CORRUPT; } }
+      if (rsdk_crc32(&t, sizeof t) != d->sb.sb_crc32) return RSDK_E_CORRUPT; }
     /* 版本兼容: v1/v2 均可开(v1 只读兼容, 不校验载荷 CRC); 更高的未知格式拒绝, 避免误读新布局。 */
-    if (d->sb.version > RSDK_FORMAT_VERSION) { rsdk_dev_close(d); return RSDK_E_FORMAT; }
+    if (d->sb.version > RSDK_FORMAT_VERSION) return RSDK_E_FORMAT;
     rsdk_rawdev_pread(raw, ST_MAIN_SEC*RSDK_SEC, &d->st, sizeof d->st);
     if (d->st.magic != 0x42415453u)
         rsdk_rawdev_pread(raw, ST_BAK_SEC*RSDK_SEC, &d->st, sizeof d->st);
@@ -351,9 +347,39 @@ rsdk_err_t rsdk_dev_open(const char *path, rsdk_dev_t **out)
             else { free(d->evtidx_cache); d->evtidx_cache = NULL; }
         }
     }
+    return RSDK_OK;
+}
 
+rsdk_err_t rsdk_dev_open(const char *path, rsdk_dev_t **out)
+{
+    rsdk_rawdev_t *raw;
+    rsdk_err_t rc = rsdk_rawdev_open(path, &raw);
+    if (rc) return rc;
+    rsdk_dev_t *d = calloc(1, sizeof *d);
+    if (!d) { rsdk_rawdev_close(raw); return RSDK_E_IO; }
+    d->raw = raw;
+    mtx_init_recursive(&d->self_lock);   /* 默认自锁; 入盘组后由 bind_lock 改指共享锁 */
+    d->lk = &d->self_lock;
+    rsdk_err_t lrc = dev_load_state(d);
+    if (lrc) { rsdk_dev_close(d); return lrc; }
     *out = d;
     return RSDK_OK;
+}
+
+/* 带外改盘(如 formatStorage 直写盘区)后, 在不换 rsdk_dev_t 指针的前提下重载运行态,
+ * 使所有持有该 dev/group 指针的借用者(router/playback/rec)立即看到新盘态, 无需重启。
+ * 调用方须先停写(writer 关闭)以避免并发。保留 raw/锁, 释放并重建装载态。 */
+rsdk_err_t rsdk_dev_reload(rsdk_dev_t *d)
+{
+    if (!d || !d->raw) return RSDK_E_PARAM;
+    rsdk_dev_lock(d);
+    if (d->crypto) { rsdk_crypto_close(d->crypto); d->crypto = NULL; }
+    free(d->badmap);      d->badmap = NULL;      d->badmap_bytes = 0; d->bad_bak_off = 0;
+    free(d->chunk_slot);  d->chunk_slot = NULL;  d->used_chunks = 0;
+    free(d->evtidx_cache); d->evtidx_cache = NULL; d->evtidx_cache_bytes = 0;
+    rsdk_err_t rc = dev_load_state(d);
+    rsdk_dev_unlock(d);
+    return rc;
 }
 
 /* 事件索引区内存镜像访问(供 rsdk_evtidx 走内存扫描;NULL=未建则直读盘)。 */
