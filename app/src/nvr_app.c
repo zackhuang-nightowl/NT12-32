@@ -48,6 +48,10 @@
 #include "cJSON.h"
 #include "nvr_log.h"
 #include <time.h>
+#include <sys/time.h>       /* settimeofday */
+#include <sys/ioctl.h>
+#include <fcntl.h>
+#include <linux/rtc.h>      /* RTC_VL_READ:pcf8563 掉电(VL)检测 */
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/reboot.h>
@@ -166,14 +170,45 @@ static void app_on_push(void *user, int chn, uint64_t eid, uint32_t ts, nop_dete
     nvr_push_on_event((nvr_push_t *)user, chn, eid, ts, type);
 }
 
+#if RSDK_CFG_METADATA
+/* 能力门控:设备是否支持 EventExtInfo 元数据。
+ * 依据 AI_getChannelAICapabilities: objectDetection.<type>.metaData.eventExtInfo==true(见 nop_doc)。
+ * 返回 1=支持;0=能力明确不含 metaData(含 ONVIF/无AI);-1=能力未知(未缓存)→ 放行由相机自报。 */
+static int chan_eventext_supported(nvr_app_t *a, int chn)
+{
+    if (!a || !a->settings) return -1;
+    char caps[2048];
+    if (nvr_settings_caps_get(a->settings, chn, caps, sizeof(caps), NULL, 0) <= 0) return -1;
+    cJSON *e = cJSON_Parse(caps);
+    if (!e) return -1;
+    int ret = 0;
+    cJSON *ai = cJSON_GetObjectItem(e, "_ai");
+    cJSON *od = ai ? cJSON_GetObjectItem(ai, "objectDetection") : NULL;
+    if (!od) od = cJSON_GetObjectItem(e, "objectDetection");   /* 兼容 NOP 透传置顶层 */
+    if (od) {
+        cJSON *t;
+        cJSON_ArrayForEach(t, od) {
+            cJSON *md = cJSON_GetObjectItem(t, "metaData");
+            if (md && cJSON_IsTrue(cJSON_GetObjectItem(md, "eventExtInfo"))) { ret = 1; break; }
+        }
+    }
+    cJSON_Delete(e);
+    return ret;
+}
+#endif
+
 /* ---- NOP EventExtInfo：打开相机缓存，事件结束后取回写入 meta.db ---- */
 static int extinfo_on(nvr_app_t *a, int chn)
 {
 #if !RSDK_CFG_METADATA
     (void)a; (void)chn; return 0;
 #else
-    if (!a || !a->meta) return 0;
-    if (!a->settings) return 1;
+    if (!a || !a->meta || !a->settings) return 0;
+    /* ONVIF 后端保留(getEventExtInfo 恒 501),不取元数据。 */
+    nvr_channel_t ch;
+    if (a->cm && nvr_chan_get(a->cm, chn, &ch) == 0 && ch.backend != 0) return 0;
+    /* 能力门控:仅在能力明确不支持 metaData 时拒绝(未知则放行,相机会回 Not enabled 已处理)。 */
+    if (chan_eventext_supported(a, chn) == 0) return 0;
     char k[72];
     snprintf(k, sizeof(k), "ai.event_ext_info.ch.%d.enable", chn);
     int v = nvr_settings_get_int(a->settings, k, -1);
@@ -295,8 +330,14 @@ static void app_on_meta_pull(void *user, int chn, uint64_t eid, uint32_t start_t
     nvr_channel_t ch;
     if (nvr_chan_get(a->cm, chn, &ch) != 0 || ch.backend != 0 || !ch.onvif_ip[0]) return;
     int dev_ch = ch.dev_chn > 0 ? ch.dev_chn : 1;
+    /* 取数 startTime = 相机 8012 上报时间戳;相机没带(=0)→ 回落盘上索引 start_epoch(含预录)。
+     * 入库仍按 start_epoch(start_ts,含预录),与录像时间轴对齐,不用取数时间戳。 */
+    uint32_t cam_ts = nvr_evt_cam_ts(a->eh, eid);
+    uint32_t fetch_ts = cam_ts ? cam_ts : start_ts;
+    NVR_LOGI("event", "ch%d getEventExt 取数: 相机timestamp=%u start_epoch(含预录)=%u 一致=%d → startTime=%u(入库仍用 %u)",
+             chn, cam_ts, start_ts, (int)(cam_ts == start_ts), fetch_ts, start_ts);
     char args[160];
-    snprintf(args, sizeof(args), "{\"channel\":%d,\"startTime\":%u}", dev_ch, start_ts);
+    snprintf(args, sizeof(args), "{\"channel\":%d,\"startTime\":%u}", dev_ch, fetch_ts);
     uint32_t now = (uint32_t)time(NULL);
 
     for (int attempt = 0; attempt < 3; attempt++) {
@@ -318,10 +359,10 @@ static void app_on_meta_pull(void *user, int chn, uint64_t eid, uint32_t start_t
         char bargs[192];
         snprintf(bargs, sizeof(bargs),
                  "{\"channel\":%d,\"startTime\":%u,\"listNumber\":10}",
-                 dev_ch, now ? now : start_ts);
+                 dev_ch, now ? now : fetch_ts);
         cJSON *batch = nop_post_content(a->cm, chn, "AI_getEventExtInfoBatchByReverseTime", bargs);
         if (batch) {
-            cJSON *item = extinfo_from_batch(batch, start_ts, now);
+            cJSON *item = extinfo_from_batch(batch, fetch_ts, now);
             cJSON_Delete(batch);
             if (item) {
                 store_extinfo(a, chn, eid, start_ts, item);
@@ -334,12 +375,16 @@ static void app_on_meta_pull(void *user, int chn, uint64_t eid, uint32_t start_t
              (unsigned long long)eid, start_ts);
 }
 
-static void app_on_event_end(void *user, int chn, uint64_t eid, uint32_t start_epoch)
+static void app_on_event_end(void *user, int chn, uint64_t eid, uint32_t start_epoch,
+                             uint32_t end_epoch)
 {
     nvr_app_t *a = user;
-    if (!a || !a->eh || !eid) return;
+    if (!a || !eid) return;
+    /* 事件窗结束:请录像器把真实 end_time 写进事件槽(eventList duration 真实化)。 */
+    if (a->sm) nvr_stream_end_event(a->sm, chn, eid, end_epoch);
+    if (!a->eh) return;
     if (a->up && nvr_cloud_uploader_sync_mode(a->up))
-        nvr_cloud_sync_event_end(a->up, eid, (uint32_t)time(NULL));
+        nvr_cloud_sync_event_end(a->up, eid, end_epoch ? end_epoch : (uint32_t)time(NULL));
     nvr_evt_queue_meta_pull(a->eh, chn, eid, start_epoch);
 }
 
@@ -767,11 +812,57 @@ static void read_gui_config(const char *config_dir, int *mode, int *page, int *p
            *mode, *page, *poe_n, *lan_n);
 }
 
+/* ================= 时钟有效性:断电保时 + 防 1970 脏录像(见 nvr_defaults.h) =========
+ * 依据 na51090 SDK:pcf8563 掉电置 VL 位、read_time 返回 -EINVAL,并给 RTC_VL_READ ioctl。
+ * clock_ready:时钟是否可信(≥2020);录像/事件据此门控。 */
+static int nvr_clock_ready(void) { return (uint32_t)time(NULL) >= NVR_CLOCK_MIN_EPOCH; }
+
+/* 读 RTC VL(掉电丢时)标志:1=RTC 掉过电、时间不可信(仅诊断/加速 NTP)。 */
+static int rtc_voltage_low(void)
+{
+    int vl = 0, fd = open("/dev/rtc0", O_RDONLY);
+    if (fd < 0) return 0;
+    if (ioctl(fd, RTC_VL_READ, &vl) != 0) vl = 0;
+    close(fd);
+    return vl ? 1 : 0;
+}
+
+/* 开机地板恢复:系统钟 < flash 记录的最后已知时刻 → 抬到地板(时间永不倒退回 1970)。
+ * 地板非权威,仅兜底(RTC 掉电/无网);待 NTP/相机授时再精校 + hwclock -w 清 VL。 */
+static void clock_restore_floor(void)
+{
+    uint32_t now = (uint32_t)time(NULL);
+    if (rtc_voltage_low())
+        printf("[clock] RTC VL=1:掉过电,时间不可信,走地板兜底\n");
+    FILE *f = fopen(NVR_CLOCK_FLOOR_FILE, "r");
+    uint32_t floor = 0;
+    if (f) { if (fscanf(f, "%u", &floor) != 1) floor = 0; fclose(f); }
+    if (floor >= NVR_CLOCK_MIN_EPOCH && floor > now) {
+        struct timeval tv = { .tv_sec = (time_t)floor, .tv_usec = 0 };
+        settimeofday(&tv, NULL);
+        printf("[clock] 地板恢复:系统钟 %u → %u(flash 最后已知;等 NTP/相机校准)\n", now, floor);
+    }
+    if (!nvr_clock_ready())
+        printf("[clock] ⚠ 时钟未就绪(now=%u<2020,无地板):录像/事件挂起,等授时\n",
+               (uint32_t)time(NULL));
+}
+
+/* 运行期持久"最后已知时刻"到 flash(仅时钟有效时);作下次开机地板。 */
+static void clock_save_floor(void)
+{
+    if (!nvr_clock_ready()) return;
+    FILE *f = fopen(NVR_CLOCK_FLOOR_FILE, "w");
+    if (f) { fprintf(f, "%u\n", (uint32_t)time(NULL)); fclose(f); }
+}
+
 int nvr_app_start(const char *config_dir, nvr_app_t **out)
 {
     if (!config_dir || !out) return -1;
     nvr_app_t *a = calloc(1, sizeof(*a));
     if (!a) return -1;
+
+    /* 时钟兜底:录像/事件基础设施建立前先抬地板(防 1970 脏时间轴)。 */
+    clock_restore_floor();
 
     /* 1) 只读 JSON 配置 */
     if (nvr_config_load(config_dir, &a->cfg) != 0) {
@@ -1168,6 +1259,8 @@ static void rec_schedule_apply(nvr_app_t *app)
         int manual_on = rc.record_on;
         int continuous = manual_on && cont_saved && s.sched_on && rules_match_now(s.rules, wday, sod);
         int event_arm  = manual_on && evt_saved && !continuous;
+        /* 时钟未就绪(RTC 掉电/首启无网,now<2020)→ 挂起录像,绝不产生 1970 时间轴。 */
+        if (!nvr_clock_ready()) { continuous = 0; event_arm = 0; }
         int pre_s = nvr_settings_record_pre_s_get(app->settings, chn0);
         if (pre_s < 0) pre_s = 0;
         int main_on = 1, sub_on = 1;
@@ -1222,6 +1315,27 @@ static void auto_reboot_tick(nvr_app_t *app)
     reboot(RB_AUTOBOOT);
 }
 
+#if RSDK_CFG_METADATA
+/* meta.db 覆盖回收:清理早于"最旧录像时刻"的 AI 元数据(其绑定视频已被环形覆盖 → 孤立)。
+ * 盘上事件槽随 chunk 覆盖自动失效(rsdk 内建);meta.db 是片外库,需本清理防单调增长。 */
+static void app_meta_purge_orphans(nvr_app_t *a)
+{
+    if (!a || !a->meta || !a->group) return;
+    uint32_t earliest = 0;
+    for (int di = 0; di < rsdk_group_count(a->group); di++) {
+        rsdk_dev_t *d = rsdk_group_dev(a->group, di);
+        uint32_t e = 0;
+        if (d && rsdk_index_earliest(d, &e) == RSDK_OK && e)
+            if (earliest == 0 || e < earliest) earliest = e;
+    }
+    if (earliest > 0) {
+        int n = rsdk_meta_purge(a->meta, earliest);
+        if (n > 0)
+            NVR_LOGI("event", "meta.db 覆盖回收:清理 %d 条早于 %u 的孤立 AI 元数据", n, earliest);
+    }
+}
+#endif
+
 void nvr_app_run(nvr_app_t *app)
 {
     if (!app) return;
@@ -1237,6 +1351,10 @@ void nvr_app_run(nvr_app_t *app)
         nvr_chan_tick(app->cm);                      /* 在线状态机 + 重连 + 解析待定 URL */
         nvr_rec_tick(app->rs);                       /* 结束到期事件时窗 */
         if (tick % 5 == 0) rec_schedule_apply(app);  /* 每 5s 评估连续录像排程(时段+开关) */
+        if (tick % 30 == 0) clock_save_floor();      /* 每 30s 存"最后已知时刻"作断电/无网地板 */
+#if RSDK_CFG_METADATA
+        if (tick % 60 == 0) app_meta_purge_orphans(app);  /* 每 60s 清覆盖回收后的孤立 AI 元数据 */
+#endif
         nvr_evt_tick(app->eh);                        /* 事件位图衰减(供 longPolling) */
         if (app->ble) {                               /* 向导/登录解锁变化 → BLE 广播 */
             nvr_owner_row_t ow;
