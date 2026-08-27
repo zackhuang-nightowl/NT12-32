@@ -344,9 +344,13 @@ void stream_decode_open(stream_chan_t *c, int win)
             c->decode_dirty = 1;                  /* 再等 SPS;下帧由 puller 重试开 */
             return;
         }
-        w = 3840; h = 2160;                       /* 兜底:绝不 8K,vout 必可开 */
-        NVR_LOGW("stream", "chn%d[%s] %u 帧未解析出 SPS 分辨率 → 退安全 4K 出图(录像不受影响)",
-                 c->cfg.chn, c->decode_stream == NVR_STREAM_SUB ? "子" : "主", p->enc_probe_frames);
+        /* 兜底按码流角色给安全尺寸:子流退 720p(子流本就 ≤720p,别按 4K 白占预算),
+         * 主流退 4K(绝不 8K,vout 必可开)。录像不受影响。 */
+        if (c->decode_stream == NVR_STREAM_SUB) { w = 1280; h = 720; }
+        else                                    { w = 3840; h = 2160; }
+        NVR_LOGW("stream", "chn%d[%s] %u 帧未解析出 SPS 分辨率 → 退安全 %s 出图(录像不受影响)",
+                 c->cfg.chn, c->decode_stream == NVR_STREAM_SUB ? "子" : "主", p->enc_probe_frames,
+                 c->decode_stream == NVR_STREAM_SUB ? "720p" : "4K");
     }
     /* ★ fps 也要真实:解码能力(预算/节拍)按 分辨率×帧率 开。cfg.fps 未配 → 用实测 fps_est,
      * 再兜底 20。之前只兜 20 → 高帧率子流(如 30fps)被按 20fps 开 → 供帧超解码节拍 → FIFO 堵、一直追帧。 */

@@ -4,8 +4,11 @@
 #include "mhal_budget.h"
 #include <pthread.h>
 
-/* 数据手册硬上限：1920*1080*360 = 746,496,000 px/s */
-#define MHAL_BUDGET_DEFAULT_TOTAL (1920.0 * 1080.0 * 360.0)
+/* SDK 认证吞吐上限(98633，同 RC_8GX2 DRAM，见 NVR_16CH_1 产品档 readme)：
+ * 16CH 1080p30 = 480fps@1080p → 1920*1080*480 = 995,328,000 px/s。
+ * (旧值 360fps/746M 是 NVR_12CH 产品档，非本硅片天花板。)
+ * 注:8192×8192 为单帧尺寸上限，另一根轴，在 mhal_vdec 校验，不并入此吞吐预算。 */
+#define MHAL_BUDGET_DEFAULT_TOTAL (1920.0 * 1080.0 * 480.0)
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static double g_total = MHAL_BUDGET_DEFAULT_TOTAL;

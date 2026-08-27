@@ -158,6 +158,29 @@ int mhal_vdec_open(int chn, mhal_codec_t codec, int w, int h, int fps,
      * "not match alignment with H.264(64x64)"、解不出帧)。下游 cfg_dec_path/videoproc 全用对齐值。 */
     d->w = align64(w); d->h = align64(h); d->fps = fps;
 
+    /* ★ 残留在显解码器清理(回放↔liveView 切换/上次 open 失败泄漏):本 chn 若仍有活动解码器挂在
+     * g_disp.ch[chn](未经 mhal_vdec_close 摘除,仍 started 占着 IN/OUT+vout 窗),下面 hd_videodec_open/
+     * videoout_open 复用同号会 ALREADY_OPEN(-25)/busy → 该窗黑屏、且失败路 g_disp.ch[chn]=NULL 会把它
+     * 彻底泄漏(永占该窗,后续所有 open 卡死)。先停+摘 started+拆,再往下开新路径。 */
+    struct mhal_vdec *cur = g_disp.ch[chn];
+    if (cur && cur != d) {
+        if (cur->dec_path)  hd_videodec_stop(cur->dec_path);
+        if (cur->proc_path) hd_videoproc_stop(cur->proc_path);
+        if (cur->vout_path) hd_videoout_stop(cur->vout_path);
+        for (int k = 0; k < g_disp.started_n; k++) {
+            if (g_disp.started_dec[k] == cur->dec_path) {
+                g_disp.started_dec[k]  = g_disp.started_dec[g_disp.started_n - 1];
+                g_disp.started_proc[k] = g_disp.started_proc[g_disp.started_n - 1];
+                g_disp.started_vout[k] = g_disp.started_vout[g_disp.started_n - 1];
+                g_disp.started_n--;
+                break;
+            }
+        }
+        g_disp.ch[chn] = NULL;
+        mhal_vdec_teardown(cur);
+        NVR_LOGI("mhal", "chn%d open:先拆残留在显解码器(回放/失败泄漏,避免 ALREADY_OPEN 黑屏)", chn);
+    }
+
     /* ★ 同批内先关后开(切主/子码流 reopen 同一通道):旧解码器还挂在 pending_free(defer 期间未拆,
      * 路径仍占用),此时下面 hd_videodec_open 复用同一 IN/OUT 号会 ALREADY_OPEN(-25)。先就地停+拆旧:
      * 旧路径上次 commit 已 started → 停之、从 started 集合摘除、拆绑/关/释放,再往下开新路径。 */
@@ -348,6 +371,15 @@ int mhal_vdec_recv(mhal_vdec_t *d, void *yuv_buf, uint32_t *inout_len, uint32_t 
 /* 拆绑/关路径/归还预算/释放。★ 前提:本路 dec/proc/vout 路径**已停**(离屏路径独立停,或
  * 在显路径已随一次 stop_list 停)。不做 commit、不动 g_disp.ch(调用方已摘)。commit 的 pending
  * 释放、以及非批量 close 都走这里。在 mhal_lock 保护下调用。 */
+/* 归还解码预算一次(幂等):关闭即还,避免在显解码器 defer 期间(未拆)仍占额 → 回放/新预览误判超预算。 */
+static void vdec_budget_free_once(struct mhal_vdec *d)
+{
+    if (d && !d->budget_released) {
+        mhal_budget_release(d->w, d->h, d->fps);
+        d->budget_released = 1;
+    }
+}
+
 void mhal_vdec_teardown(struct mhal_vdec *d)
 {
     if (!d) return;
@@ -357,7 +389,7 @@ void mhal_vdec_teardown(struct mhal_vdec *d)
     if (d->vout_path) hd_videoout_close(d->vout_path);
     if (d->proc_path) hd_videoproc_close(d->proc_path);
     if (d->dec_path)  hd_videodec_close(d->dec_path);
-    mhal_budget_release(d->w, d->h, d->fps);
+    vdec_budget_free_once(d);   /* 幂等:close 已还则不重复 */
     free(d);
 }
 
@@ -373,6 +405,10 @@ void mhal_vdec_close(mhal_vdec_t *d)
 
     /* 先从在显集合摘除本路。 */
     if (chn >= 0 && chn < MHAL_MAX_CH) g_disp.ch[chn] = NULL;
+
+    /* ★ 预算立即归还(不等 defer 后的 teardown):否则回放/新预览在旧路尚未拆时误判"已用"超预算被拒
+     * (整体 746 Mpix/s 全局池;真机:切到多宫格子码流回放却报超预算=旧 liveView 4K 未还额)。teardown 幂等。 */
+    vdec_budget_free_once(d);
 
     /* ★ 在显路径关闭:不在此同步 commit/teardown。挂到 pending_free, request_commit → 唯一显示线程
      * 防抖后一次 stop_list(含本路)→ start_list(不含本路)→ 释放 pending(teardown)。defer 与非 defer 同一路径。

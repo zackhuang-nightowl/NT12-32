@@ -29,6 +29,7 @@ struct mhal_vdec {
     HD_PATH_ID   proc_path;              /* videoproc(VPE) */
     HD_PATH_ID   vout_path;              /* videoout 输入路径 */
     int          crop_on;                /* 数字变焦:IN_CROP 是否已从 OFF 切到 ON(切模式需 start，只切一次) */
+    int          budget_released;        /* 解码预算是否已归还(关闭即还,拆解幂等,防 defer 期间占额→回放误判超预算) */
 };
 
 /* 全局显示设备状态 */

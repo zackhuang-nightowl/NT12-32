@@ -249,8 +249,10 @@ static void pb_drain_audio_player(nvr_playback_t *pb, int cell, rsdk_group_playe
 }
 
 static int pb_peek_codec(nvr_playback_t *pb, int chn0, int want_stream,
-                         uint32_t start_wall, int *codec)
+                         uint32_t start_wall, int *codec, int *out_w, int *out_h)
 {
+    if (out_w) *out_w = 0;
+    if (out_h) *out_h = 0;
     rsdk_group_t *g = pb->cfg.group;
     rsdk_index_slot_t *segs = (rsdk_index_slot_t *)malloc(sizeof(rsdk_index_slot_t) * PB_MAX_SEGS);
     if (!segs) return -1;
@@ -270,7 +272,15 @@ static int pb_peek_codec(nvr_playback_t *pb, int chn0, int want_stream,
         /* 已 seek 到 ≤start_wall 的 IDR,首个 I 帧即正确起点,直接取 codec(不再要求 ≥start_wall,
          * 否则大段里 seek 落点略早于 start_wall 时又要多读一个 GOP)。 */
         if (h.frame_type != RSDK_FRAME_I) continue;
-        *codec = h.codec; rc = 0; break;
+        *codec = h.codec; rc = 0;
+        /* ★ 与 liveView 一致:按**录像帧里真实 SPS**算分辨率(而非 config 的主流尺寸),
+         *   子流真是 720p 才不会被当 4K/8K 占满解码预算 → 多宫格回放可多路。 */
+        if (out_w && out_h) {
+            int sw = 0, sh = 0;
+            if (nal_sps_dims(data, (int)len, (h.codec == RSDK_CODEC_H265) ? 1 : 0, &sw, &sh)
+                && sw > 0 && sh > 0) { *out_w = sw; *out_h = sh; }
+        }
+        break;
     }
     rsdk_group_play_close(gp);
     return rc;
@@ -578,12 +588,16 @@ static void pb_open_decoders_locked(nvr_playback_t *pb)
         int chn0 = (pb->ch_count > 0 && pb->ch_list[i] > 0) ? pb->ch_list[i] - 1
                  : (pb->chn0 >= 0 ? pb->chn0 : i);
         if (chn0 < 0) continue;
-        int codec = -1;
-        if (pb_peek_codec(pb, chn0, want_stream, pb->start_wall, &codec) != 0) {
+        int codec = -1, pw = 0, ph = 0;
+        if (pb_peek_codec(pb, chn0, want_stream, pb->start_wall, &codec, &pw, &ph) != 0) {
             NVR_LOGW("pb", "chn%d 起播 %u 无录像(该格留黑)", chn0 + 1, pb->start_wall);
             continue;
         }
         int w = 0, ht = 0, fps = 0; nvr_stream_dim(pb->cfg.sm, chn0, want_stream, &w, &ht, &fps);
+        /* ★ 分辨率以录像帧真实 SPS 为准(pb_peek_codec 解出);nvr_stream_dim 的尺寸是 config 主流值,
+         *   会把子流也当主流 → 预算误判超 4K/仅 3 路。SPS 未解出才退 nvr_stream_dim,且子流封顶 720p。 */
+        if (pw > 0 && ph > 0) { w = pw; ht = ph; }
+        else if (want_stream == NVR_STREAM_SUB && w > 1280) { w = 1280; ht = 720; }
         double cost = mhal_budget_cost(w, ht, fps);
         if (cost > 0 && used + cost > budget) {
             char buf[128];
