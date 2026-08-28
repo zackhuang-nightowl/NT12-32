@@ -47,6 +47,7 @@
 #include "nvr_lan34569.h"   /* UDP 34569 本机应答：App 忘 IP 时找回 NVR */
 #include "cJSON.h"
 #include "nvr_log.h"
+#include <pthread.h>
 #include <time.h>
 #include <sys/time.h>       /* settimeofday */
 #include <sys/ioctl.h>
@@ -99,6 +100,19 @@ struct nvr_app {
     signed char       evt_arm_applied[32]; /* 仅事件待命上次下发(-1=未知) */
     int               pre_s_applied[32];   /* 上次下发的预录秒数 */
     volatile int      running;
+
+    /* ★ 通道上/下线回调**异步兑现**:channel 管理器(tick 主循环 + nvr_chan_remove 等 API 线程)
+     * 都在**持有 CM_LOCK** 时 fire on_online/on_offline,而 preview 侧 nvr_preview_on_channel_*
+     * 取 p->lock;setDeviceDisplayMode 的 set_mode 则是 p->lock→CM_LOCK。两者构成 CM_LOCK↔p->lock
+     * 的 AB-BA 死锁(真机:开机 16 台 LAN 上线时 setDeviceDisplayMode 永久卡 CM_LOCK)。修复=回调只
+     * 入队立即返回,worker 线程在**不持 CM_LOCK** 时调 preview,彻底消除跨子系统锁序反转。 */
+    pthread_t         chev_thr;
+    int               chev_thr_ok;
+    pthread_mutex_t   chev_mu;
+    pthread_cond_t    chev_cv;
+    volatile int      chev_stop;
+    int               chev_head, chev_tail, chev_cnt;
+    struct { int chn; signed char online; } chev_q[128];
 };
 
 static void app_poke_longpoll(void *user)
@@ -503,26 +517,71 @@ int nvr_onvif_get_snapshot(const char *ip, int port, const char *user, const cha
 }
 
 /* ---------- 模块间回调（app 编排，模块不横向 include） ---------- */
-static void on_chan_online(void *user, int chn)
+/* ★ 真正兑现:由 chev worker 线程在**不持 CM_LOCK** 时调用(见 struct 注释的 AB-BA 修复)。
+ * 内部会取 preview p->lock / cm CM_LOCK(brief),因不在 channel 的 CM_LOCK 临界区内,故无锁序反转。 */
+static void chan_online_apply(nvr_app_t *a, int chn)
 {
-    nvr_app_t *a = user;
     nvr_rec_channel_up(a->rs, chn, NVR_CODEC_AUTO);
     nvr_preview_on_channel_online(a->pv, chn);
     /* 持久化通道状态到 channels.json(GUI 开机可先按上次已知状态绘制) */
     if (a->persist && a->cm) nvr_chan_persist_set_status(a->persist, chn + 1, nvr_chan_status_code_of(a->cm, chn));
-    if (a->eh && a->cm && extinfo_on(a, chn)) {
-        nvr_channel_t ch;
-        if (nvr_chan_get(a->cm, chn, &ch) == 0 && ch.backend == 0)
-            nvr_evt_queue_meta_enable(a->eh, chn);
-    }
+    nvr_channel_t ch;
+    int have = (a->cm && nvr_chan_get(a->cm, chn, &ch) == 0);
+    if (have && a->eh && extinfo_on(a, chn) && ch.backend == 0)
+        nvr_evt_queue_meta_enable(a->eh, chn);
+    /* ★ 出图即授时(开机重连/新加设备首次连上,同步 NVR 时间到 IPC)。原在 nvr_channel.c tick_slot 内
+     *   **持 CM_LOCK 做阻塞 HTTP**,拖慢 setDeviceDisplayMode 等取 CM_LOCK 的命令 → 移到此 chan_evt
+     *   worker(锁外)做,CM_LOCK 不再被授时占用。 */
+    if (have && a->settings && ch.onvif_ip[0])
+        (void)nvr_time_push_device(a->settings, ch.onvif_ip,
+                                   ch.onvif_port > 0 ? ch.onvif_port : 80, ch.user, ch.pass);
 }
-static void on_chan_offline(void *user, int chn)
+static void chan_offline_apply(nvr_app_t *a, int chn)
 {
-    nvr_app_t *a = user;
     nvr_rec_channel_down(a->rs, chn);
     nvr_preview_on_channel_offline(a->pv, chn);
     if (a->persist && a->cm) nvr_chan_persist_set_status(a->persist, chn + 1, nvr_chan_status_code_of(a->cm, chn));
 }
+
+/* chev worker:FIFO 顺序兑现上/下线(保序:同通道 online→offline 按 fire 顺序生效)。 */
+static void *chan_evt_worker(void *arg)
+{
+    nvr_app_t *a = (nvr_app_t *)arg;
+    for (;;) {
+        pthread_mutex_lock(&a->chev_mu);
+        while (a->chev_cnt == 0 && !a->chev_stop)
+            pthread_cond_wait(&a->chev_cv, &a->chev_mu);
+        if (a->chev_cnt == 0 && a->chev_stop) { pthread_mutex_unlock(&a->chev_mu); break; }
+        int chn    = a->chev_q[a->chev_head].chn;
+        int online = a->chev_q[a->chev_head].online;
+        a->chev_head = (a->chev_head + 1) % 128;
+        a->chev_cnt--;
+        pthread_mutex_unlock(&a->chev_mu);
+        if (online) chan_online_apply(a, chn);
+        else        chan_offline_apply(a, chn);
+    }
+    return NULL;
+}
+
+/* cfg 回调:**只入队立即返回**(此刻可能持 CM_LOCK)。队满则丢弃(极少;丢一条上线=该格暂不出图,
+ * 下次 tick/状态变化会再 fire,优于阻塞)。 */
+static void chan_evt_enqueue(nvr_app_t *a, int chn, int online)
+{
+    if (!a) return;
+    pthread_mutex_lock(&a->chev_mu);
+    if (a->chev_cnt < 128) {
+        a->chev_q[a->chev_tail].chn    = chn;
+        a->chev_q[a->chev_tail].online = (signed char)(online ? 1 : 0);
+        a->chev_tail = (a->chev_tail + 1) % 128;
+        a->chev_cnt++;
+        pthread_cond_signal(&a->chev_cv);
+    } else {
+        NVR_LOGW("app", "chan_evt 队满,丢弃 ch%d %s", chn, online ? "online" : "offline");
+    }
+    pthread_mutex_unlock(&a->chev_mu);
+}
+static void on_chan_online(void *user, int chn)  { chan_evt_enqueue((nvr_app_t *)user, chn, 1); }
+static void on_chan_offline(void *user, int chn) { chan_evt_enqueue((nvr_app_t *)user, chn, 0); }
 static void on_storage_evt(nvr_stg_evt_t e, const nvr_disk_t *d, void *user)
 {
     nvr_app_t *a = user;
@@ -1040,6 +1099,16 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
     nvr_evt_init(&ec, &a->eh);
 
     /* 8) 通道管理器：载入配置 → 起流（回调驱动 rec/preview） */
+    /* ★ 先起 chan_evt worker 再 init 通道管理器:确保管理器一旦开始 fire on_online/off(异步入队)
+     *   就有 worker 兑现。破 CM_LOCK↔p->lock AB-BA 死锁,见 struct nvr_app 的 chev_* 注释。 */
+    pthread_mutex_init(&a->chev_mu, NULL);
+    pthread_cond_init(&a->chev_cv, NULL);
+    a->chev_head = a->chev_tail = a->chev_cnt = 0; a->chev_stop = 0;
+    if (pthread_create(&a->chev_thr, NULL, chan_evt_worker, a) == 0)
+        a->chev_thr_ok = 1;
+    else
+        NVR_LOGE("app", "chan_evt worker 起线程失败,上/下线回调将退化为同步(有死锁风险)");
+
     nvr_chan_mgr_cfg_t cc = { .sm = a->sm, .settings = a->settings, .nop = a->nop,
                               .reconnect_base_s = 5, .reconnect_max_s = 30,
                               .user = a, .on_online = on_chan_online, .on_offline = on_chan_offline };
@@ -1391,6 +1460,18 @@ void nvr_app_stop(nvr_app_t *app)
     stop_tutk(app);
     if (app->up) { nvr_cloud_uploader_stop(app->up); app->up = NULL; }
     if (app->cm) { nvr_chan_stop_all(app->cm); nvr_chan_mgr_deinit(app->cm); app->cm = NULL; }
+    /* ★ 通道管理器已停(不再 fire on_online/off)→ 停 chev worker(它调 pv/rs/persist,须在这些
+     *   子系统销毁之前收线)。排空队列后 join。 */
+    if (app->chev_thr_ok) {
+        pthread_mutex_lock(&app->chev_mu);
+        app->chev_stop = 1;
+        pthread_cond_signal(&app->chev_cv);
+        pthread_mutex_unlock(&app->chev_mu);
+        pthread_join(app->chev_thr, NULL);
+        app->chev_thr_ok = 0;
+        pthread_mutex_destroy(&app->chev_mu);
+        pthread_cond_destroy(&app->chev_cv);
+    }
     if (app->push) { nvr_push_stop(app->push); app->push = NULL; }
     if (app->eh) { nvr_evt_deinit(app->eh); app->eh = NULL; }
     if (app->pb) { nvr_playback_destroy(app->pb); app->pb = NULL; }   /* 回放先停(用 pv/sm) */
