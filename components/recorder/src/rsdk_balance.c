@@ -225,7 +225,8 @@ rsdk_err_t rsdk_balance_pick(rsdk_group_t *g, int chn, rsdk_dev_t **picked) {
         double fill_i     = dev_load(g->devs[i]);
         double pressure_i = fill_i * (dev_wrapped(g->devs[i]) ? 1.0 : 0.5);
         double bw_norm_i  = g->bw[i] / (max_bw + 1.0);
-        scores[i] = 0.4 * bw_norm_i + 0.4 * fill_i + 0.2 * pressure_i;
+        /* ★ 偏带宽均衡(原 0.4/0.4/0.2 过重 fill → 两盘填充不均时全压空盘)。 */
+        scores[i] = 0.55 * bw_norm_i + 0.30 * fill_i + 0.15 * pressure_i;
     }
 
     /* 3. 候选集: health_ok != 0; 全病则退化为全部盘(录像优先于健康门控) */
@@ -242,14 +243,14 @@ rsdk_err_t rsdk_balance_pick(rsdk_group_t *g, int chn, rsdk_dev_t **picked) {
     for (int j = 1; j < cand_n; j++)
         if (scores[cand[j]] < min_score) min_score = scores[cand[j]];
 
-    /* 5. 通道亲和: 若上次用的盘仍是候选且分数不超最低 0.15, 则保持 */
+    /* 5. ★ 带宽均摊:通道固定 home 盘 = 候选集中的 chn%cand_n 位 → N 路均分到各盘**并发写**,用满
+     *    多盘写带宽。修:原按"填充最低 + 通道亲和"选盘 → 两盘填充不均时所有并发写全压空盘,第二块盘
+     *    带宽白费(真机:2 盘 sda 写 31万扇区 / sdb 仅 536=纯元数据,load 54 单盘瓶颈)。仅当 home 盘
+     *    "明显更差"(score 超候选最低 0.25,通常=近满/带宽过高)才让给更闲的盘,兼顾长期填充均衡。 */
     int slot = chn & 31;
-    int last = g->chn_last[slot];
+    int home = cand[(chn >= 0 ? chn : 0) % cand_n];
     int pick = -1;
-    if (last >= 0 && last < nc && g->health_ok[last]) {
-        /* last 在候选集中且满足亲和阈 */
-        if (scores[last] <= min_score + 0.15) pick = last;
-    }
+    if (scores[home] <= min_score + 0.25) pick = home;
 
     if (pick < 0) {
         /* 6. argmin score over candidates; 并列用 rr 打散 */
