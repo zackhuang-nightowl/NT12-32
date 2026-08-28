@@ -87,6 +87,13 @@ typedef struct {
  * 供"首次上线按设备构建能力级 + 校时"。stream 影响不大(主/子都取)。 */
 int  nvr_onvif_probe(const char *ip, int port, const char *user, const char *pass, nvr_onvif_info_t *out);
 
+/* 轻量:连已知地址(service_url 非空→免广播)只做 GetDeviceInformation,取 manufacturer/model/firmware/serial。
+ * 供 getChannelInfo 每次实时取版本(判升级成功)。任一 out 可传 NULL。成功返 0。 */
+int  nvr_onvif_get_device_info(const char *ip, int port, const char *service_url,
+                               const char *user, const char *pass,
+                               char *manufacturer, int mfc, char *model, int mdc,
+                               char *firmware, int fwc, char *serial, int snc);
+
 /* 仅把 NVR 当前时间经 ONVIF 下发到指定相机(供命令触发的显式校时)。成功返 0。 */
 /* ONVIF SetSystemDateAndTime 时区/DST(与 NVR system.timezone/tz_dst 对齐)。 */
 typedef struct {

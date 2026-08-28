@@ -411,6 +411,34 @@ int nvr_onvif_probe(const char *ip, int port, const char *user, const char *pass
     return 0;
 }
 
+/* ★ 轻量:连**已知**地址的 ONVIF 设备(传非空 service_url → nvr_onvif_connect 直连,**不广播**)→
+ * 只做 GetDeviceInformation,填 manufacturer/model/firmware/serial(任一 out 可空)。0=成功。
+ * 供 getChannelInfo **每次实时取**版本(判相机升级是否成功),故不走重的 nvr_onvif_probe(它每次 2s 广播)。 */
+int nvr_onvif_get_device_info(const char *ip, int port, const char *service_url,
+                              const char *user, const char *pass,
+                              char *manufacturer, int mfc, char *model, int mdc,
+                              char *firmware, int fwc, char *serial, int snc)
+{
+    if (!ip || !ip[0]) return -1;
+    if (nvr_onvif_init() != 0) return -1;
+    if (nvr_onvif_connect(ip, port, service_url, user, pass) != 0) return -1;  /* service_url 非空→免广播直连 */
+    int p = port > 0 ? port : 80;
+    nop_onvif_device_t *dev = nop_onvif_device_retain(ip, p, NULL, 0);
+    if (!dev) return -1;
+    nop_onvif_device_lock(dev);
+    nop_onvif_device_information_t di;
+    int rc = nop_onvif_get_device_information(dev, &di);
+    if (rc == 0) {
+        if (manufacturer && mfc > 0) snprintf(manufacturer, mfc, "%s", di.manufacturer);
+        if (model && mdc > 0)        snprintf(model,        mdc, "%s", di.model);
+        if (firmware && fwc > 0)     snprintf(firmware,     fwc, "%s", di.firmware_version);
+        if (serial && snc > 0)       snprintf(serial,       snc, "%s", di.serial_number);
+    }
+    nop_onvif_device_unlock(dev);
+    nop_onvif_device_drop(ip, p);
+    return rc;
+}
+
 int nvr_onvif_set_time_now(const char *ip, int port, const char *user, const char *pass,
                            const nvr_onvif_time_cfg_t *tz_cfg)
 {
