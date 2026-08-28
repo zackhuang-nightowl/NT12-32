@@ -17,6 +17,7 @@
 #include "nop_sdk/nop_app.h"
 #include "nvr_preview.h"
 #include "nvr_chan_persist.h"
+#include <pthread.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -42,7 +43,22 @@ typedef struct nvr_cmd_ctx_t {
     void              (*on_set_resolution)(void *disp_user, int w, int h);  /* setSysDisplay 热切 */
     int                 dev_nop_port; /* 透传到设备的 NOP 端口,默认 8089 */
     char                nvr_sn[64];   /* 本机 SN(nopOnvif 激活密码用) */
+    pthread_mutex_t    *disp_lock;    /* router 派发串行锁(指向 r->disp_lock);
+                                       * handler 内**阻塞等待**(等图/等绑定)前后用
+                                       * CMD_UNBLOCK/REBLOCK 暂放,避免持锁阻塞饿死其它命令。 */
 } nvr_cmd_ctx_t;
+
+/* ★ handler 里做**阻塞等待**(nvr_preview_wait_ready / nvr_chan_wait_bind 等)前后成对调用:
+ * 先暂放派发锁 → 阻塞期间其它 8089 命令可正常处理(非阻塞接口不被阻塞接口饿死)→ 等完再重取。
+ * 快路径/写库仍在锁内(等待前已完成),锁的持有时长回落到微秒级。router 的 lock/unlock 配平不变。
+ *
+ * ‼ 铁律:**只能在"本线程确证持有 disp_lock"的路径里用**——即由 nvr_cmd_dispatch 以 hold=1
+ *   同步派发进来的 handler。对**本线程未持有**的普通互斥量 unlock 是未定义行为,会损坏 disp_lock,
+ *   使之后所有加锁者永久 hang。**严禁**从 handler 里 spawn 的 detached/worker 线程调用(它们
+ *   不在 dispatch 的持锁上下文里)。历史事故:lan_wait_same_ip 被 attach_worker 线程调用,
+ *   在此 CMD_UNBLOCK 把 disp_lock 解坏 → 8089 全堵。 */
+#define CMD_UNBLOCK(c) do { if ((c) && (c)->disp_lock) pthread_mutex_unlock((c)->disp_lock); } while (0)
+#define CMD_REBLOCK(c) do { if ((c) && (c)->disp_lock) pthread_mutex_lock((c)->disp_lock);   } while (0)
 
 /* handler:入 args + ctx → 返回 malloc 的完整应答 JSON(调用方 free)。 */
 typedef char *(*nvr_cmd_fn)(cJSON *args, const nvr_cmd_ctx_t *ctx);

@@ -39,8 +39,13 @@
  *   3) 有界 worker 池 + 有界队列 + 过载**快速拒绝(503)**(load shedding),而不是
  *      让 listener 阻塞在入队上停止 accept。慢的相机透传只会占用发起它的那个 worker,
  *      且受命令级超时封顶(见 nvr_cmd_router forward),不会拖垮整池。
- * worker 栈显式收小(避免 N×8MB 的虚拟地址膨胀,32/16 路机上更省)。 */
-#define NOP_HTTP_MAX_WORKERS    16
+ * worker 栈显式收小(避免 N×8MB 的虚拟地址膨胀,32/16 路机上更省)。
+ *
+ *   ★ 池容量按**通道规模**定:worker 是 I/O-bound(阻塞在相机上游 socket,最长受
+ *     forward 命令级超时 connect 3s / cmd 8s 封顶,期间 CPU 空转)。32 路机 GUI 一次刷新
+ *     会向 32 台相机并发透传;16 worker 时一次满扇出即占满池→队列积压→本地命令 503。
+ *     加倍到 32 让整扇出并行,几乎零 CPU 代价(阻塞线程不占算力),把空闲核用起来。 */
+#define NOP_HTTP_MAX_WORKERS    32
 /* Accepted-but-not-yet-served connections wait here. Full → shed load (503+close). */
 #define NOP_HTTP_CONN_QUEUE     64u
 /* Per-recv/-send deadline. Bounds header/body reads AND the keep-alive idle wait,
@@ -308,6 +313,19 @@ static void serve_connection(nop_http_server_t *server, int conn_fd)
                 if (server->uri_handler(server->uri_ctx, conn_fd, method, uri))
                     goto done;
             }
+        }
+
+        /* 3a') 派发前先探对端是否已关闭:GUI 超时/放弃后会关连接(FIN),此时再跑派发
+         *      (可能进 8s 级的相机透传/等图)纯属浪费,还会把"已死请求"堆进 worker/锁里加剧
+         *      拥塞。非阻塞 MSG_PEEK 读到 0 = 对端已发 FIN → 直接清理本连接(worker_loop close),
+         *      不派发。>0(pipelined 下一请求)或 EAGAIN(无多余字节、连接仍在)则继续。
+         *      前提:本机 8089 客户端(GUI/隧道/BLE)均全双工 keep-alive,不做"发完即半关写端仍等回复",
+         *      故读端 EOF 即代表对端整体已弃用本连接,可安全丢弃。 */
+        {
+            char probe;
+            ssize_t pk = recv(conn_fd, &probe, 1, MSG_PEEK | MSG_DONTWAIT);
+            if (pk == 0)
+                goto done;   /* peer closed after sending request → drop & cleanup */
         }
 
         /* 3b) POST JSON dispatch. */

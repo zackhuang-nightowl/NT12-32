@@ -42,8 +42,13 @@ char *cmd_GUI_setDeviceDisplayMode(cJSON *a, const nvr_cmd_ctx_t *c)
     /* 持久化到 GUI_CONFIG.json(开机据此出图);mode==0 为退出 Liveview 瞬时态,helper 内部不写。 */
     nvr_gui_config_set_display(mode, page);
     /* ★ 等图出了再回复:阻塞到**任一可见格出图**或最多 2s,LVGL 等待期间放加载动画,
-     * 避免"回复了但画面还没出/还在黑闪"的体验。 */
+     * 避免"回复了但画面还没出/还在黑闪"的体验。
+     * ★ 阻塞期间暂放派发锁(CMD_UNBLOCK):这 2s 不饿死其它 8089 命令;但**重配(playback stop/
+     *   set_mode)仍在锁内串行**,避免与显示线程并发抢 mhal(hold=0 脱锁曾致 mhal 并发挂起,已回退)。
+     *   等完 CMD_REBLOCK 重取(disp_lock 未损坏时 μs 级,见 [[setdisplaymode-deadlock-disp-lock]] lan 修复)。 */
+    CMD_UNBLOCK(c);
     nvr_preview_wait_ready(c->pv, NVR_DEF_WAIT_READY_MS);
+    CMD_REBLOCK(c);
     return nvr_resp_result("OK");
 }
 char *cmd_GUI_getDeviceDisplayMode(cJSON *a, const nvr_cmd_ctx_t *c)
@@ -82,7 +87,9 @@ char *cmd_GUI_setChannelMapping(cJSON *a, const nvr_cmd_ctx_t *c)
     for (int i = 0; i < n; i++) map[i] = (int)cJSON_GetNumberValue(cJSON_GetArrayItem(arr, i));
     nvr_preview_set_mapping(c->pv, map, n);
     if (c->persist) nvr_chan_persist_set_mapping(c->persist, map, n);
+    CMD_UNBLOCK(c);
     nvr_preview_wait_ready(c->pv, NVR_DEF_WAIT_READY_MS);
+    CMD_REBLOCK(c);
     return nvr_resp_result("OK");
 }
 char *cmd_GUI_getChannelMapping(cJSON *a, const nvr_cmd_ctx_t *c)

@@ -177,7 +177,10 @@ char *nvr_cmd_dispatch(nvr_cmd_router_t *r, const char *json_in)
         int ota_chk = (func && (strcmp(func, "GUI_checkServerFirmware") == 0 ||
                                 strcmp(func, "GUI_checkChannelServerFirmware") == 0));
         int snap = (func && strcmp(func, "snapshotChannel") == 0);
-        int hold = !(lp || ota_chk || snap);
+        /* getChannelInfo 现每次向设备实时取版本(NOP getDeviceInfo / ONVIF GetDeviceInformation),含网络
+         * 往返 → 先放 disp_lock,避免这几百ms~数秒卡住其它 8089 命令(GUI 逐通道查设备信息时尤甚)。 */
+        int chinfo = (func && strcmp(func, "X_NightOwl_getChannelInfo") == 0);
+        int hold = !(lp || ota_chk || snap || chinfo);
         if (!hold) pthread_mutex_unlock(&r->disp_lock);
         char *out = fn(args, &r->ctx);
         if (hold) pthread_mutex_unlock(&r->disp_lock);
@@ -313,6 +316,7 @@ int nvr_cmd_router_start(const nvr_cmd_router_cfg_t *cfg, nvr_cmd_router_t **out
     r->ctx.disp_user         = cfg->disp_user;
     r->ctx.on_set_resolution = cfg->on_set_resolution;
     r->ctx.dev_nop_port = r->cfg.dev_nop_port;
+    r->ctx.disp_lock = &r->disp_lock;   /* handler 阻塞等待前后 CMD_UNBLOCK/REBLOCK 用 */
     nvr_identity_get_sn(r->ctx.nvr_sn, sizeof(r->ctx.nvr_sn));  /* SN ← /User/OWLSerialNumber(恒定) */
 
     NVR_LOGI("router", "命令路由就绪(表驱动 %d 项;作为 8089 入口处理器)", g_nvr_cmd_table_len);

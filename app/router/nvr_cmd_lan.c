@@ -319,6 +319,11 @@ static void lan_wait_same_ip(const nvr_cmd_ctx_t *c, const char *ip){
     if (!c || !c->cm || !ip || !ip[0]) return;
     nvr_channel_t list[NVR_MAX_CH];
     int n = nvr_chan_list(c->cm, list, NVR_MAX_CH);
+    /* ★ 绝不在此处 CMD_UNBLOCK/REBLOCK 暂放派发锁:本函数除了命令 handler(持锁)外,
+     * 还被 attach_worker 这个 **detached 线程**(不持有 disp_lock,见文件末 attach_worker)调用。
+     * 对**本线程未持有**的普通互斥量做 pthread_mutex_unlock 是未定义行为,会损坏 disp_lock →
+     * 之后所有 8089 命令派发在 disp_lock 上永久 hang(真机:开机 attach 16 台 LAN 相机后
+     * 8089 全堵、liveView 仍正常=媒体不碰此锁)。宁可同步调用方持锁多等几秒,也不碰锁。 */
     for (int i = 0; i < n; i++) {
         if (strcmp(list[i].onvif_ip, ip) != 0) continue;
         nvr_chan_wait_bind(c->cm, list[i].chn, NVR_DEF_CMD_TIMEOUT_S * 1000);
