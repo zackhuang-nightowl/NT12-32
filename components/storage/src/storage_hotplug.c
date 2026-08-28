@@ -31,6 +31,22 @@ int stg_hotplug_open(struct nvr_storage *s)
     return 0;
 }
 
+/* 可移动介质(USB)判定:读 /sys/block/<base>/removable==1。读不到(uevent 早于 sysfs 就绪的竞态)
+ * 按非可移动处理——交由扫描层 nvr_storage_scan 的 removable 过滤兜底,USB 不会漏进盘组。 */
+static int dev_is_removable(const char *devname)
+{
+    if (!devname) return 0;
+    const char *base = strrchr(devname, '/');
+    base = base ? base + 1 : devname;
+    char path[128];
+    snprintf(path, sizeof(path), "/sys/block/%s/removable", base);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    int c = fgetc(f);
+    fclose(f);
+    return c == '1';
+}
+
 /* uevent 报文是一串 '\0' 分隔的 KEY=VAL；解析出 ACTION 与 DEVNAME/SUBSYSTEM */
 static void parse_uevent(struct nvr_storage *s, const char *buf, int len)
 {
@@ -49,6 +65,10 @@ static void parse_uevent(struct nvr_storage *s, const char *buf, int len)
     if (devtype && strcmp(devtype, "disk") != 0) return;      /* 只关心整盘 */
 
     if (!strcmp(action, "add")) {
+        /* ★ 可移动盘(USB/读卡器)不属录像存储:直接忽略,不触发重扫/入组。U 盘的文件访问由 udev
+         * 自动挂载(/mnt/usb)提供,与录像盘组无关。否则插 U 盘会白扫一遍(I/O 冲击=插入卡顿)、
+         * 把在录 HDD 的 ACTIVE 态重置、甚至把曾格式化成 RSDK 的 U 盘并进盘组(拔出即 D 态锁死)。 */
+        if (dev_is_removable(devname)) return;
         /* 新盘插入 → 触发一次重扫（由 mgr 决定识别/格式化/纳入） */
         stg_emit(s, NVR_STG_EVT_DISK_ADDED, NULL);
     } else if (!strcmp(action, "remove")) {

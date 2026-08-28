@@ -85,6 +85,13 @@ int nvr_storage_scan(nvr_storage_t *s)
     while ((e = readdir(d)) && s->ndisks < NVR_MAX_DISKS) {
         if (!is_whole_disk(e->d_name)) continue;
 
+        /* ★ 只收固定硬盘(HDD/SSD):排除可移动介质(removable=1，即 USB)。USB 由 stg_add_removable
+         * 按挂载点(/mnt/usb)单列为 "usb"，绝不进录像盘列表——否则会被误当 hdd 命名、占命名序号
+         * (把真盘挤成 hdd2/hdd4)、并被 assemble/balance 纳入盘组(违反"hdd 只能分配给盘组")。 */
+        char rb[16];
+        if (sysfs_read(e->d_name, "removable", rb, sizeof(rb)) > 0 && rb[0] == '1')
+            continue;
+
         nvr_disk_t *dk = &s->disks[s->ndisks];
         memset(dk, 0, sizeof(*dk));
         snprintf(dk->path, sizeof(dk->path), "/dev/%s", e->d_name);
@@ -92,6 +99,8 @@ int nvr_storage_scan(nvr_storage_t *s)
         char buf[64];
         if (sysfs_read(e->d_name, "size", buf, sizeof(buf)) > 0)   /* size 单位=512B 扇区 */
             dk->capacity_bytes = strtoull(buf, NULL, 10) * 512ull;
+        /* 容量 0 = 无介质/掉线的幽灵块设备(如已拔盘残留节点):不入列表，免出现 0 容量 error 条目。 */
+        if (dk->capacity_bytes == 0) continue;
         if (sysfs_read(e->d_name, "device/model", buf, sizeof(buf)) > 0)
             snprintf(dk->model, sizeof(dk->model), "%s", buf);
         if (sysfs_read(e->d_name, "device/serial", dk->serial, sizeof(dk->serial)) <= 0)

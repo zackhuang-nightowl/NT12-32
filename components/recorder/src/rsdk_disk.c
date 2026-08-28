@@ -130,7 +130,7 @@ void rsdk_disk_unified_name(const char *devpath, int seq, char *out, size_t n) {
     }
     const char *kind = (sys_removable(devpath) == 1) ? "usb" : "hdd";  /* 可移动=USB, 否则固定盘 */
     if (seq <= 0) snprintf(out, n, "%s", kind);      /* 首个: hdd / usb */
-    else          snprintf(out, n, "%s%d", kind, seq + 1);  /* 次个: hdd2 / usb2 .. */
+    else          snprintf(out, n, "%s%d", kind, seq);  /* 次个: hdd1 / usb1 .. */
 }
 
 /* SMART RETURN STATUS(non-data + CK_COND): *fail=1 表示阈值超标(盘将坏)。成功 0。 */

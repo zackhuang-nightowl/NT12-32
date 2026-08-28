@@ -72,15 +72,16 @@ static void stg_name_of(const char *path, int *hdd_seq, int *usb_seq, char *out,
     rsdk_disk_unified_name(path, seq, out, n);
 }
 
-/* nvr_disk_state → 接口 status(in_use 表示当前录像用盘) */
-static const char *stg_status_str(nvr_disk_state_t s, int in_use)
+/* nvr_disk_state → 接口 status。★in_group(在活动录像盘组里)才是"正在录"的权威依据:
+ * 插 USB 触发 NVR_STG_EVT_DISK_ADDED → nvr_storage_scan 全量重建盘表,把在录 HDD 的 state
+ * 从 ACTIVE 重置回 OURS(ACTIVE 只在 assemble 时打)。若按 state==ACTIVE 判 in_use,重扫后就误
+ * 报 ready(真机复现:插拔 USB 后 hdd 变 ready,其实 group 没变仍在录)。故:真故障盘先报 error,
+ * 在活动盘组里的一律 in_use,其余 ready——不受易变扫描态影响。 */
+static const char *stg_status_str(nvr_disk_state_t s, int in_group)
 {
-    switch (s) {
-        case NVR_DISK_ACTIVE:  return in_use ? "in_use" : "ready";
-        case NVR_DISK_FAILED:
-        case NVR_DISK_OFFLINE:  return "error";
-        default:                return "ready";   /* BLANK/FOREIGN/未知:已挂未用 */
-    }
+    if (s == NVR_DISK_FAILED || s == NVR_DISK_OFFLINE) return "error";
+    if (in_group) return "in_use";
+    return "ready";   /* BLANK/FOREIGN/OURS 未入组:已挂未用 */
 }
 
 /* 按接口 name 找对应盘(同一套 hdd/hdd2/sdcard/usb 计数规则);找到返回 1 并填 *out。 */
@@ -118,7 +119,10 @@ char *cmd_getStorageInfo(cJSON *a, const nvr_cmd_ctx_t *c)
             cJSON_AddStringToObject(e, "name", name);
             cJSON_AddNumberToObject(e, "totalSize", (double)total_mb);
             cJSON_AddNumberToObject(e, "freeSize",  (double)free_mb);
-            cJSON_AddStringToObject(e, "status", stg_status_str(d[i].state, i == 0));
+            /* ★ in_use 按"该盘是否在录像盘组里(在写)"判,而非硬编码 i==0 只认首盘。
+             * 多盘均衡后两块盘都在录 → 都应报 in_use(修:原 i==0 让 hdd2 恒报 ready 状态不对)。 */
+            int in_group = (c->group && rsdk_group_find_path(c->group, d[i].path) >= 0);
+            cJSON_AddStringToObject(e, "status", stg_status_str(d[i].state, in_group));
             cJSON_AddItemToArray(arr, e);
         }
     }
