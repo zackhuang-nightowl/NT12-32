@@ -87,6 +87,12 @@ void nvr_chan_poke_longpoll(nvr_chan_mgr_t *m);
 /* 查询（供 preview OSD / NOP handler / 诊断） */
 int  nvr_chan_get   (nvr_chan_mgr_t *m, int chn, nvr_channel_t *out);
 int  nvr_chan_list  (nvr_chan_mgr_t *m, nvr_channel_t *out, int cap);
+
+/* ★ 实时向设备取一次型号/序列号/固件版本/厂商(不缓存,每次真取)。
+ * NOP/nopOnvif(backend=0)→ getDeviceInfo;ONVIF → GetDeviceInformation(用已存 service_url 直连,不广播)。
+ * 供 getChannelInfo:相机升级后靠实时固件版本判成功。含网络往返(数百ms~数秒),调用方应在 hold=0 下调。0=成功。 */
+typedef struct { char manufacturer[64]; char model[64]; char firmware[64]; char serial[64]; } nvr_chan_devinfo_t;
+int  nvr_chan_query_device_info(nvr_chan_mgr_t *m, int chn, nvr_chan_devinfo_t *out);
 nvr_chan_status_t nvr_chan_status(nvr_chan_mgr_t *m, int chn);
 const char *nvr_chan_status_name(nvr_chan_status_t s);
 

@@ -122,6 +122,7 @@ typedef struct {
     nvr_chan_substate_t sub;      /* 鉴权失败/超预算/待激活/休眠/固件升级子状态（0-7 码用） */
     int               url_tries;  /* 已发起的取流URL解析次数（护 IPC：错够即停，见 tick_slot） */
     time_t            url_next;    /* 下次允许解析的时间（退避） */
+    int               url_resolving;/* 该通道正有一个解析 worker 在跑(并发解析:防同通道重复派线程) */
     time_t            recall_next; /* 下次允许"LAN 找回"重发现的时间（已添加 LAN 设备连不上时；30s 退避） */
     char              url_main[256]; /* 已解析的主码流取流 URL 缓存（切主/子码流免重新 ONVIF 解析→秒切） */
     char              url_sub[256];  /* 已解析的子码流取流 URL 缓存 */
@@ -155,6 +156,18 @@ struct nvr_chan_mgr {
      * 卡住 GUI_longPolling 的 cond_wait。加锁顺序若两把都要:先 lock 再 notify_mu。 */
     pthread_mutex_t notify_mu;
     pthread_cond_t  notify_cv;
+
+    /* ★ 异步持久化:persist_camera 的 SQLite 写(几十ms)移出 CM_LOCK → 单写库线程串行执行。
+     * 调用方在 CM_LOCK 内只做"快照 d + 标记 dirty"(微秒级),写库离开 CM_LOCK → 解析/发现再密集
+     * 也不占 CM_LOCK,8089 命令全程不被阻塞。按通道合并(最新覆盖)+ 单写者 → 有序、无 SQLITE_BUSY、
+     * 不丢更新。persist_mu 独立于 CM_LOCK(锁序:CM_LOCK→persist_mu;写库线程只持 persist_mu,不碰 CM_LOCK)。 */
+    pthread_t       persist_thr;
+    int             persist_thr_ok;
+    pthread_mutex_t persist_mu;
+    pthread_cond_t  persist_cv;
+    volatile int    persist_stop;
+    nvr_channel_t   persist_pending[NVR_MAX_CH];   /* 每通道待写的最新快照 */
+    unsigned char   persist_dirty[NVR_MAX_CH];     /* 1=该通道有待写快照 */
 };
 
 /* 递归锁便捷宏(空指针安全由各入口的 !m 检查兜底)。 */
@@ -254,6 +267,7 @@ static slot_t *slot_of(nvr_chan_mgr_t *m, int chn)
     return &m->slots[chn];
 }
 static void persist_camera(nvr_chan_mgr_t *m, nvr_channel_t *d);
+static void *persist_writer_thread(void *arg);   /* 单写库线程(异步持久化) */
 static void sync_nop_registry(nvr_chan_mgr_t *m, const nvr_channel_t *d);
 
 /* app 通道 FSM → 状态码用的粗粒度连接态 */
@@ -469,6 +483,15 @@ int nvr_chan_mgr_init(const nvr_chan_mgr_cfg_t *cfg, nvr_chan_mgr_t **out)
             pthread_condattr_destroy(&ca);
         }
     }
+    /* ★ 起单写库线程:persist_camera 的 SQLite 写异步化(移出 CM_LOCK)。起线程前 persist_thr_ok=0
+     * → 期间的 persist_camera 走同步兜底(极早期,极少)。 */
+    pthread_mutex_init(&m->persist_mu, NULL);
+    pthread_cond_init(&m->persist_cv, NULL);
+    m->persist_stop = 0;
+    if (pthread_create(&m->persist_thr, NULL, persist_writer_thread, m) == 0)
+        m->persist_thr_ok = 1;
+    else
+        NVR_LOGE("chan", "写库线程起失败 → persist_camera 退化为 CM_LOCK 内同步写(解析期可能拖慢 8089)");
     *out = m;
     return 0;
 }
@@ -476,6 +499,17 @@ int nvr_chan_mgr_init(const nvr_chan_mgr_cfg_t *cfg, nvr_chan_mgr_t **out)
 void nvr_chan_mgr_deinit(nvr_chan_mgr_t *m)
 {
     if (!m) return;
+    /* ★ 停写库线程:置 stop→唤醒→线程排空剩余待写后退出→join(不丢最后的写)。 */
+    if (m->persist_thr_ok) {
+        pthread_mutex_lock(&m->persist_mu);
+        m->persist_stop = 1;
+        pthread_cond_signal(&m->persist_cv);
+        pthread_mutex_unlock(&m->persist_mu);
+        pthread_join(m->persist_thr, NULL);
+        m->persist_thr_ok = 0;
+    }
+    pthread_cond_destroy(&m->persist_cv);
+    pthread_mutex_destroy(&m->persist_mu);
     pthread_cond_destroy(&m->notify_cv);
     pthread_mutex_destroy(&m->notify_mu);
     pthread_mutex_destroy(&m->lock);   /* 调用方须已停止 tick/派发线程 */
@@ -677,18 +711,10 @@ static int iface_ipv4(const char *ifname, char *out, size_t cap)
  * ★ MAC 权威性:优先用 ARP 表(按 IP 匹配的物理 mac)覆盖 ONVIF scope mac,并回写 slot(d->mac),
  * 使"库里的 mac""内存里的 mac"一致 → IP 变更后按 mac 找回(chn_by_mac / find_by_mac)可靠。
  * ARP 尚未就绪时仍用 discovery/GUI 带来的 mac（可空）先入库，不阻塞添加。 */
-static void persist_camera(nvr_chan_mgr_t *m, nvr_channel_t *d)
+/* 记录构建 + upsert:慢 SQLite 写。由**写库线程**用快照跑(不占 CM_LOCK);线程未起时同步兜底。 */
+static void persist_camera_write(nvr_settings_t *settings, const nvr_channel_t *d)
 {
-    if (!m->cfg.settings || !d) return;
-    if (!d->onvif_ip[0]) return;                        /* 无 ip 不落库 */
-    char amac[24];
-    if (arp_mac_of_ip(d->onvif_ip, amac, sizeof(amac)) == 0 && amac[0])
-        snprintf(d->mac, sizeof(d->mac), "%s", amac);   /* ARP mac 权威,覆盖并回写 slot */
-    else if (d->mac[0]) {
-        char nm[24];
-        if (mac_norm(d->mac, nm, sizeof(nm)) == 0)
-            snprintf(d->mac, sizeof(d->mac), "%s", nm);
-    }
+    if (!settings || !d || !d->onvif_ip[0]) return;
     nvr_camera_row_t r; memset(&r, 0, sizeof(r));
     r.chn = d->chn;                                     /* 内部 0-based;协议边界再 +1 */
     r.enabled = d->enabled;
@@ -715,7 +741,53 @@ static void persist_camera(nvr_chan_mgr_t *m, nvr_channel_t *d)
     r.onvif_auto = d->onvif_auto; r.poe_port = d->poe_port;
     r.codec = d->codec; r.stream = d->stream; r.record = d->record;
     snprintf(r.name, sizeof(r.name), "%s", d->name);
-    nvr_settings_camera_upsert(m->cfg.settings, &r);
+    nvr_settings_camera_upsert(settings, &r);
+}
+
+/* 单写库线程:串行 drain 各通道待写快照,写库离开 CM_LOCK。停止时先排空再退出(不丢最后的写)。 */
+static void *persist_writer_thread(void *arg)
+{
+    nvr_chan_mgr_t *m = (nvr_chan_mgr_t *)arg;
+    for (;;) {
+        nvr_channel_t snap; int found = -1;
+        pthread_mutex_lock(&m->persist_mu);
+        for (;;) {
+            for (int i = 0; i < NVR_MAX_CH; i++) if (m->persist_dirty[i]) { found = i; break; }
+            if (found >= 0 || m->persist_stop) break;
+            pthread_cond_wait(&m->persist_cv, &m->persist_mu);
+        }
+        if (found < 0) { pthread_mutex_unlock(&m->persist_mu); break; }   /* 已停且无待写 → 退出 */
+        snap = m->persist_pending[found];       /* 取最新快照(合并后) */
+        m->persist_dirty[found] = 0;
+        pthread_mutex_unlock(&m->persist_mu);
+        persist_camera_write(m->cfg.settings, &snap);   /* ★ 慢 DB 写:全程锁外(既不占 CM_LOCK 也不占 persist_mu) */
+    }
+    return NULL;
+}
+
+/* 在调用方 CM_LOCK 内调用:①ARP mac 就地回写 slot(快);②入队快照交写库线程(微秒级),不在锁内写库。 */
+static void persist_camera(nvr_chan_mgr_t *m, nvr_channel_t *d)
+{
+    if (!m->cfg.settings || !d) return;
+    if (!d->onvif_ip[0]) return;                        /* 无 ip 不落库 */
+    char amac[24];
+    if (arp_mac_of_ip(d->onvif_ip, amac, sizeof(amac)) == 0 && amac[0])
+        snprintf(d->mac, sizeof(d->mac), "%s", amac);   /* ARP mac 权威,覆盖并回写 slot(锁内就地改 d) */
+    else if (d->mac[0]) {
+        char nm[24];
+        if (mac_norm(d->mac, nm, sizeof(nm)) == 0)
+            snprintf(d->mac, sizeof(d->mac), "%s", nm);
+    }
+    if (m->persist_thr_ok && d->chn >= 0 && d->chn < NVR_MAX_CH) {
+        /* 入队:快照 d + 标记 dirty(按通道合并,最新覆盖)。写库离开 CM_LOCK,8089 全程不受解析影响。 */
+        pthread_mutex_lock(&m->persist_mu);
+        m->persist_pending[d->chn] = *d;
+        m->persist_dirty[d->chn] = 1;
+        pthread_cond_signal(&m->persist_cv);
+        pthread_mutex_unlock(&m->persist_mu);
+    } else {
+        persist_camera_write(m->cfg.settings, d);       /* 兜底:写库线程未起/已停 → 同步写 */
+    }
 }
 
 /* ARP 权威；discovery 无 mac 且 ARP 未就绪时用 GetNetworkInterfaces 补。mac 变了返 1。 */
@@ -964,7 +1036,21 @@ static void on_discovered(const nvr_onvif_cam_t *cam, void *user)
                     s->first_add = 1;                     /* 本会话首次插上：试一轮 */
                     chan_notify(m, s->d.chn);   /* 插上物理机 → status 0→3 */
                 }
-                if (strcmp(s->d.onvif_ip, cam->host) != 0 || !s->url_sub[0] || !s->url_main[0]) {
+                /* ★ 同口换机检测:发现的 MAC 与库里已落 MAC 不同 = 这口换了一台相机。
+                 * 新机常拿到同一段内 IP(如 198.18.<口>.1),仅凭"IP变/无URL"判不出换机 → 会保留旧
+                 * service_url/凭据/kind/URL,新机套旧配置连 ONVIF 失败**永不出图**(真机根因:clear_poe_port
+                 * 因旧机 ARP 仍可达从不触发,DB 不清)。检测到换机 → 清旧配置,按新机从零重激活/重解析。 */
+                int mac_swap = cls.mac[0] && s->d.mac[0] && strcasecmp(s->d.mac, cls.mac) != 0;
+                if (strcmp(s->d.onvif_ip, cam->host) != 0 || !s->url_sub[0] || !s->url_main[0] || mac_swap) {
+                    if (mac_swap) {
+                        NVR_LOGI("chan", "PoE 口%d 换机 MAC %s→%s → 清旧配置(凭据/service_url/能力)重配",
+                                 s->d.poe_port, s->d.mac, cls.mac);
+                        s->d.user[0] = 0; s->d.pass[0] = 0; s->d.enh_random[0] = 0;  /* 旧凭据/激活态作废 */
+                        s->d.service_url[0] = 0; s->caps_probed = 0;
+                        s->first_add = 1;                        /* 视作首次插上,重走激活/鉴权一轮 */
+                        memset(&s->sub, 0, sizeof(s->sub));
+                        if (m->cfg.settings) nvr_settings_caps_set(m->cfg.settings, s->d.chn, "", "");
+                    }
                     snprintf(s->d.onvif_ip, sizeof(s->d.onvif_ip), "%s", cam->host);
                     s->d.kind = (int)cls.kind; s->d.backend = (int)cls.backend;
                     if (cls.mac[0]) snprintf(s->d.mac, sizeof(s->d.mac), "%s", cls.mac);
@@ -975,8 +1061,9 @@ static void on_discovered(const nvr_onvif_cam_t *cam, void *user)
                     s->d.url[0] = 0; s->url_main[0] = 0; s->url_sub[0] = 0;
                     s->auth_ready = 0;
                     s->status = NVR_CHAN_BOUND; s->notified_online = 0;
-                    /* 已试过一轮在等密码：只更新设备信息，不因再次发现而重打鉴权 */
-                    if (!(s->first_add && s->url_tries >= 1)) {
+                    /* 已试过一轮在等密码：只更新设备信息，不因再次发现而重打鉴权。
+                     * ★ 但换机(mac_swap)必须强制重解析,否则旧 url_tries 会门控掉新机的解析。 */
+                    if (mac_swap || !(s->first_add && s->url_tries >= 1)) {
                         s->url_tries = 0; s->url_next = 0; s->sub.auth_fail = 0;
                     }
                     persist_camera(m, &s->d);
@@ -1217,8 +1304,87 @@ static int resolve_stream_url(nvr_chan_mgr_t *m, slot_t *s, int stream)
     return 0;
 }
 
+/* ================= 并发取流 URL 解析 =================
+ * 原来 tick 单线程串行解析:每路 ONVIF get_url ~2s,16 路 PoE 串行→十几分钟才全出图。
+ * 改为**每路一个 worker 线程并发解析**:resolve_stream_url 内部"快照→解锁→网络→重锁→重校验→应用"
+ * 本就为解锁期并发设计;ONVIF 设备池按 ip:port per-device 锁,不同相机并发 connect 不互串。
+ * worker 里 CM_LOCK→resolve_stream_url(解锁期网络与其它 worker 并行)→处理结果→CM_UNLOCK。
+ * g_resolve_active 封顶并发数,url_resolving 防同通道重复派。 */
+#define NVR_RESOLVE_MAX_CONCURRENT 10
+static volatile int g_resolve_active = 0;
+struct resolve_job { nvr_chan_mgr_t *m; int chn; int stream; };
+
+static void *resolve_worker(void *arg)
+{
+    struct resolve_job *j = (struct resolve_job *)arg;
+    nvr_chan_mgr_t *m = j->m; int chn = j->chn, stream = j->stream;
+    free(j);
+    CM_LOCK(m);
+    slot_t *s = slot_of(m, chn);
+    if (s && s->in_use && s->d.chn == chn) {
+        int rr = resolve_stream_url(m, s, stream);   /* 内部解锁做网络 → 与其它 worker 并行 */
+        s = slot_of(m, chn);                          /* 网络窗口后重取(数组稳定,重校验在场) */
+        if (s && s->in_use && s->d.chn == chn) {
+            time_t now = time(NULL);
+            if (rr == 0) {
+                s->url_tries = 0; s->first_add = 0;
+                NVR_LOGI("chan", "ch%d %s码流已解析取流", chn, stream == NVR_STREAM_SUB ? "子" : "主");
+                if (stream == NVR_STREAM_SUB) persist_camera(m, &s->d);
+            } else if (s->first_add) {
+                s->url_next = now + 86400 * 365;
+                if (rr == NVR_ONVIF_AUTH) {
+                    if (s->d.kind != NVR_DEV_KIND_NOPONVIF && !s->d.enh_random[0]) s->d.pass[0] = 0;
+                    persist_camera(m, &s->d);
+                    NVR_LOGW("chan", "ch%d 首次取流失败(鉴权)，等待用户输入密码", chn);
+                } else {
+                    NVR_LOGW("chan", "ch%d 首次取流失败(非鉴权)，保持连接中", chn);
+                }
+                chan_notify(m, chn);
+            } else {
+                int back = 30 * s->url_tries;
+                s->url_next = now + back;
+                if (s->url_tries >= NVR_URL_MAX_TRIES) {
+                    chan_notify(m, chn);
+                    NVR_LOGW("chan", "ch%d 取流URL解析失败达上限(%d) 停止；改凭据后重试", chn, NVR_URL_MAX_TRIES);
+                } else {
+                    NVR_LOGW("chan", "ch%d %s码流解析失败(%d/%d) 退避%ds",
+                             chn, stream == NVR_STREAM_SUB ? "子" : "主", s->url_tries, NVR_URL_MAX_TRIES, back);
+                }
+            }
+            s->url_resolving = 0;
+        }
+    }
+    CM_UNLOCK(m);
+    __sync_fetch_and_sub(&g_resolve_active, 1);
+    return NULL;
+}
+
+/* 在 CM_LOCK 内调用:满足解析条件则派一个 worker 并发解析该通道(不阻塞 tick)。派成功返回 1。 */
+static int spawn_resolve(nvr_chan_mgr_t *m, slot_t *s, int stream)
+{
+    if (g_resolve_active >= NVR_RESOLVE_MAX_CONCURRENT) return 0;
+    struct resolve_job *j = (struct resolve_job *)malloc(sizeof(*j));
+    if (!j) return 0;
+    j->m = m; j->chn = s->d.chn; j->stream = stream;
+    s->url_tries++;
+    s->url_resolving = 1;
+    __sync_fetch_and_add(&g_resolve_active, 1);
+    pthread_t th; pthread_attr_t at;
+    pthread_attr_init(&at);
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    pthread_attr_setstacksize(&at, 256 * 1024);
+    int rc = pthread_create(&th, &at, resolve_worker, j);
+    pthread_attr_destroy(&at);
+    if (rc != 0) {   /* 起线程失败:回滚 */
+        free(j); s->url_tries--; s->url_resolving = 0;
+        __sync_fetch_and_sub(&g_resolve_active, 1);
+        return 0;
+    }
+    return 1;
+}
+
 /* 映射 streaming 状态 → app 状态，并驱动上线/掉线通知与重连。
- * *resolve_budget：本轮 tick 还允许几路做 ONVIF URL 解析(每路 ~2s 广播,阻塞主循环)。 */
+ * *resolve_budget：本轮 tick 还允许派几路 ONVIF URL 解析 worker(并发,不阻塞主循环)。 */
 static void tick_slot(nvr_chan_mgr_t *m, slot_t *s, time_t now, int *resolve_budget)
 {
     if (s->status == NVR_CHAN_DISABLED) return;
@@ -1235,47 +1401,16 @@ static void tick_slot(nvr_chan_mgr_t *m, slot_t *s, time_t now, int *resolve_bud
             return;                                       /* 仍占位且未发现在场:本口不解析 */
     }
 
-    /* URL 尚未解析：经 ONVIF 取流。首次添加只试一轮，失败停等用户密码；
-     * 已落库重连限次+退避。双流先子后主，每 tick 至多 1 路。 */
+    /* URL 尚未解析：★ 派**并发 worker** 经 ONVIF 取流(不阻塞 tick,多路同时解析)。首次添加只试
+     * 一轮,失败停等用户密码;已落库重连限次+退避。双流先子后主。同通道已有 worker 在跑(url_resolving)
+     * 则跳过。结果处理(成功/退避/first_add)在 resolve_worker 里做。 */
     int max_tries = s->first_add ? 1 : NVR_URL_MAX_TRIES;
     if (s->d.onvif_auto && s->d.onvif_ip[0] && (!s->url_sub[0] || !s->url_main[0])
-        && s->url_tries < max_tries && now >= s->url_next
+        && s->url_tries < max_tries && now >= s->url_next && !s->url_resolving
         && resolve_budget && *resolve_budget > 0) {
         int stream = !s->url_sub[0] ? NVR_STREAM_SUB : NVR_STREAM_MAIN;   /* 先子后主 */
-        (*resolve_budget)--;
-        s->url_tries++;
-        int rr = resolve_stream_url(m, s, stream);   /* 内部会临时解锁做 ONVIF 取流 */
-        if (!s->in_use) return;                       /* 解锁窗口内 slot 被移除 → 本通道本 tick 到此为止 */
-        if (rr == 0) {
-            s->url_tries = 0;   /* 成功：允许下一码流(主)继续解析 */
-            s->first_add = 0;
-            NVR_LOGI("chan", "ch%d %s码流已解析取流", s->d.chn, stream == NVR_STREAM_SUB ? "子" : "主");
-            if (stream == NVR_STREAM_SUB) persist_camera(m, &s->d);
-        } else if (s->first_add) {
-            s->url_next = now + 86400 * 365;
-            if (rr == NVR_ONVIF_AUTH) {
-                /* 通用 ONVIF/用户密试失败 → 库里空密码。已恢复的 P_enh 或已激活 P_act 保留。 */
-                if (s->d.kind != NVR_DEV_KIND_NOPONVIF && !s->d.enh_random[0])
-                    s->d.pass[0] = 0;
-                persist_camera(m, &s->d);
-                NVR_LOGW("chan", "ch%d 首次取流失败(鉴权)，等待用户输入密码", s->d.chn);
-            } else {
-                NVR_LOGW("chan", "ch%d 首次取流失败(非鉴权)，保持连接中", s->d.chn);
-            }
-            chan_notify(m, s->d.chn);
-        } else {
-            int back = 30 * s->url_tries;
-            s->url_next = now + back;
-            if (s->url_tries >= NVR_URL_MAX_TRIES) {
-                chan_notify(m, s->d.chn);
-                NVR_LOGW("chan", "ch%d 取流URL解析失败达上限(%d) 停止；改凭据后重试",
-                         s->d.chn, NVR_URL_MAX_TRIES);
-            } else {
-                NVR_LOGW("chan", "ch%d %s码流解析失败(%d/%d) 退避%ds",
-                         s->d.chn, stream == NVR_STREAM_SUB ? "子" : "主",
-                         s->url_tries, NVR_URL_MAX_TRIES, back);
-            }
-        }
+        if (spawn_resolve(m, s, stream))
+            (*resolve_budget)--;
     }
 
     nvr_ch_state_t st = nvr_stream_state(m->cfg.sm, s->d.chn);
@@ -1306,13 +1441,9 @@ static void tick_slot(nvr_chan_mgr_t *m, slot_t *s, time_t now, int *resolve_bud
                 s->notified_online = 1;
                 chan_notify(m, s->d.chn);   /* 通知 gui 该通道状态变(→CNN),重拉状态出图 */
                 NVR_LOGI("chan", "ch%d ONLINE 出图", s->d.chn);
+                /* on_online **异步入队**(见 nvr_app on_chan_online):不在 CM_LOCK 内直接进 preview(取
+                 * p->lock)→ 破 CM_LOCK↔p->lock AB-BA 死锁。授时(阻塞 HTTP)也已移到该 worker 锁外做。 */
                 if (m->cfg.on_online) m->cfg.on_online(m->cfg.user, s->d.chn);
-                /* 出图即授时:开机重连 / 新添加设备首次连上,立刻同步 NVR 时间到 IPC */
-                if (m->cfg.settings && s->d.onvif_ip[0]) {
-                    (void)nvr_time_push_device(m->cfg.settings, s->d.onvif_ip,
-                        s->d.onvif_port > 0 ? s->d.onvif_port : 80,
-                        s->d.user, s->d.pass);
-                }
             }
             /* discovery 无 mac：连上后 ARP 表才有项。ARP 一旦出现即以它覆盖，供 IP 变更找回。 */
             {
@@ -1607,6 +1738,27 @@ static void disc_scan_kick(void)
     pthread_attr_destroy(&at);
 }
 
+/* ★ 锁外发现用的回调包装:on_discovered/on_34569 假定调用方持 CM_LOCK(直接改 slots);把 2s 广播
+ * 挪出 CM_LOCK 后,改用这两个包装——每发现一台相机才**短暂**取 CM_LOCK,广播本身零占锁。
+ * 这样开机期 PoE/LAN 发现广播不再把 CM_LOCK 占 2~6s,setDeviceDisplayMode/getDeviceDisplayMode
+ * 取 CM_LOCK 立即拿到 → ≤2s 回复。CM_LOCK 递归,嵌套安全。 */
+static void on_discovered_locked(const nvr_onvif_cam_t *cam, void *user)
+{
+    disc_ctx_t *c = (disc_ctx_t *)user;
+    if (!c || !c->m) return;
+    CM_LOCK(c->m);
+    on_discovered(cam, user);
+    CM_UNLOCK(c->m);
+}
+static void on_34569_locked(const nvr_lan34569_dev_t *d, void *user)
+{
+    disc_ctx_t *c = (disc_ctx_t *)user;
+    if (!c || !c->m) return;
+    CM_LOCK(c->m);
+    on_34569(d, user);      /* 内部再调 on_discovered(不自锁),递归 CM_LOCK 安全 */
+    CM_UNLOCK(c->m);
+}
+
 void nvr_chan_tick(nvr_chan_mgr_t *m)
 {
     if (!m) return;
@@ -1621,7 +1773,7 @@ void nvr_chan_tick(nvr_chan_mgr_t *m)
      * 在场相机上 → 首轮出图更快;上限 2 兼顾主循环杂务不被过久阻塞(视频/8089 各自线程不受影响)。 */
     /* ★ 优先解析:用户刚加设备/改密(prio)的通道先解析,单列额度,不排在开机批量解析(每 tick 2 路)
      * 后面 → setLanDevice 改密后立即用新账密去连,而不是等十几路 ONVIF 解析完。一次性(处理后清 prio)。 */
-    int prio_budget = 2;
+    int prio_budget = NVR_RESOLVE_MAX_CONCURRENT;   /* 并发解析:每 tick 可派多路(受 g_resolve_active 封顶) */
     for (int i = 0; i < NVR_MAX_CH && prio_budget > 0; i++) {
         if (m->slots[i].in_use && m->slots[i].prio) {
             m->slots[i].prio = 0;                       /* 一次性:给它抢先解析这一发 */
@@ -1629,69 +1781,83 @@ void nvr_chan_tick(nvr_chan_mgr_t *m)
         }
     }
 
-    int resolve_budget = 2;
+    int resolve_budget = NVR_RESOLVE_MAX_CONCURRENT;   /* 同上:并发派发,封顶在 g_resolve_active */
     for (int i = 0; i < NVR_MAX_CH; i++)
         if (m->slots[i].in_use) tick_slot(m, &m->slots[i], now, &resolve_budget);
 
-    /* ---- PoE 即插即用发现(与 LAN 统一走 ONVIF Discovery):对**未出图**的 PoE 口通道,在其
-     * 网段(源 198.18.<口>.100)做 ONVIF 广播发现,扫到相机(任意 IP)→ on_discovered 按 198.18.<口>
-     * 子网绑定/更新该口通道并置 poe_present。每口 10s 退避、每 tick 至多 1 口(2s 广播,budget 外单列)。 */
-    int poe_n = (NVR_POE_PORTS < NVR_MAX_CH) ? NVR_POE_PORTS : NVR_MAX_CH;
+    /* ---- PoE 即插即用发现 / LAN 找回:**持锁只做选路+调度状态更新(快),2s 广播挪到锁外** ----
+     * 原来在 CM_LOCK 内做 ONVIF/34569 广播(每 tick 2~6s),开机期把 CM_LOCK 占住 → setDeviceDisplayMode
+     * / getDeviceDisplayMode 等取 CM_LOCK 的命令被拖到数秒才回。现改:持锁选出本 tick 要广播的 1 个 PoE
+     * 口 + 1 路 LAN 找回并快照参数,解锁后广播(回调用 *_locked 包装,每相机短临界区),PoE 的 ARP 判定/
+     * 清口再重锁应用。PoE 口↔段 1:1;段=物理口号(不用 ip_seg3,脏 IP/fe80 会永久跳过)。 */
+    int  poe_do = 0, poe_slot = -1, poe_seg = 0, poe_had_dev = 0;
+    char poe_src[64] = "", poe_camip[32] = "";
+    int  poe_n = (NVR_POE_PORTS < NVR_MAX_CH) ? NVR_POE_PORTS : NVR_MAX_CH;
     for (int k = 0; k < poe_n; k++) {
         int i = (m->poe_scan_cursor + k) % poe_n;        /* 游标轮询:公平覆盖所有 PoE 口 */
         slot_t *s = &m->slots[i];
         if (!s->in_use || s->d.poe_port <= 0) continue;
-        if (s->status == NVR_CHAN_ONLINE) continue;      /* 真正在线出图才停发现;在线无流(掉线/NOSIGNAL/
-                                                          * 未解析)都继续发现→刷新在场/IP→重连(不只看 url 缓存) */
+        if (s->status == NVR_CHAN_ONLINE) continue;      /* 真正在线出图才停发现 */
         if (now < s->poe_disc_next) continue;
-        /* W4: 段=物理口号(段↔口 1:1)。★不再用 ip_seg3(onvif_ip):脏 IP/fe80 会得 -1 而
-         * `continue` 永久跳过该口 → 拔了永不清空(PoE ch1 卡死根因)。物理口恒有效,循环永远覆盖。 */
-        int seg = s->d.poe_port;
+        poe_seg = s->d.poe_port;
         s->poe_disc_next = now + 10;
         m->poe_scan_cursor = (i + 1) % poe_n;            /* 下轮从下一口起 */
-        char src[64];                                     /* 发现源=NVR 在该 VLAN 的 IP 198.18.<seg>.100 */
-        snprintf(src, sizeof(src), "%d.%d.%d.100", NVR_POE_NET_A, NVR_POE_NET_B, seg);
-        disc_ctx_t ctx = { m, 0, 0, seg };               /* poe_seg=seg:on_discovered 按段绑口(W2) */
-        int had_dev = s->poe_present || s->d.mac[0] || s->d.serial[0];
-        s->poe_seen = 0;                                  /* 本轮探测前清;命中由 on_discovered 置1 */
-        NVR_LOGI("chan", "PoE ch%d(口%d,段198.18.%d)ONVIF 发现广播 src=%s", s->d.chn, s->d.poe_port, seg, src);
-        nvr_onvif_discover(src, 2, on_discovered, &ctx);
-        /* WS-Discovery 多播偶发丢包会漏发现在场相机 → 不能仅凭"未发现"就清口(会误清+抖动)。
-         * 未命中时再用 ARP 二层探测该口相机段内地址确认在场(鲁棒于相机屏蔽 ICMP):
-         * 可达=在场(清零计数);不可达累计达阈值 → 判定拔除,清空该口(PoE 拔线即清)。 */
-        if (!s->poe_seen && had_dev) {
-            char camip[32];                               /* 探测目标:已绑段内 IPv4;否则该口默认段内地址 .1 */
-            if (is_ipv4_in_poe_seg(s->d.onvif_ip, seg))
-                snprintf(camip, sizeof(camip), "%s", s->d.onvif_ip);
-            else
-                snprintf(camip, sizeof(camip), "%d.%d.%d.1", NVR_POE_NET_A, NVR_POE_NET_B, seg);
-            if (poe_cam_reachable(camip)) {
-                s->poe_miss = 0;                          /* ARP 可达 → 相机在场,勿清 */
-            } else if (++s->poe_miss >= NVR_POE_MISS_CLEAR) {
-                clear_poe_port(m, s);
-            }
-        }
-        break;                                            /* 每 tick 至多 1 口(2s 广播) */
+        snprintf(poe_src, sizeof(poe_src), "%d.%d.%d.100", NVR_POE_NET_A, NVR_POE_NET_B, poe_seg);
+        poe_had_dev = s->poe_present || s->d.mac[0] || s->d.serial[0];
+        s->poe_seen = 0;                                  /* 本轮探测前清;命中由广播期 on_discovered_locked 置1 */
+        if (is_ipv4_in_poe_seg(s->d.onvif_ip, poe_seg))   /* ARP 兜底目标:已绑段内 IPv4;否则该段 .1 */
+            snprintf(poe_camip, sizeof(poe_camip), "%s", s->d.onvif_ip);
+        else
+            snprintf(poe_camip, sizeof(poe_camip), "%d.%d.%d.1", NVR_POE_NET_A, NVR_POE_NET_B, poe_seg);
+        poe_slot = i; poe_do = 1;
+        NVR_LOGI("chan", "PoE ch%d(口%d,段198.18.%d)ONVIF 发现广播 src=%s", s->d.chn, s->d.poe_port, poe_seg, poe_src);
+        break;                                            /* 每 tick 至多 1 口 */
     }
 
-    /* ---- LAN 找回:已添加 LAN 设备掉线 → eth0 按 mac 重发现当前 IP。
-     * WS-Discovery + 34569 LocalLAN（后者直接带 MAC，DHCP/换网段更稳）。recall_only 不新增。 */
+    int  lan_do = 0;
+    char lan_eth0[64] = "";
     for (int i = NVR_IP_CH_BASE; i < NVR_MAX_CH; i++) {
         slot_t *s = &m->slots[i];
         if (!s->in_use || s->d.poe_port > 0 || !s->d.mac[0]) continue;
         if (s->status != NVR_CHAN_NOSIGNAL && s->status != NVR_CHAN_FAIL) continue;  /* 只找回掉线的 */
         if (now < s->recall_next) continue;
         s->recall_next = now + 30;
-        char eth0ip[64];
-        if (iface_ipv4("eth0", eth0ip, sizeof(eth0ip)) == 0 && eth0ip[0]) {
-            disc_ctx_t ctx = { m, 0, 1 };   /* recall_only:只更新已知,不新增 */
-            NVR_LOGI("chan", "ch%d LAN 掉线找回:eth0(%s) 按 mac=%s（ONVIF+34569）", i, eth0ip, s->d.mac);
-            nvr_lan34569_discover(eth0ip, 1, on_34569, &ctx);           /* 先 34569：应答带 MAC */
-            nvr_onvif_discover(eth0ip, 2, on_discovered, &ctx);
+        if (iface_ipv4("eth0", lan_eth0, sizeof(lan_eth0)) == 0 && lan_eth0[0]) {
+            lan_do = 1;
+            NVR_LOGI("chan", "ch%d LAN 掉线找回:eth0(%s) 按 mac=%s（ONVIF+34569）", i, lan_eth0, s->d.mac);
         }
         break;   /* 每 tick 至多 1 路找回 */
     }
     CM_UNLOCK(m);
+
+    /* ---- 锁外广播(2s 不占 CM_LOCK → setDeviceDisplayMode 等命令立即拿到 CM_LOCK)---- */
+    if (poe_do) {
+        disc_ctx_t ctx = { m, 0, 0, poe_seg };            /* poe_seg:on_discovered 按段绑口(W2) */
+        nvr_onvif_discover(poe_src, 2, on_discovered_locked, &ctx);
+        /* WS-Discovery 多播偶发丢包 → 不能仅凭"未发现"就清口。未命中再 ARP 二层探测确认在场;
+         * 可达=在场(清零);不可达累计达阈值 → 判定拔除清口。poe_seen 由广播期回调置。 */
+        int seen = 1, still = 0;
+        CM_LOCK(m);
+        { slot_t *s = &m->slots[poe_slot];
+          still = (s->in_use && s->d.poe_port == poe_seg);
+          seen  = still ? s->poe_seen : 1; }
+        CM_UNLOCK(m);
+        if (still && !seen && poe_had_dev) {
+            int reachable = poe_cam_reachable(poe_camip);   /* ARP 探测:网络,锁外 */
+            CM_LOCK(m);
+            { slot_t *s = &m->slots[poe_slot];
+              if (s->in_use && s->d.poe_port == poe_seg) {  /* 重校验:解锁窗口内可能被增删/换机 */
+                  if (reachable) s->poe_miss = 0;
+                  else if (++s->poe_miss >= NVR_POE_MISS_CLEAR) clear_poe_port(m, s);
+              } }
+            CM_UNLOCK(m);
+        }
+    }
+    if (lan_do) {
+        disc_ctx_t ctx = { m, 0, 1 };                     /* recall_only:只更新已知,不新增 */
+        nvr_lan34569_discover(lan_eth0, 1, on_34569_locked, &ctx);   /* 先 34569:应答带 MAC */
+        nvr_onvif_discover(lan_eth0, 2, on_discovered_locked, &ctx);
+    }
 }
 
 int nvr_chan_get(nvr_chan_mgr_t *m, int chn, nvr_channel_t *out)
@@ -1702,6 +1868,56 @@ int nvr_chan_get(nvr_chan_mgr_t *m, int chn, nvr_channel_t *out)
     int rc = (s && s->in_use) ? (*out = s->d, 0) : -1;
     CM_UNLOCK(m);
     return rc;
+}
+
+int nvr_chan_query_device_info(nvr_chan_mgr_t *m, int chn, nvr_chan_devinfo_t *out)
+{
+    if (!m || !out) return -1;
+    memset(out, 0, sizeof(*out));
+    /* 锁内只快照地址/凭据/后端(微秒级);网络往返在锁外做(不占 CM_LOCK)。 */
+    char ip[64], user[64], pass[64], svc[128];
+    int  port, backend;
+    CM_LOCK(m);
+    slot_t *s = slot_of(m, chn);
+    if (!s || !s->in_use) { CM_UNLOCK(m); return -1; }
+    snprintf(ip,   sizeof(ip),   "%s", s->d.onvif_ip);
+    snprintf(user, sizeof(user), "%s", s->d.user);
+    snprintf(pass, sizeof(pass), "%s", s->d.pass);
+    snprintf(svc,  sizeof(svc),  "%s", s->d.service_url);
+    port    = s->d.onvif_port;
+    backend = s->d.backend;
+    CM_UNLOCK(m);
+    if (!ip[0]) return -1;
+
+    if (backend == 0) {
+        /* NOP / nopOnvif 透传:向设备下发 getDeviceInfo,取 content.model/serialNumber/firmwareVersion。 */
+        int dport = port > 0 ? port : 80;
+        char *resp = chan_nop_post(ip, dport, user, pass, "{\"func\":\"getDeviceInfo\",\"args\":{}}");
+        if (!resp) return -1;
+        cJSON *j = cJSON_Parse(resp); free(resp);
+        if (!j) return -1;
+        cJSON *ic = cJSON_GetObjectItem(j, "content");
+        int ok = -1;
+        if (ic) {
+            const char *mdl = cJSON_GetStringValue(cJSON_GetObjectItem(ic, "model"));
+            const char *ser = cJSON_GetStringValue(cJSON_GetObjectItem(ic, "serialNumber"));
+            const char *fwv = cJSON_GetStringValue(cJSON_GetObjectItem(ic, "firmwareVersion"));
+            const char *man = cJSON_GetStringValue(cJSON_GetObjectItem(ic, "manufacturer"));
+            if (mdl) snprintf(out->model,        sizeof(out->model),        "%s", mdl);
+            if (ser) snprintf(out->serial,       sizeof(out->serial),       "%s", ser);
+            if (fwv) snprintf(out->firmware,     sizeof(out->firmware),     "%s", fwv);
+            if (man) snprintf(out->manufacturer, sizeof(out->manufacturer), "%s", man);
+            ok = 0;
+        }
+        cJSON_Delete(j);
+        return ok;
+    }
+    /* ONVIF 翻译:GetDeviceInformation(用已存 service_url 直连,不广播)。 */
+    return nvr_onvif_get_device_info(ip, port > 0 ? port : 80, svc[0] ? svc : NULL, user, pass,
+                                     out->manufacturer, (int)sizeof(out->manufacturer),
+                                     out->model,        (int)sizeof(out->model),
+                                     out->firmware,     (int)sizeof(out->firmware),
+                                     out->serial,       (int)sizeof(out->serial));
 }
 
 int nvr_chan_list(nvr_chan_mgr_t *m, nvr_channel_t *out, int cap)
