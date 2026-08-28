@@ -227,6 +227,19 @@ char *cmd_X_NightOwl_getChannelInfo(cJSON *a, const nvr_cmd_ctx_t *c)
         wifi_fill(c->cm, ch1 - 1, net, (int)sizeof(net), &signal);
         if (!net[0]) snprintf(net, sizeof(net), "WiFi Network");
     }
+    /* ★ 每次**实时**向设备取型号/序列号/固件版本(相机升级成功与否靠此真取判定,故不缓存)。取到覆盖
+     * ch 里旧值;取不到(离线/超时)回退 ch 已存值。NOP→getDeviceInfo / ONVIF→GetDeviceInformation(直连
+     * 已存 service_url,不广播)。含网络往返 → 本命令走 hold=0(router)不阻塞其它 8089 命令。 */
+    char manu[64] = "";
+    {
+        nvr_chan_devinfo_t di;
+        if (c->cm && nvr_chan_query_device_info(c->cm, ch1 - 1, &di) == 0) {
+            if (di.firmware[0]) snprintf(ch.firmware, sizeof(ch.firmware), "%s", di.firmware);
+            if (di.serial[0])   snprintf(ch.serial,   sizeof(ch.serial),   "%s", di.serial);
+            if (di.model[0])    snprintf(ch.model,    sizeof(ch.model),    "%s", di.model);
+            if (di.manufacturer[0]) snprintf(manu, sizeof(manu), "%s", di.manufacturer);
+        }
+    }
     if (ch.model[0] && (strncmp(ch.model, "DB-", 3) == 0 || strstr(ch.model, "doorbell") ||
                         strstr(ch.model, "Doorbell")))
         dtype = "doorbell";
@@ -238,9 +251,10 @@ char *cmd_X_NightOwl_getChannelInfo(cJSON *a, const nvr_cmd_ctx_t *c)
         cJSON_AddStringToObject(o, "model", ch.model[0] ? ch.model : "");
         cJSON_AddStringToObject(o, "mac", ch.mac[0] ? ch.mac : "");
         cJSON_AddStringToObject(o, "manufacturer",
-                                (ch.mac[0] && (strncmp(ch.mac, "54:2b:57", 8) == 0 ||
-                                               strncmp(ch.mac, "54:2B:57", 8) == 0))
-                                ? "NightOwl" : "");
+                                manu[0] ? manu :
+                                ((ch.mac[0] && (strncmp(ch.mac, "54:2b:57", 8) == 0 ||
+                                                strncmp(ch.mac, "54:2B:57", 8) == 0))
+                                 ? "NightOwl" : ""));
         cJSON_AddStringToObject(o, "type", dtype);
         /* W5: 只暴露 IPv4;含 ':' 的 IPv6 链路本地(fe80::)等非法/不可路由地址一律返回空,
          * 绝不把脏地址透给 GUI(W3/W7 已从源头拦截,这里再兜一层)。 */

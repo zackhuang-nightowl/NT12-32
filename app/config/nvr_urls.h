@@ -86,7 +86,7 @@
 /* OTA 查询前缀：GET <base>/<env>/<product>/<model> */
 #define NVR_URL_OTA_PATH           "/ota/GET/i"
 #define NVR_URL_OTA_BASE           "https://" NVR_URL_OTA_DOMAIN NVR_URL_OTA_PATH
-#define NVR_URL_OTA_NVR_PRODUCT    "videoRecorder"
+#define NVR_URL_OTA_NVR_PRODUCT    "networkVideoRecorder"   /* NVR OTA 查询设备类型(非 videoRecorder) */
 #define NVR_URL_OTA_CAM_PRODUCT    "standaloneIpCamera"
 
 /* VSaaS 路径模板（host = NVR_URL_VSAAS_HOST） */
