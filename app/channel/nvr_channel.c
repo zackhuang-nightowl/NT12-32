@@ -738,6 +738,8 @@ static void persist_camera_write(nvr_settings_t *settings, const nvr_channel_t *
     snprintf(r.model, sizeof(r.model), "%s", d->model);   /* 型号(hardware) 持久化,重启后清单可回显 */
     snprintf(r.firmware, sizeof(r.firmware), "%s", d->firmware);
     snprintf(r.url, sizeof(r.url), "%s", d->url);
+    snprintf(r.url_main, sizeof(r.url_main), "%s", d->url_main);   /* 解析后主/子流地址落库(同设备直连) */
+    snprintf(r.url_sub,  sizeof(r.url_sub),  "%s", d->url_sub);
     r.onvif_auto = d->onvif_auto; r.poe_port = d->poe_port;
     r.codec = d->codec; r.stream = d->stream; r.record = d->record;
     snprintf(r.name, sizeof(r.name), "%s", d->name);
@@ -1291,9 +1293,11 @@ static int resolve_stream_url(nvr_chan_mgr_t *m, slot_t *s, int stream)
             }
         }
         snprintf(s->url_sub, sizeof(s->url_sub), "%s", url);
+        snprintf(s->d.url_sub, sizeof(s->d.url_sub), "%s", url);   /* 持久化子流地址(同设备直连) */
         if (!s->d.url[0]) snprintf(s->d.url, sizeof(s->d.url), "%s", url);   /* 已解析标记(兼容) */
     } else {
         snprintf(s->url_main, sizeof(s->url_main), "%s", url);
+        snprintf(s->d.url_main, sizeof(s->d.url_main), "%s", url); /* 持久化主流地址(同设备直连) */
     }
     if (adopt_mac(&s->d, amac, nmac)) {
         NVR_LOGI("chan", "ch%d mac=%s (%s) 入库供找回", s->d.chn, s->d.mac,
@@ -1341,7 +1345,9 @@ static void *resolve_worker(void *arg)
                 }
                 chan_notify(m, chn);
             } else {
-                int back = 30 * s->url_tries;
+                /* 软退避:前 3 次快速重试(5s)——刚上电相机 ONVIF/media 服务几十秒内起稳,快重试能秒级
+                 * 抓住,不必等 30s;之后才拉长(30s×次)避免对真没相机的口空转。 */
+                int back = (s->url_tries <= 3) ? 5 : 30 * s->url_tries;
                 s->url_next = now + back;
                 if (s->url_tries >= NVR_URL_MAX_TRIES) {
                     chan_notify(m, chn);

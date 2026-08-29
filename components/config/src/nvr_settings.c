@@ -80,6 +80,7 @@ static const char *DDL =
     "  ip TEXT, mac TEXT, username TEXT, password TEXT,"
     "  onvif_port INTEGER, nop_port INTEGER, service_url TEXT,"
     "  url TEXT, onvif_auto INTEGER, poe_port INTEGER,"
+    "  url_main TEXT, url_sub TEXT,"        /* 解析后的主/子 RTSP 流地址(同设备重连直连出图,免ONVIF) */
     "  codec INTEGER, stream INTEGER, record INTEGER,"
     "  uuid TEXT, serial TEXT, manufacturer TEXT, model TEXT, firmware TEXT,"
     "  bound INTEGER, active INTEGER, video_source_token TEXT, enh_random TEXT,"
@@ -317,7 +318,7 @@ static void seed_from_json(nvr_settings_t *s, const char *dir)
  * (DDL 已按当前结构建好)重复跑迁移也安全。 */
 /* 当前结构版本 = 2(camera 取代 channel、网络服务表取代 netif、录像/推送/云存排程规范化;见文件头)。
  * 这是已发布基线,无 v1→v2 迁移(v1 未出厂)。以后改结构 → 版本 +1 + 在 migrate_settings 加 ALTER。 */
-#define NVR_SETTINGS_SCHEMA_VERSION 9
+#define NVR_SETTINGS_SCHEMA_VERSION 10
 
 /* 通道 PK 表出厂默认:开库 / 恢复出厂都 INSERT OR IGNORE 补齐 0..31,绝不覆盖用户已改。
  * 之后接口只 UPDATE 已有行。schedule 是 (chn,domain,sensor,rule_id) 复合键,事件排程按
@@ -430,6 +431,12 @@ static void migrate_settings(sqlite3 *db, int from)
         sqlite3_exec(db,
             "UPDATE cloud_channel SET stream_type='sub' WHERE stream_type='main' AND enable=0;",
             0, 0, 0);
+    }
+    /* v10:camera 增列 url_main/url_sub —— 持久化 ONVIF 解析后的主/子流地址。
+     * 同设备(MAC 一致)重连时直接用 DB 流地址拉流出图,免每次 ONVIF 解析(发现/连接慢的根治)。 */
+    if (from < 10) {
+        sqlite3_exec(db, "ALTER TABLE camera ADD COLUMN url_main TEXT;", 0, 0, 0);
+        sqlite3_exec(db, "ALTER TABLE camera ADD COLUMN url_sub TEXT;", 0, 0, 0);
     }
 }
 
@@ -644,7 +651,7 @@ int nvr_settings_camera_upsert(nvr_settings_t *s, const nvr_camera_row_t *r)
     if (sqlite3_prepare_v2(s->db,
         "UPDATE camera SET name=?,enabled=?,source=?,protocol=?,kind=?,backend=?,type=?,"
         "dev_chn=?,ip=?,mac=?,username=?,password=?,onvif_port=?,nop_port=?,service_url=?,"
-        "url=?,onvif_auto=?,poe_port=?,codec=?,stream=?,record=?,uuid=?,serial=?,"
+        "url=?,url_main=?,url_sub=?,onvif_auto=?,poe_port=?,codec=?,stream=?,record=?,uuid=?,serial=?,"
         "manufacturer=?,model=?,firmware=?,bound=?,active=?,video_source_token=?,"
         "enh_random=?,updated=strftime('%s','now') WHERE chn=?;",
         -1, &st, NULL) != SQLITE_OK) return -1;
@@ -665,6 +672,8 @@ int nvr_settings_camera_upsert(nvr_settings_t *s, const nvr_camera_row_t *r)
     sqlite3_bind_int (st, c++, r->nop_port);
     bind_txt(st, c++, r->service_url);
     bind_txt(st, c++, r->url);
+    bind_txt(st, c++, r->url_main);
+    bind_txt(st, c++, r->url_sub);
     sqlite3_bind_int (st, c++, r->onvif_auto);
     sqlite3_bind_int (st, c++, r->poe_port);
     sqlite3_bind_int (st, c++, r->codec);
@@ -685,7 +694,7 @@ int nvr_settings_camera_upsert(nvr_settings_t *s, const nvr_camera_row_t *r)
 }
 static const char *CAMERA_COLS =
     "chn,name,enabled,source,protocol,kind,backend,type,dev_chn,ip,mac,username,password,"
-    "onvif_port,nop_port,service_url,url,onvif_auto,poe_port,codec,stream,record,"
+    "onvif_port,nop_port,service_url,url,url_main,url_sub,onvif_auto,poe_port,codec,stream,record,"
     "uuid,serial,manufacturer,model,firmware,bound,active,video_source_token,enh_random";
 static void camera_row_from_stmt(sqlite3_stmt *st, nvr_camera_row_t *r)
 {
@@ -707,6 +716,8 @@ static void camera_row_from_stmt(sqlite3_stmt *st, nvr_camera_row_t *r)
     r->nop_port = sqlite3_column_int(st, c++);
     col_txt(st, c++, r->service_url, sizeof(r->service_url));
     col_txt(st, c++, r->url, sizeof(r->url));
+    col_txt(st, c++, r->url_main, sizeof(r->url_main));
+    col_txt(st, c++, r->url_sub, sizeof(r->url_sub));
     r->onvif_auto = sqlite3_column_int(st, c++);
     r->poe_port = sqlite3_column_int(st, c++);
     r->codec = sqlite3_column_int(st, c++);

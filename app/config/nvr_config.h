@@ -40,6 +40,8 @@ typedef struct {
     char firmware[64];     /* 相机固件版本（getDeviceInfo / GetDeviceInformation，持久化） */
     char serial[64];       /* 设备 SN：scopes /serial/ 或 /sn/（nopOnvif 激活用） */
     char service_url[128]; /* 发现得到的 device_service 路径 */
+    char url_main[256];    /* 解析后的主流 RTSP(持久化;同设备重连直连出图,免 ONVIF) */
+    char url_sub[256];     /* 解析后的子流 RTSP(同上) */
     /* --- 多视频源(Multi-VideoSource):一物理设备 N 源各占一 channel,按 videoSourceToken 区分 --- */
     char video_source_token[100]; /* 该 channel 绑定的 ONVIF VideoSourceToken(空=单源/NOP,零回归) */
     int  dev_chn;                 /* 源序号(设备侧 channel;单源=1;透传改写目标) */

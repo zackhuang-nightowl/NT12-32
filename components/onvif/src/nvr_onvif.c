@@ -164,6 +164,8 @@ int nvr_onvif_connect(const char *ip, int port, const char *service_url,
     nop_onvif_device_t *dev = nop_onvif_device_retain(ip, p,
                                                       path[0] ? path : "/onvif/device_service", 0);
     if (!dev) return -1;
+    /* 握手 SOAP 超时 3s→6s:刚上电的相机 ONVIF/media 服务响应慢一拍时不被 3s 误判 FAIL(ch3 慢根因)。 */
+    nop_onvif_device_set_timeout(dev, 6000);
     if (nop_onvif_device_connected(dev)) {
         nop_onvif_device_set_auth(dev, user, pass);   /* 空密 = 关 digest */
         nop_onvif_device_drop(ip, p);   /* 已有连接持有者，撤掉这次多余 retain */

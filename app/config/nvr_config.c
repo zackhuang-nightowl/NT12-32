@@ -350,6 +350,8 @@ int nvr_config_overlay_from_settings(nvr_config_t *cfg, nvr_settings_t *settings
         if (r->onvif_port)  e->onvif_port = r->onvif_port;
         if (r->serial[0])   snprintf(e->serial, sizeof(e->serial), "%s", r->serial);
         if (r->service_url[0]) snprintf(e->service_url, sizeof(e->service_url), "%s", r->service_url);
+        if (r->url_main[0]) snprintf(e->url_main, sizeof(e->url_main), "%s", r->url_main);  /* 解析后主流:同设备直连 */
+        if (r->url_sub[0])  snprintf(e->url_sub,  sizeof(e->url_sub),  "%s", r->url_sub);
         e->onvif_auto = r->onvif_auto;
         e->poe_port   = r->poe_port;
         e->codec      = r->codec;

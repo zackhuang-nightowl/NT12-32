@@ -66,6 +66,8 @@ typedef struct {
     int  onvif_port, nop_port;
     char service_url[128];        /* device_service XAddr */
     char url[256];                /* 显式 RTSP(可空,ONVIF 解析优先) */
+    char url_main[256];           /* 解析后的主流 RTSP(同设备重连直连出图,免 ONVIF) */
+    char url_sub[256];            /* 解析后的子流 RTSP(同上) */
     int  onvif_auto;
     int  poe_port;                /* >0=PoE 物理口;0=LAN */
     int  codec, stream, record;
