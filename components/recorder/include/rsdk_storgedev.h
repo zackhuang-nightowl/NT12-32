@@ -80,6 +80,8 @@ RSDK_API rsdk_err_t rsdk_dev_rekey(rsdk_dev_t *d);
 
 /* 内部句柄访问(供 rec/index/play 复用) */
 RSDK_API rsdk_rawdev_t     *rsdk_dev_raw(rsdk_dev_t *d);
+/* O_DIRECT 数据句柄:可用返回它,否则 NULL(供 writer 判定走 O_DIRECT 聚合刷盘还是回退缓冲)。 */
+RSDK_API rsdk_rawdev_t     *rsdk_dev_raw_dio(rsdk_dev_t *d);
 RSDK_API rsdk_superblock_t *rsdk_dev_sb (rsdk_dev_t *d);
 RSDK_API rsdk_systab_t     *rsdk_dev_systab(rsdk_dev_t *d);
 RSDK_API uint8_t           *rsdk_dev_evtidx_cache(rsdk_dev_t *d);  /* 事件区内存镜像(NULL=直读盘) */

@@ -1,14 +1,21 @@
 /* Copyright (C) 2025-2026, Nightowl DG. RSDK 录像写入(设计 §3/§7).
  * 约定: 一个 RecSegment 落在单个 chunk 内; 帧不够放则闭合当前段、开新段(新chunk),
- *       从而回放只需在一个 chunk 内顺序走帧, 无需 chunk 链。 */
+ *       从而回放只需在一个 chunk 内顺序走帧, 无需 chunk 链。
+ *
+ * ★ O_DIRECT 聚合写(写库重构): dio 句柄可用时, 帧不再逐帧碎 pwrite, 而是组进每路对齐聚合 buffer,
+ *   攒满(RSDK_REC_STAGE_BYTES)或超时(RSDK_REC_FLUSH_MS)才按设备 logical_block 大块顺序刷盘 →
+ *   绕过 page cache 脏页 + 消除每秒数十次 fsync 的寻道风暴。dio 不可用 → 原样回退逐帧缓冲 pwrite。 */
+#define _GNU_SOURCE
 #include "rsdk_rec.h"
 #include "rsdk_balance.h"
 #include "rsdk_index.h"
 #include "rsdk_evtidx.h"
 #include "rsdk_crypto.h"
+#include "rsdk_feature.h"
 #include "rsdk_util.h"
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 struct rsdk_writer {
     rsdk_dev_t *d; rsdk_group_t *group; int chn, rectype;
@@ -23,10 +30,86 @@ struct rsdk_writer {
     uint8_t *pbuf; size_t pcap;
     rsdk_kf_entry_t *kf; uint32_t kf_count, kf_cap;  /* 本段关键帧表(段闭合写入 chunk) */
     rsdk_reclaim_cb reclaim; void *reclaim_user;
+    /* --- O_DIRECT 聚合写状态(dio!=NULL 时启用; start_seg 按当前盘刷新) --- */
+    rsdk_rawdev_t *dio;          /* 当前段所在盘的 O_DIRECT 句柄; NULL=回退逐帧缓冲 pwrite */
+    uint32_t  dio_align;         /* 设备逻辑块对齐(动态, BLKSSZGET) */
+    uint8_t  *stg; uint32_t stg_cap;  /* posix_memalign 到 dio_align 的聚合缓冲 + 容量(align 整数倍) */
+    uint32_t  stg_align;         /* stg 实际按此对齐分配(多盘 align 不同时据此重分配) */
+    uint32_t  stg_len;           /* 已组帧未刷字节: stg[0..stg_len) ↔ 盘上 [stg_off, stg_off+stg_len) */
+    uint64_t  stg_off;           /* stg[0] 对应盘上绝对偏移(align 对齐, = base_off + 已刷字节) */
+    int       stg_dirty;         /* 自上次刷盘后有无新组帧(空闲流免重复补写尾扇区) */
+    uint64_t  last_flush_ms;     /* 上次刷盘单调毫秒(供 RSDK_REC_FLUSH_MS 超时判定) */
 };
 
 void rsdk_rec_set_reclaim(rsdk_writer_t *w, rsdk_reclaim_cb cb, void *user) {
     if (w) { w->reclaim = cb; w->reclaim_user = user; }
+}
+
+/* ================= O_DIRECT 聚合写 ================= */
+static rsdk_err_t start_seg(rsdk_writer_t *w);   /* 前置声明:坏块换段用 */
+
+static uint64_t mono_ms(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
+}
+
+/* 聚合刷盘遇坏扇区: 标坏当前 chunk + 作废本段(清悬空 OPEN 槽) + 丢聚合 buffer + 换新好 chunk 续录。
+ * 录像不中断(丢失≤本段, 上层从下个 IDR 无缝续)。返回 start_seg 结果(盘满→NOSPACE)。 */
+static rsdk_err_t stage_on_write_fail(rsdk_writer_t *w) {
+    rsdk_dev_mark_bad_chunk(w->d, w->chunk);
+    rsdk_index_invalidate_chunk(w->d, w->chunk);
+    w->stg_len = 0; w->stg_dirty = 0; w->frame_count = 0;
+    return start_seg(w);   /* 内部按当前盘刷新 dio/stg_off, frame_count 归零 */
+}
+
+/* 刷聚合 buffer 到裸盘。final=0: 只刷 dio_align 对齐前缀(尾<align 留 buffer 待续写);
+ * final=1: 前缀 + 尾部补齐 align 一并写(段闭合/超时, 保证已组帧落盘), 不推进 stg_off(下帧续写重写该扇区)。
+ * 坏块→stage_on_write_fail(已换段, frame_count 归零), 返回其错误码。 */
+static rsdk_err_t stage_flush(rsdk_writer_t *w, int final) {
+    if (!w->dio || w->stg_len == 0) { w->stg_dirty = 0; return RSDK_OK; }
+    uint32_t align = w->dio_align;
+    uint32_t n = w->stg_len - (w->stg_len % align);            /* 对齐前缀字节 */
+    if (n > 0) {
+        if (rsdk_rawdev_pwrite(w->dio, w->stg_off, w->stg, n)) return stage_on_write_fail(w);
+        if (w->stg_len > n) memmove(w->stg, w->stg + n, w->stg_len - n);
+        w->stg_off += n; w->stg_len -= n;
+    }
+    if (final && w->stg_len > 0) {                             /* 尾部<align: 补齐扇区写(不推进) */
+        memset(w->stg + w->stg_len, 0, align - w->stg_len);
+        if (rsdk_rawdev_pwrite(w->dio, w->stg_off, w->stg, align)) return stage_on_write_fail(w);
+    }
+    w->stg_dirty = 0; w->last_flush_ms = mono_ms();
+    return RSDK_OK;
+}
+
+/* 组一条 chunk 内记录([64B hdr][payload][pad→need])落 base_off+cur_off。调用方保证 cur_off+need≤chunk。
+ * dio 路径: 组入聚合 buffer(满则先刷/超大帧扩容); 缓冲路径: 原两段 pwrite 到 d->raw。
+ * dio 刷盘遇坏块→内部换段并返回 RSDK_E_IO(当前记录丢, 由调用方据 frame_count 归零感知)。 */
+static rsdk_err_t chunk_put(rsdk_writer_t *w, const rsdk_frame_hdr_t *h,
+                            const void *payload, uint32_t pl_len, uint32_t need) {
+    if (!w->dio) {                                            /* 缓冲回退: 老两段 pwrite */
+        uint64_t off = w->base_off + w->cur_off;
+        rsdk_err_t wr = rsdk_rawdev_pwrite(rsdk_dev_raw(w->d), off, h, 64);
+        if (!wr && pl_len) wr = rsdk_rawdev_pwrite(rsdk_dev_raw(w->d), off + 64, payload, pl_len);
+        return wr;
+    }
+    if (w->stg_len + need > w->stg_cap) {                     /* 放不下: 先刷对齐前缀 */
+        rsdk_err_t rc = stage_flush(w, 0);
+        if (rc) return rc;                                    /* 坏块已换段 → 当前记录丢 */
+        if (w->stg_len + need > w->stg_cap) {                 /* 仍放不下(超大帧): 保留尾扩容对齐分配 */
+            uint32_t ncap = (uint32_t)rsdk_align_up((uint64_t)w->stg_len + need + w->dio_align, w->dio_align);
+            uint8_t *nb = NULL;
+            if (posix_memalign((void **)&nb, w->dio_align, ncap) != 0 || !nb) return RSDK_E_IO;
+            if (w->stg_len) memcpy(nb, w->stg, w->stg_len);
+            free(w->stg); w->stg = nb; w->stg_cap = ncap; w->stg_align = w->dio_align;
+        }
+    }
+    uint8_t *p = w->stg + w->stg_len;
+    memcpy(p, h, 64);
+    if (pl_len) memcpy(p + 64, payload, pl_len);
+    if (need > 64u + pl_len) memset(p + 64 + pl_len, 0, need - 64 - pl_len);   /* 对齐填充清零 */
+    w->stg_len += need; w->stg_dirty = 1;
+    return RSDK_OK;
 }
 
 /* 记录一个 IDR 的 (墙钟, chunk内偏移) 到本段关键帧表(供段闭合时落 RK_KEYIDX)。 */
@@ -58,10 +141,9 @@ static void flush_keyframes(rsdk_writer_t *w) {
     h.payload_len = pl; h.seg_id = w->seg_id; h.frame_seq = w->frame_seq;
     h.wall_time = w->last_time; h.enc = 0; h.payload_crc32 = 0;
     h.hdr_crc32 = 0; h.hdr_crc32 = rsdk_crc32(&h, sizeof h);
-    uint64_t off = w->base_off + w->cur_off;
-    if (rsdk_rawdev_pwrite(rsdk_dev_raw(w->d), off, &h, sizeof h) == RSDK_OK)
-        rsdk_rawdev_pwrite(rsdk_dev_raw(w->d), off + 64, w->kf, pl);
-    w->cur_off += need;
+    /* dio: 组入聚合 buffer; 缓冲: 两段 pwrite。坏块→chunk_put 内部换段(frame_count=0), 本表随之作废。 */
+    if (chunk_put(w, &h, w->kf, pl, need) == RSDK_OK)
+        w->cur_off += need;                    /* 成功才推进; 坏块换段后 cur_off 已被 start_seg 复位 */
     w->kf_count = 0;
 }
 
@@ -105,6 +187,20 @@ static rsdk_err_t start_seg(rsdk_writer_t *w) {
     w->frame_seq = 0; w->frame_count = 0; w->total_bytes = 0;
     w->start_time = 0; w->last_time = 0; w->end_off = 0; w->open_written = 0;
     w->kf_count = 0;   /* 新段:清关键帧表 */
+    /* O_DIRECT 聚合: 按当前段所在盘刷新句柄/对齐, 复位聚合到段起点(base_off 已扇区对齐, open 已校验)。
+     * 多盘每段可能换盘 → align 可能变 → 按需重分配对齐 buffer; 分配失败则该段回退缓冲写。 */
+    w->dio = rsdk_dev_raw_dio(w->d);
+    w->dio_align = w->dio ? rsdk_rawdev_dio_align(w->dio) : 0;
+    if (w->dio) {
+        uint32_t want = (uint32_t)rsdk_align_up(RSDK_REC_STAGE_BYTES, w->dio_align);
+        if (!w->stg || w->stg_align != w->dio_align || w->stg_cap < want) {
+            uint8_t *nb = NULL;
+            if (posix_memalign((void **)&nb, w->dio_align, want) == 0 && nb) {
+                free(w->stg); w->stg = nb; w->stg_cap = want; w->stg_align = w->dio_align;
+            } else { w->dio = NULL; }           /* 对齐分配失败 → 回退缓冲 */
+        }
+    }
+    w->stg_len = 0; w->stg_dirty = 0; w->stg_off = w->base_off; w->last_flush_ms = mono_ms();
     wunlock(w);
     return RSDK_OK;
 }
@@ -126,7 +222,12 @@ static void fill_slot(rsdk_writer_t *w, rsdk_index_slot_t *s, int closed) {
 
 static rsdk_err_t finalize_seg(rsdk_writer_t *w) {
     if (w->frame_count == 0) return RSDK_OK;
-    flush_keyframes(w);   /* 段闭合:先落关键帧表到本 chunk(写自身 chunk 数据区,无需元数据锁) */
+    flush_keyframes(w);   /* 段闭合:先落关键帧表到本 chunk(dio 经聚合;坏块可能换段→frame_count=0) */
+    if (w->dio && w->frame_count > 0) {
+        rsdk_err_t fr = stage_flush(w, 1);   /* 段闭合:聚合全刷(含补齐尾)→ 所有帧落盘, 再封 VALID */
+        if (fr) return fr;                    /* 坏块已换段作废本段 */
+    }
+    if (w->frame_count == 0) return RSDK_OK;  /* 坏块换段: 本段已作废, 不写 VALID 槽 */
     /* 段封口: 写 VALID 槽 + 报告带宽, 与并发 index_write/balance 串行(递归锁内嵌各原语自锁)。 */
     wlock(w);
     rsdk_index_slot_t s; fill_slot(w, &s, 1);
@@ -191,51 +292,67 @@ rsdk_err_t rsdk_rec_write_frame(rsdk_writer_t *w, const rsdk_frame_t *f) {
         rsdk_err_t rc = finalize_seg(w); if (rc) return rc;
         rc = start_seg(w); if (rc) return rc;
     }
-    /* 组帧 + 写盘: 容忍坏块——同位置重试1次→标坏 chunk→关好前缀→换 chunk 续写本帧 */
-    uint64_t bad_cap = rsdk_dev_sb(w->d)->chunk_count;   /* 全坏兜底上限 */
-    for (uint64_t bad_try = 0; ; bad_try++) {
-        if (w->frame_count == 0) {                       /* 段首: start_time + OPEN 槽 */
-            w->start_time = (uint32_t)f->wall_time;
-            rsdk_index_slot_t s; fill_slot(w, &s, 0);
-            rsdk_index_write(w->d, &s);
-            w->open_written = 1;
+    /* ---- 组帧头 + 加密载荷(入 w->pbuf), dio/缓冲两路共用 ---- */
+    if (w->frame_count == 0) {                       /* 段首: start_time + OPEN 槽 */
+        w->start_time = (uint32_t)f->wall_time;
+        rsdk_index_slot_t s; fill_slot(w, &s, 0);
+        rsdk_index_write(w->d, &s);
+        w->open_written = 1;
+    }
+    rsdk_frame_hdr_t h; memset(&h, 0, sizeof h);
+    memcpy(h.magic, RSDK_FRAME_MAGIC, 8);
+    h.chn = f->chn; h.stream = f->stream; h.codec = f->codec; h.frame_type = f->frame_type;
+    h.rec_kind = RSDK_RK_FRAME;                 /* 自描述:帧 */
+    h.rectype  = (uint8_t)w->rectype;           /* 所属段类型(0 连续/事件类型) */
+    h.event_id = w->cur_event_id;               /* 事件标签(连续轨命中/事件段;0=无) */
+    h.payload_len = f->len; h.seg_id = w->seg_id; h.frame_seq = w->frame_seq;
+    h.pts = f->pts; h.wall_time = f->wall_time;
+    for (int i = 0; i < 4; i++) h.iv_nonce[i] = (uint8_t)(w->frame_seq >> (i * 8));
+    h.payload_crc32 = rsdk_crc32(f->data, f->len);   /* v2: 明文载荷 CRC(掉电/坏块撕裂可检出) */
+    struct rsdk_crypto *cr = rsdk_dev_crypto(w->d);
+    if (f->len > w->pcap) { w->pbuf = realloc(w->pbuf, f->len); w->pcap = f->len; if (!w->pbuf) return RSDK_E_IO; }
+    memcpy(w->pbuf, f->data, f->len);
+    if (cr) { h.enc = 1; rsdk_crypto_xcrypt(cr, w->seg_id, w->frame_seq, 0, w->pbuf, f->len); }
+    else    { h.enc = 0; }
+    h.hdr_crc32 = 0; h.hdr_crc32 = rsdk_crc32(&h, sizeof h);
+
+    if (w->dio) {
+        /* O_DIRECT 聚合路径: 组帧一次入聚合 buffer(攒满自动大块刷)。刷盘遇坏块 → chunk_put 内部
+         * 标坏+换段(frame_count 归零), 返回 IO → 本帧丢, 下帧从新段续录(≤本段丢失, 罕见)。 */
+        rsdk_err_t rc = chunk_put(w, &h, w->pbuf, f->len, need);
+        if (rc) return rc;
+    } else {
+        /* 缓冲路径: 逐帧写 + 同位置重试1次 → 标坏 chunk → 关好前缀 → 换 chunk 重写本帧。
+         * 换段后 seg_id 变 → 重建帧头(故此重试逻辑必须含头组装)。 */
+        uint64_t bad_cap = rsdk_dev_sb(w->d)->chunk_count;   /* 全坏兜底上限 */
+        for (uint64_t bad_try = 0; ; bad_try++) {
+            uint64_t off = w->base_off + w->cur_off;
+            rsdk_err_t wr = rsdk_rawdev_pwrite(rsdk_dev_raw(w->d), off, &h, sizeof h);
+            if (!wr) wr = rsdk_rawdev_pwrite(rsdk_dev_raw(w->d), off + 64, w->pbuf, f->len);
+            if (!wr) break;                                  /* 写成功 */
+            wr = rsdk_rawdev_pwrite(rsdk_dev_raw(w->d), off, &h, sizeof h);   /* 重试1次 */
+            if (!wr) wr = rsdk_rawdev_pwrite(rsdk_dev_raw(w->d), off + 64, w->pbuf, f->len);
+            if (!wr) break;
+            /* 仍坏 → 标坏 chunk, 关闭本 chunk 上已写好前缀, 换 chunk 重写本帧 */
+            rsdk_dev_mark_bad_chunk(w->d, w->chunk);
+            if (w->frame_count == 0)
+                rsdk_index_invalidate_chunk(w->d, w->chunk); /* 无好帧: 清除悬空 OPEN 槽 */
+            finalize_seg(w);                                 /* frame_count>0→关好前缀; 0→no-op */
+            if (bad_try >= bad_cap) return RSDK_E_IO;        /* 全坏兜底 */
+            rsdk_err_t src = start_seg(w);                   /* 新 chunk(alloc 跳坏) */
+            if (src) return src;                             /* 盘满 */
+            if (w->frame_count == 0) {                       /* 新段:补写 OPEN 槽, 头用新 seg_id 重建 */
+                w->start_time = (uint32_t)f->wall_time;
+                rsdk_index_slot_t s2; fill_slot(w, &s2, 0);
+                rsdk_index_write(w->d, &s2);
+                w->open_written = 1;
+                h.seg_id = w->seg_id; h.frame_seq = w->frame_seq;
+                for (int i = 0; i < 4; i++) h.iv_nonce[i] = (uint8_t)(w->frame_seq >> (i * 8));
+                if (cr) { memcpy(w->pbuf, f->data, f->len);
+                          rsdk_crypto_xcrypt(cr, w->seg_id, w->frame_seq, 0, w->pbuf, f->len); }
+                h.hdr_crc32 = 0; h.hdr_crc32 = rsdk_crc32(&h, sizeof h);
+            }
         }
-        rsdk_frame_hdr_t h; memset(&h, 0, sizeof h);
-        memcpy(h.magic, RSDK_FRAME_MAGIC, 8);
-        h.chn = f->chn; h.stream = f->stream; h.codec = f->codec; h.frame_type = f->frame_type;
-        h.rec_kind = RSDK_RK_FRAME;                 /* 自描述:帧 */
-        h.rectype  = (uint8_t)w->rectype;           /* 所属段类型(0 连续/事件类型) */
-        h.event_id = w->cur_event_id;               /* 事件标签(连续轨命中/事件段;0=无) */
-        h.payload_len = f->len; h.seg_id = w->seg_id; h.frame_seq = w->frame_seq;
-        h.pts = f->pts; h.wall_time = f->wall_time;
-        for (int i = 0; i < 4; i++) h.iv_nonce[i] = (uint8_t)(w->frame_seq >> (i * 8));
-        h.payload_crc32 = rsdk_crc32(f->data, f->len);   /* v2: 明文载荷 CRC(掉电/坏块撕裂可检出) */
-
-        struct rsdk_crypto *cr = rsdk_dev_crypto(w->d);
-        if (f->len > w->pcap) { w->pbuf = realloc(w->pbuf, f->len); w->pcap = f->len; if (!w->pbuf) return RSDK_E_IO; }
-        memcpy(w->pbuf, f->data, f->len);
-        if (cr) { h.enc = 1; rsdk_crypto_xcrypt(cr, w->seg_id, w->frame_seq, 0, w->pbuf, f->len); }
-        else    { h.enc = 0; }
-        h.hdr_crc32 = 0; h.hdr_crc32 = rsdk_crc32(&h, sizeof h);
-
-        uint64_t off = w->base_off + w->cur_off;
-        rsdk_err_t wr = rsdk_rawdev_pwrite(rsdk_dev_raw(w->d), off, &h, sizeof h);
-        if (!wr) wr = rsdk_rawdev_pwrite(rsdk_dev_raw(w->d), off + 64, w->pbuf, f->len);
-        if (!wr) break;                                  /* 写成功 */
-
-        wr = rsdk_rawdev_pwrite(rsdk_dev_raw(w->d), off, &h, sizeof h);   /* 重试1次 */
-        if (!wr) wr = rsdk_rawdev_pwrite(rsdk_dev_raw(w->d), off + 64, w->pbuf, f->len);
-        if (!wr) break;
-
-        /* 仍坏 → 标坏 chunk, 关闭本 chunk 上已写好前缀, 换 chunk 重写本帧 */
-        rsdk_dev_mark_bad_chunk(w->d, w->chunk);
-        if (w->frame_count == 0)
-            rsdk_index_invalidate_chunk(w->d, w->chunk); /* 无好帧: 清除悬空 OPEN 槽 */
-        finalize_seg(w);                                 /* frame_count>0→关好前缀; 0→no-op */
-        if (bad_try >= bad_cap) return RSDK_E_IO;        /* 全坏兜底 */
-        rsdk_err_t src = start_seg(w);                   /* 新 chunk(alloc 跳坏) */
-        if (src) return src;                             /* 盘满 */
-        /* 回到循环顶: frame_count 已在 start_seg 归零 → 写新段 OPEN 槽 + 头 */
     }
 
     w->end_off = w->cur_off;
@@ -266,9 +383,8 @@ static rsdk_err_t write_marker(rsdk_writer_t *w, uint8_t kind, uint8_t rectype,
     h.event_id = event_id; h.payload_len = pl_len; h.seg_id = w->seg_id;
     h.frame_seq = w->frame_seq; h.wall_time = wall_time; h.enc = 0;
     h.hdr_crc32 = 0; h.hdr_crc32 = rsdk_crc32(&h, sizeof h);
-    uint64_t off = w->base_off + w->cur_off;
-    rsdk_err_t wr = rsdk_rawdev_pwrite(rsdk_dev_raw(w->d), off, &h, sizeof h);
-    if (!wr && pl_len) wr = rsdk_rawdev_pwrite(rsdk_dev_raw(w->d), off + 64, pl, pl_len);
+    /* dio: 组入聚合 buffer; 缓冲: 两段 pwrite。坏块→chunk_put 内部换段(本段作废), 标记随之丢弃。 */
+    rsdk_err_t wr = chunk_put(w, &h, pl, pl_len, need);
     if (wr) return wr;
     w->cur_off += need; w->frame_seq++;
     return RSDK_OK;
@@ -340,18 +456,33 @@ uint32_t rsdk_rec_frame_count(rsdk_writer_t *w) { return w ? w->frame_count : 0;
 
 rsdk_err_t rsdk_rec_datasync(rsdk_writer_t *w) {
     if (!w || !w->d) return RSDK_E_PARAM;
-    return rsdk_rawdev_sync(rsdk_dev_raw(w->d));  /* 只 fsync 裸设备, 不动 SB/SysTab */
+    if (w->dio) {
+        stage_flush(w, 1);                        /* 先把聚合尾刷净(数据落盘) */
+        return rsdk_rawdev_datasync(w->dio);      /* fdatasync 数据 fd: 刷控制器 write cache(比 fsync 轻) */
+    }
+    return rsdk_rawdev_sync(rsdk_dev_raw(w->d));   /* 缓冲路径: 原 fsync 裸设备 */
 }
+
+/* 供 worker 每轮调:dio 路径下距上次刷盘 ≥ RSDK_REC_FLUSH_MS 且有新组帧 → 刷(对齐前缀+补尾),
+ * 把掉电丢失窗口压到该值内(高码率流靠攒满自动刷, 此处兜低码率流)。缓冲路径 no-op。 */
+rsdk_err_t rsdk_rec_flush_due(rsdk_writer_t *w, uint64_t now_ms) {
+    if (!w || !w->dio || !w->stg_dirty) return RSDK_OK;
+    if (now_ms - w->last_flush_ms < (uint64_t)RSDK_REC_FLUSH_MS) return RSDK_OK;
+    return stage_flush(w, 1);
+}
+
+/* 该 writer 当前段所在设备去重键:供 worker 每设备只 fdatasync 一次(免 N 路重复刷 write cache)。 */
+const void *rsdk_rec_devkey(rsdk_writer_t *w) { return w ? (const void *)w->d : NULL; }
 
 rsdk_err_t rsdk_rec_close(rsdk_writer_t *w) {
     if (!w) return RSDK_E_PARAM;
-    rsdk_err_t rc = finalize_seg(w);
+    rsdk_err_t rc = finalize_seg(w);              /* dio: 内含 stage_flush(1) 全刷 */
     if (w->group) {                       /* 多盘: 刷新组内所有盘的 SB/SysTab */
         for (int i = 0; i < rsdk_group_count(w->group); i++)
             rsdk_dev_flush(rsdk_group_dev(w->group, i));
     } else {
         rsdk_dev_flush(w->d);
     }
-    free(w->pbuf); free(w->kf); free(w);
+    free(w->stg); free(w->pbuf); free(w->kf); free(w);
     return rc;
 }

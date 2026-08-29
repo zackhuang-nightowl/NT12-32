@@ -37,6 +37,22 @@ extern "C" {
 #  define RSDK_CFG_HDD_FULL 0           /* 0=overwrite 1=stop */
 #endif
 
+/* ===== 录像 O_DIRECT 写库(写库重构): 绕过 page cache, 每路聚合成大块顺序写裸盘 =====
+ * 目标: 单盘稳定扛 64 路(32×主子)+ 事件, 录像不再靠 page cache 堆脏页/每秒数十次 fsync 拖垮整机。
+ * 任一条件不满足(O_DIRECT 后端不支持/盘上布局不满足设备 logical_block 对齐)→ 自动回退旧缓冲写。 */
+#ifndef RSDK_REC_ODIRECT
+#  define RSDK_REC_ODIRECT 1                 /* 1=启用 O_DIRECT 数据句柄; 0=强制回退旧缓冲写 */
+#endif
+#ifndef RSDK_REC_STAGE_BYTES
+#  define RSDK_REC_STAGE_BYTES (512*1024)    /* 每路聚合 buffer 目标大小(实际按 dio_align 取整) */
+#endif
+#ifndef RSDK_REC_FLUSH_MS
+#  define RSDK_REC_FLUSH_MS 1500             /* 聚合未满时强制刷盘时限(ms) → 掉电丢失窗口上界 */
+#endif
+#ifndef RSDK_REC_DATASYNC_SEC
+#  define RSDK_REC_DATASYNC_SEC 2            /* 数据 fd 周期 fdatasync 间隔(秒): 刷盘控制器 write cache */
+#endif
+
 typedef enum {
     RSDK_F_ENCRYPTION = 0, RSDK_F_METADATA, RSDK_F_MULTIDISK_BALANCE,
     RSDK_F_BACKUP_FMP4, RSDK_F__MAX

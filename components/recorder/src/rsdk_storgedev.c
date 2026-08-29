@@ -5,6 +5,7 @@
 #include "rsdk_feature.h"
 #include "rsdk_index.h"        /* rsdk_index_load_map: 开盘建 chunk→slot 加速表 */
 #include "rsdk_util.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
@@ -13,6 +14,8 @@
 
 struct rsdk_dev {
     rsdk_rawdev_t     *raw;
+    rsdk_rawdev_t     *raw_dio;     /* O_DIRECT 数据句柄(只服务 writer 大块刷盘); NULL=不可用→writer 回退缓冲 raw */
+    int                dio_usable;  /* raw_dio 打开成功且盘上数据区/ chunk 满足设备 logical_block 对齐 */
     rsdk_superblock_t  sb;
     rsdk_systab_t      st;
     rsdk_crypto_t     *crypto;      /* NULL=明文 */
@@ -362,6 +365,21 @@ rsdk_err_t rsdk_dev_open(const char *path, rsdk_dev_t **out)
     d->lk = &d->self_lock;
     rsdk_err_t lrc = dev_load_state(d);
     if (lrc) { rsdk_dev_close(d); return lrc; }
+#if RSDK_REC_ODIRECT
+    /* O_DIRECT 数据句柄:只服务 writer 的大块聚合刷盘。开不成(后端不支持 O_DIRECT)或盘上数据区
+     * 基址/chunk 大小不满足设备 logical_block 对齐(如 4Kn 盘但 512 布局)→ 关掉,writer 回退缓冲 raw。
+     * 元数据(SB/index/evtidx)始终走 d->raw 缓冲,不受影响。 */
+    if (rsdk_rawdev_open_ex(path, 1, &d->raw_dio) == RSDK_OK && d->raw_dio) {
+        uint32_t al = rsdk_rawdev_dio_align(d->raw_dio);
+        uint64_t dbase = (uint64_t)d->sb.data_start_sec * RSDK_SEC;
+        if (al >= RSDK_SEC && (dbase % al) == 0 && d->chunk_bytes && (d->chunk_bytes % al) == 0)
+            d->dio_usable = 1;
+        else { rsdk_rawdev_close(d->raw_dio); d->raw_dio = NULL; }   /* 对齐不满足 → 回退 */
+        if (d->dio_usable && getenv("RSDK_DIO_FORCE_FILE"))          /* 主机验证:确认 O_DIRECT 聚合写生效 */
+            fprintf(stderr, "[rsdk] O_DIRECT 聚合写已启用 align=%u chunk=%llu\n",
+                    al, (unsigned long long)d->chunk_bytes);
+    }
+#endif
     *out = d;
     return RSDK_OK;
 }
@@ -418,6 +436,8 @@ rsdk_err_t rsdk_dev_info(rsdk_dev_t *d, rsdk_dev_info_t *info)
 }
 
 rsdk_rawdev_t     *rsdk_dev_raw(rsdk_dev_t *d)    { return d->raw; }
+/* O_DIRECT 数据句柄:可用返回它,否则返回 NULL(writer 据此回退到缓冲 d->raw)。 */
+rsdk_rawdev_t     *rsdk_dev_raw_dio(rsdk_dev_t *d){ return (d && d->dio_usable) ? d->raw_dio : NULL; }
 rsdk_superblock_t *rsdk_dev_sb (rsdk_dev_t *d)    { return &d->sb; }
 rsdk_systab_t     *rsdk_dev_systab(rsdk_dev_t *d) { return &d->st; }
 struct rsdk_crypto *rsdk_dev_crypto(rsdk_dev_t *d){ return d->crypto; }
@@ -529,6 +549,7 @@ void rsdk_dev_close(rsdk_dev_t *d)
 {
     if (!d) return;
     if (d->crypto) rsdk_crypto_close(d->crypto);
+    if (d->raw_dio) rsdk_rawdev_close(d->raw_dio);
     if (d->raw) rsdk_rawdev_close(d->raw);
     pthread_mutex_destroy(&d->self_lock);   /* 共享锁属盘组, 由 group_close 销毁; self_lock 恒可销 */
     free(d->badmap);

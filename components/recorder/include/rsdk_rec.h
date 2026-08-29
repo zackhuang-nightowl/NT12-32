@@ -33,6 +33,11 @@ RSDK_API uint32_t   rsdk_rec_frame_count(rsdk_writer_t *w);
 /* 把本盘缓冲的数据刷到介质(fdatasync 级): 供上层周期调用, 把掉电丢失窗口压到调用间隔内。
  * 不改 SB/SysTab(那是 rsdk_dev_flush 的职责), 只 fsync 裸设备。 */
 RSDK_API rsdk_err_t rsdk_rec_datasync(rsdk_writer_t *w);
+/* O_DIRECT 聚合写:供 worker 每轮调, 距上次刷盘≥RSDK_REC_FLUSH_MS 且有新组帧则刷聚合 buffer,
+ * 把掉电窗口压到该值内(高码率靠攒满自动刷, 此处兜低码率流)。缓冲/无 dio 路径 no-op。 */
+RSDK_API rsdk_err_t rsdk_rec_flush_due(rsdk_writer_t *w, uint64_t now_ms);
+/* 该 writer 当前段所在设备去重键:供 worker 每设备只 fdatasync 一次(去重 N 路重复刷 write cache)。 */
+RSDK_API const void *rsdk_rec_devkey(rsdk_writer_t *w);
 /* 闭合段并写入索引 */
 RSDK_API rsdk_err_t rsdk_rec_close(rsdk_writer_t *w);
 /* 当前段 id / chunk(供元数据/抓拍 seg_ref 绑定) */
