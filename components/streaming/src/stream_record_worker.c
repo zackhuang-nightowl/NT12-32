@@ -4,6 +4,7 @@
 #include "stream_internal.h"
 #include "stream_hub.h"
 #include "nvr_log.h"
+#include "rsdk.h"             /* rsdk_group_count(一盘一写: shard 数 = 盘组盘数) */
 #include "rsdk_feature.h"     /* RSDK_REC_DATASYNC_SEC */
 #include <stdlib.h>
 #include <string.h>
@@ -44,16 +45,39 @@ static void rec_worker_lower_priority(void) {
 #define REC_SEG_MAX_SECONDS     3600           /* 段最长时长(秒)兜底; 正常按 chunk 近满切 */
 #define REC_DATASYNC_SECONDS    1              /* 周期 fdatasync 间隔(秒): 掉电丢失窗口上界 */
 
-static struct {
+/* ★ 一盘一写(per-disk sharding): shard 数 N = 盘组盘数(启动时定, 夹 [1, REC_MAX_SHARDS])。
+ * 通道 chn 静态归属 shard = chn % N —— 与 rsdk_balance 的 home 盘(chn % ndisks)对齐, 故 shard k
+ * 的写基本落物理盘 k, 多盘磁头**并行**吃满写带宽。每个 writer 仍**只被其归属 shard 线程写**, 保持
+ * "单线程写单 writer"不变式(热路径零锁); shard 间各用 g_rec_wmtx[k] 与 close 串行, 互不阻塞。
+ * N==1 时完全退化为原单线程行为(单盘无回归)。
+ *
+ * writer 生命周期锁 g_rec_wmtx[k]:序列化"shard k 用 writer(write_frame/flush_due/事件标记)"与
+ * "另一线程 close 该通道 writer(释放 w + w->stg)"。此前无锁 → close 时 worker 还在 stage_flush 里动
+ * 已释放/被撕裂的 w->stg → 崩(core 实证 rsdk_rec.c stage_flush/fill_slot)。close 侧按通道取同一
+ * shard 锁包住 close+置 NULL。 */
+#define REC_MAX_SHARDS 4
+static int g_nshards = 1;
+static pthread_mutex_t g_rec_wmtx[REC_MAX_SHARDS] = {
+    PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,
+    PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER };
+
+static int shard_of(int chn) { return (chn < 0 ? 0 : chn) % g_nshards; }
+void stream_rec_wlock(int chn)   { pthread_mutex_lock(&g_rec_wmtx[shard_of(chn)]); }
+void stream_rec_wunlock(int chn) { pthread_mutex_unlock(&g_rec_wmtx[shard_of(chn)]); }
+
+typedef struct {
     pthread_t       th;
-    volatile int    running;
-    nvr_stream_mgr_t *mgr;
+    int             k;            /* shard 索引 = 归属物理盘序 */
     pthread_mutex_t wake_mtx;
     pthread_cond_t  wake_cv;
-    volatile int    flush_req;
-    volatile int    flush_done;
-    int             rr;           /* 公平轮询起点 */
-    time_t          last_sync;    /* 上次周期 fsync 的墙钟秒 */
+    int             rr;           /* 本 shard 公平轮询起点 */
+    time_t          last_sync;    /* 本 shard 上次周期 fdatasync 墙钟秒 */
+} rec_shard_t;
+static rec_shard_t g_sh[REC_MAX_SHARDS];
+
+static struct {
+    volatile int     running;
+    nvr_stream_mgr_t *mgr;
 } g_w;
 
 #define STREAM_REC_GAP_TYPE_MASK  0x80000000u
@@ -241,23 +265,24 @@ static int worker_drain_pull(stream_chan_t *c, stream_pull_t *p, int byte_budget
 /* 每轮把到期(≥RSDK_REC_FLUSH_MS)的聚合 buffer 刷盘(压掉电窗口), 并周期按设备去重 fdatasync 刷
  * write cache。O_DIRECT 后:数据靠 flush_due 稳定大块落盘, 不再每秒 38 次全 fsync 的寻道风暴;
  * fdatasync 按设备去重 → 每设备每 RSDK_REC_DATASYNC_SEC 仅一次。缓冲回退路径 rsdk_rec_datasync 仍 fsync。 */
-static void worker_periodic_sync(nvr_stream_mgr_t *m)
+static void worker_periodic_sync(nvr_stream_mgr_t *m, rec_shard_t *sh)
 {
     uint64_t now_ms = rec_mono_ms();
-    /* 1) 每路超时刷聚合(dio 路径; 低码率流的掉电窗口兜底。高码率靠攒满已自动刷) */
+    /* 1) 本 shard 各路超时刷聚合(dio 路径; 低码率流掉电窗口兜底。高码率靠攒满已自动刷) */
     for (int i = 0; i < NVR_MAX_CH; i++) {
-        if (!m->used[i]) continue;
+        if (!m->used[i] || (i % g_nshards) != sh->k) continue;
         stream_chan_t *c = &m->ch[i];
         if (c->writer_main) rsdk_rec_flush_due(c->writer_main, now_ms);
         if (c->writer_sub)  rsdk_rec_flush_due(c->writer_sub, now_ms);
     }
-    /* 2) 周期按设备去重 fdatasync(刷控制器 write cache) */
+    /* 2) 周期按设备去重 fdatasync(刷控制器 write cache)。本 shard 通道基本落本盘 → 天然去重到本盘;
+     *    偶发 home 盘满迁移到他盘时可能与他 shard 各刷一次同盘, 无害(重复 fdatasync)。 */
     time_t now = time(NULL);
-    if (now - g_w.last_sync < RSDK_REC_DATASYNC_SEC) return;
-    g_w.last_sync = now;
+    if (now - sh->last_sync < RSDK_REC_DATASYNC_SEC) return;
+    sh->last_sync = now;
     const void *seen[NVR_MAX_CH * 2]; int ns = 0;
     for (int i = 0; i < NVR_MAX_CH; i++) {
-        if (!m->used[i]) continue;
+        if (!m->used[i] || (i % g_nshards) != sh->k) continue;
         stream_chan_t *c = &m->ch[i];
         rsdk_writer_t *ws[2] = { c->writer_main, c->writer_sub };
         for (int k = 0; k < 2; k++) {
@@ -273,7 +298,7 @@ static void worker_periodic_sync(nvr_stream_mgr_t *m)
     }
 }
 
-static int any_queue_pending(nvr_stream_mgr_t *m)
+static int any_queue_pending(nvr_stream_mgr_t *m)   /* 全局: flush_sync 轮询用 */
 {
     int i;
     if (!m) return 0;
@@ -285,62 +310,68 @@ static int any_queue_pending(nvr_stream_mgr_t *m)
     return 0;
 }
 
-static void worker_round(nvr_stream_mgr_t *m)
+static int shard_queue_pending(nvr_stream_mgr_t *m, int k)   /* 本 shard 归属通道有无待写 */
 {
-    int i, n, did = 0;
+    int i;
+    if (!m) return 0;
+    for (i = 0; i < NVR_MAX_CH; i++) {
+        if (!m->used[i] || (i % g_nshards) != k) continue;
+        if (stream_record_q_count(&m->ch[i].pmain.rec_q) > 0) return 1;
+        if (stream_record_q_count(&m->ch[i].psub.rec_q) > 0) return 1;
+    }
+    return 0;
+}
+
+/* 只处理本 shard 归属通道(chn % N == sh->k) → 每 writer 仅被其归属线程写(单线程写单 writer 不变式)。 */
+static void worker_round(nvr_stream_mgr_t *m, rec_shard_t *sh)
+{
+    int i, n;
     if (!m) return;
     n = NVR_MAX_CH * 2;
     for (i = 0; i < n; i++) {
-        int idx = (g_w.rr + i) % n;
+        int idx = (sh->rr + i) % n;
         int chn = idx / 2;
         int stream = idx % 2;
         stream_chan_t *c;
         stream_pull_t *p;
-        int w;
-        if (!m->used[chn]) continue;
+        if (!m->used[chn] || (chn % g_nshards) != sh->k) continue;
         c = &m->ch[chn];
         p = pull_of(c, stream);
-        w = worker_drain_pull(c, p, REC_WORKER_BYTE_BUDGET);
-        if (w > 0) did = 1;
+        (void)worker_drain_pull(c, p, REC_WORKER_BYTE_BUDGET);
     }
-    g_w.rr = (g_w.rr + 1) % (NVR_MAX_CH * 2);
-    if (!did && g_w.flush_req) {
-        if (!any_queue_pending(m)) {
-            g_w.flush_done = 1;
-            g_w.flush_req = 0;
-            pthread_cond_broadcast(&g_w.wake_cv);
-        }
-    }
+    sh->rr = (sh->rr + 1) % (NVR_MAX_CH * 2);
 }
 
 static void *record_worker_thread(void *arg)
 {
-    (void)arg;
+    rec_shard_t *sh = (rec_shard_t *)arg;
     rec_worker_lower_priority();   /* CPU nice+10 + I/O best-effort 最低: 录像不抢显示/解码/回放 */
-    NVR_LOGI("record", "Record Worker 启动(单线程串行 rsdk 写盘, 低优先级 + O_DIRECT 聚合)");
+    NVR_LOGI("record", "Record Worker[%d/%d] 启动(一盘一写, 低优先级 + O_DIRECT 聚合)", sh->k, g_nshards);
     while (g_w.running) {
-        worker_round(g_w.mgr);
-        worker_periodic_sync(g_w.mgr);   /* 周期 fdatasync: 掉电窗口 ≤ REC_DATASYNC_SECONDS */
+        pthread_mutex_lock(&g_rec_wmtx[sh->k]);   /* ★ 持本 shard 锁: close 该 shard 通道时必等本轮结束 → 防 UAF/撕裂 */
+        worker_round(g_w.mgr, sh);
+        worker_periodic_sync(g_w.mgr, sh);        /* 周期 fdatasync: 掉电窗口 ≤ REC_DATASYNC_SECONDS */
+        pthread_mutex_unlock(&g_rec_wmtx[sh->k]);
         if (!g_w.running) break;
-        if (!any_queue_pending(g_w.mgr) && !g_w.flush_req) {
+        if (!shard_queue_pending(g_w.mgr, sh->k)) {
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
             ts.tv_nsec += (long)REC_WORKER_IDLE_MS * 1000000L;
             if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
-            pthread_mutex_lock(&g_w.wake_mtx);
-            if (g_w.running && !g_w.flush_req && !any_queue_pending(g_w.mgr))
-                pthread_cond_timedwait(&g_w.wake_cv, &g_w.wake_mtx, &ts);
-            pthread_mutex_unlock(&g_w.wake_mtx);
+            pthread_mutex_lock(&sh->wake_mtx);
+            if (g_w.running && !shard_queue_pending(g_w.mgr, sh->k))
+                pthread_cond_timedwait(&sh->wake_cv, &sh->wake_mtx, &ts);
+            pthread_mutex_unlock(&sh->wake_mtx);
         }
     }
-    NVR_LOGI("record", "Record Worker 退出");
+    NVR_LOGI("record", "Record Worker[%d] 退出", sh->k);
     return NULL;
 }
 
 void stream_record_worker_poke(void)
 {
     if (!g_w.running) return;
-    pthread_cond_signal(&g_w.wake_cv);
+    for (int k = 0; k < g_nshards; k++) pthread_cond_signal(&g_sh[k].wake_cv);
 }
 
 int stream_record_worker_start(nvr_stream_mgr_t *mgr)
@@ -349,13 +380,30 @@ int stream_record_worker_start(nvr_stream_mgr_t *mgr)
     if (!mgr) return -1;
     memset(&g_w, 0, sizeof(g_w));
     g_w.mgr = mgr;
-    pthread_mutex_init(&g_w.wake_mtx, NULL);
-    pthread_cond_init(&g_w.wake_cv, NULL);
+    /* shard 数 = 盘组盘数(启动时定)。group 此时已由 storage 装配(见 nvr_app: assemble → stream init)。
+     * 未格式化开机 group=NULL → 单 shard;之后 set_group 补盘不重分片(需重启才多盘并行, 罕见)。 */
+    int nd = mgr->cfg.group ? rsdk_group_count(mgr->cfg.group) : 1;
+    if (nd < 1) nd = 1;
+    if (nd > REC_MAX_SHARDS) nd = REC_MAX_SHARDS;
+    g_nshards = nd;
     g_w.running = 1;
-    if (pthread_create(&g_w.th, NULL, record_worker_thread, NULL) != 0) {
-        g_w.running = 0;
-        return -1;
+    for (int k = 0; k < g_nshards; k++) {
+        memset(&g_sh[k], 0, sizeof g_sh[k]);
+        g_sh[k].k = k;
+        pthread_mutex_init(&g_sh[k].wake_mtx, NULL);
+        pthread_cond_init(&g_sh[k].wake_cv, NULL);
     }
+    for (int k = 0; k < g_nshards; k++) {
+        if (pthread_create(&g_sh[k].th, NULL, record_worker_thread, &g_sh[k]) != 0) {
+            g_w.running = 0;                       /* 起线程失败: 停已起的, 干净退回 */
+            for (int j = 0; j < k; j++) {
+                pthread_cond_signal(&g_sh[j].wake_cv);
+                pthread_join(g_sh[j].th, NULL);
+            }
+            return -1;
+        }
+    }
+    NVR_LOGI("record", "Record Worker: %d shard 启动(一盘一写)", g_nshards);
     return 0;
 }
 
@@ -363,31 +411,32 @@ void stream_record_worker_stop(void)
 {
     if (!g_w.running) return;
     g_w.running = 0;
-    pthread_cond_signal(&g_w.wake_cv);
-    pthread_join(g_w.th, NULL);
-    pthread_mutex_destroy(&g_w.wake_mtx);
-    pthread_cond_destroy(&g_w.wake_cv);
+    for (int k = 0; k < g_nshards; k++) pthread_cond_signal(&g_sh[k].wake_cv);
+    for (int k = 0; k < g_nshards; k++) pthread_join(g_sh[k].th, NULL);
+    for (int k = 0; k < g_nshards; k++) {
+        pthread_mutex_destroy(&g_sh[k].wake_mtx);
+        pthread_cond_destroy(&g_sh[k].wake_cv);
+    }
     g_w.mgr = NULL;
 }
 
+/* ★ 只**请求并等待**各 shard 线程排空各自队列, 绝不在调用者线程上碰 writer(那会与归属 shard 线程
+ * 并发写同一 writer 的 O_DIRECT 聚合状态 → 撕裂 → 堆越界; 历史真机崩因, ASAN 实证 rsdk_rec stage_flush)。
+ * 唤醒所有 shard 立即排空, 本函数只轮询全局队列空/超时。超时后调用方照常 close(close 按通道持对应
+ * shard 的 g_rec_wmtx 与该 shard 线程串行, 安全)。 */
 void stream_record_worker_flush_sync(int timeout_ms)
 {
     int ms = timeout_ms > 0 ? timeout_ms : REC_WORKER_FLUSH_MS;
     if (!g_w.running) return;
     if (!any_queue_pending(g_w.mgr)) return;
-    pthread_mutex_lock(&g_w.wake_mtx);
-    g_w.flush_req = 1;
-    g_w.flush_done = 0;
-    pthread_cond_signal(&g_w.wake_cv);
-    while (g_w.flush_req && ms > 0) {
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_nsec += 100000000L;
-        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
-        pthread_cond_timedwait(&g_w.wake_cv, &g_w.wake_mtx, &ts);
-        ms -= 100;
-        worker_round(g_w.mgr);
+    for (int k = 0; k < g_nshards; k++) {    /* 唤醒各 shard 立即排空各自队列 */
+        pthread_mutex_lock(&g_sh[k].wake_mtx);
+        pthread_cond_signal(&g_sh[k].wake_cv);
+        pthread_mutex_unlock(&g_sh[k].wake_mtx);
     }
-    g_w.flush_req = 0;
-    pthread_mutex_unlock(&g_w.wake_mtx);
+    while (ms > 0 && any_queue_pending(g_w.mgr)) {   /* 只等, 不碰 writer */
+        struct timespec ts = { 0, 20 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+        ms -= 20;
+    }
 }
