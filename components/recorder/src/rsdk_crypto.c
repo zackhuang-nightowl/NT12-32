@@ -26,13 +26,15 @@ static const uint8_t SBOX[256] = {
 static const uint8_t RCON[11] = {0x00,0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1b,0x36};
 
 static uint32_t subword(uint32_t w) {
-    return (SBOX[(w>>24)&0xff]<<24)|(SBOX[(w>>16)&0xff]<<16)|(SBOX[(w>>8)&0xff]<<8)|SBOX[w&0xff];
+    return ((uint32_t)SBOX[(w>>24)&0xff]<<24)|((uint32_t)SBOX[(w>>16)&0xff]<<16)
+         | ((uint32_t)SBOX[(w>>8)&0xff]<<8)|(uint32_t)SBOX[w&0xff];
 }
 
 void rsdk_aes256_key(const uint8_t key[32], uint32_t rk[60]) {
     int Nk = 8, Nr = 14, i;
     for (i = 0; i < Nk; i++)
-        rk[i] = (key[4*i]<<24)|(key[4*i+1]<<16)|(key[4*i+2]<<8)|key[4*i+3];
+        rk[i] = ((uint32_t)key[4*i]<<24)|((uint32_t)key[4*i+1]<<16)
+              | ((uint32_t)key[4*i+2]<<8)|(uint32_t)key[4*i+3];
     for (i = Nk; i < 4*(Nr+1); i++) {
         uint32_t t = rk[i-1];
         if (i % Nk == 0)      t = subword((t<<8)|(t>>24)) ^ ((uint32_t)RCON[i/Nk] << 24);
