@@ -14,6 +14,7 @@
 #include "nvr_storage.h"
 #include "nvr_streaming.h"
 #include "mhal_vout.h"
+#include "mhal_vdec.h"   /* mhal_vdec_prebuild:开机预建全窗 */
 
 #include "nvr_channel.h"
 #include "nvr_preview.h"
@@ -1056,6 +1057,13 @@ int nvr_app_start(const char *config_dir, nvr_app_t **out)
         int ew = disp_w, eh = disp_h;
         mhal_vout_get_resolution(&ew, &eh);          /* 实际生效(可能已降级) */
         if (ew > 0 && eh > 0) { disp_w = ew; disp_h = eh; }
+        /* ★ 开机预建全 32 窗(单张合成图,解码器常驻,全部隐藏)。此后运行期加/删/切设备只逐窗 visible/rect,
+         * 不再整图 stop_list/start_list → "一路问题只影响一路",根治"运行期加设备整屏黑/延时"。
+         * 若返回 -1(proc/vout 池装不下 32 路)→ 自动回退按需模式(见 mhal_vdec_prebuild 内 start_list 失败分支)。 */
+        if (mhal_vdec_prebuild(0) == 0)   /* 0=全部 32 路 */
+            printf("[app] 预建全窗成功(32 路常驻,运行期加设备不重建整屏)\n");
+        else
+            printf("[app] 预建全窗未启用(回退按需模式)\n");
         if (a->settings) {
             char eff[32]; snprintf(eff, sizeof(eff), "%dx%d", disp_w, disp_h);
             nvr_settings_set_str(a->settings, "display.resolution", eff);

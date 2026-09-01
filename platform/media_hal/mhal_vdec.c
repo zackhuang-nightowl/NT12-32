@@ -28,6 +28,7 @@
 #define MHAL_DEC_DFLT_H 1088
 
 void mhal_vdec_teardown(struct mhal_vdec *d);   /* 本文件后面定义(同批 reopen 回收用) */
+static void vdec_budget_free_once(struct mhal_vdec *d);   /* prebuild reuse/hide 提前用,定义在后 */
 
 /* ★ 解码内存池的 DDR 通道:dts(cfg_NVR_16CH)把 DISP_DEC_IN 放 DDR0、DISP_DEC_OUT 与
  * DISP_DEC_OUT_RATIO 放 DDR1(两者在 DDR0 为 0/禁用)。data_pool 的 ddr_id 若不按 dts 实际位置
@@ -67,8 +68,14 @@ static int cfg_dec_path(struct mhal_vdec *d)
 {
     int w = d->w > 0 ? align64(d->w) : align64(MHAL_DEC_DFLT_W);
     int h = d->h > 0 ? align64(d->h) : align64(MHAL_DEC_DFLT_H);
+    /* ★ prebuild:每路 max_mem 至少按预留档 768×576 分配 → ≤预留的实际流(640x360/704x576 等主力)零重配直接喂。
+     * 超预留的流(1280x720/1080x1080/4K 主)由 mhal_vdec_reconfig 先把 d->w/h 设为实际(>预留)再进本函数,
+     * 自然按实际分配(只重配那一路)。 */
+    if (w < MHAL_DEC_RSV_W) w = MHAL_DEC_RSV_W;
+    if (h < MHAL_DEC_RSV_H) h = MHAL_DEC_RSV_H;
     if (w > MHAL_DEC_MAX_W) w = MHAL_DEC_MAX_W;
     if (h > MHAL_DEC_MAX_H) h = MHAL_DEC_MAX_H;
+    d->cfg_w = w; d->cfg_h = h;   /* 记录已分配 max_mem 对齐尺寸(open 判定是否需重配) */
 
     int subyuv = mhal_vdec_need_subyuv(d);
 
@@ -105,6 +112,16 @@ static int cfg_dec_path(struct mhal_vdec *d)
          * 小窗守住池(已验证 24 路稳),不受影响。 */
         dec.max_mem.max_bs_size = 2 * 1024 * 1024;
         dec.max_mem.bs_counts   = 4;
+    } else {
+        /* ★ 普通路(≤1080p,含预留档 768×576 与 1280x720/1080x1080 离群子流):比特流窗口按分辨率给,
+         * bs_counts 压到 3 以守住 **32 路** 的 DIN 池(部署 DISP_DEC_IN=20.3MB)。
+         * 预留档 768×576 → 128KB×3=384KB/路 × 32 = ~12.3MB;离群路自适应重配时按更大档,留有余量。
+         * (AUTO ~50KB 窗口对 704x576/1280x720 的 IDR(实测 64~100KB)会拷不进 DIN → 必须给足) */
+        long px = (long)w * h;
+        dec.max_mem.max_bs_size = (px > 1280L*720) ? (512*1024)
+                                : (px > 768L*576)  ? (320*1024)
+                                :                    (128*1024);
+        dec.max_mem.bs_counts   = 3;
     }
 
     HD_RESULT ret = hd_videodec_set(d->dec_path, HD_VIDEODEC_PARAM_PATH_CONFIG, &dec);
@@ -137,6 +154,122 @@ static void cfg_proc_subyuv_thld(struct mhal_vdec *d)
         NVR_LOGE("vdec", "chn%d 设 videoproc SUB_RATIO_THLD 失败 %d(8K sub-yuv 采用阈值)", d->chn, ret);
 }
 
+/* ★ 开机预建全窗:一次性 open+bind+start N 路 dec/proc/vout 进**同一张**合成图(单 large graph),
+ * 解码器按预留档 768×576 分配 max_mem,全部 visible=0。此后运行期加/删/切设备只逐窗 IN_WIN_ATTR
+ * (visible/rect),永不再整图 stop_list/start_list → "一路问题只影响一路"。见官方 playback_1div_to_4div.c。 */
+int mhal_vdec_prebuild(int n)
+{
+    if (!g_disp.inited) return -1;
+    if (n <= 0 || n > MHAL_MAX_CH) n = MHAL_MAX_CH;
+    mhal_lock();
+    if (g_disp.prebuilt) { mhal_unlock(); return 0; }
+    resolve_dec_ddrid();
+    HD_PATH_ID dec[MHAL_MAX_CH], proc[MHAL_MAX_CH], vout[MHAL_MAX_CH];
+    int m = 0;
+    for (int chn = 0; chn < n; chn++) {
+        struct mhal_vdec *d = calloc(1, sizeof(*d));
+        if (!d) break;
+        HD_RESULT ret; int step = 0;
+        d->chn = chn;
+        d->codec = HD_CODEC_TYPE_H265;   /* 默认 H265;实际流为 H264 → open 时自适应重配该路 */
+        d->w = 0; d->h = 0; d->fps = 30; /* cfg_dec_path 按预留档 768×576 分配 */
+        d->vout_win = -1; d->active = 0; d->budget_released = 1;
+        step=1; if ((ret=hd_videodec_open(HD_VIDEODEC_IN(0,chn), HD_VIDEODEC_OUT(0,chn), &d->dec_path))!=HD_OK) goto pfail;
+        step=2; if ((ret=hd_videoproc_open(HD_VIDEOPROC_IN(chn,0), HD_VIDEOPROC_OUT(chn,0), &d->proc_path))!=HD_OK) goto pfail;
+        step=3; if ((ret=hd_videoout_open(HD_VIDEOOUT_IN(0,chn), HD_VIDEOOUT_OUT(0,0), &d->vout_path))!=HD_OK) goto pfail;
+        step=4; if ((ret=hd_videodec_bind(HD_VIDEODEC_OUT(0,chn), HD_VIDEOPROC_IN(chn,0)))!=HD_OK) goto pfail;
+        step=5; if ((ret=hd_videoproc_bind(HD_VIDEOPROC_OUT(chn,0), HD_VIDEOOUT_IN(0,chn)))!=HD_OK) goto pfail;
+        step=6; if ((ret=cfg_dec_path(d))!=HD_OK) goto pfail;
+        d->opened = 1;
+        g_disp.ch[chn] = d;
+        dec[m]=d->dec_path; proc[m]=d->proc_path; vout[m]=d->vout_path; m++;
+        continue;
+pfail:
+        NVR_LOGE("mhal", "prebuild chn%d fail step%d ret=%d(池不足?)→ 预建到此共 %d 路", chn, step, ret, m);
+        if (d->vout_path) hd_videoout_close(d->vout_path);
+        if (d->proc_path) hd_videoproc_close(d->proc_path);
+        if (d->dec_path)  hd_videodec_close(d->dec_path);
+        free(d);
+        break;
+    }
+    HD_RESULT r = HD_OK;
+    if (m > 0 &&
+        (r=hd_videodec_start_list(dec, m))==HD_OK &&
+        (r=hd_videoproc_start_list(proc, m))==HD_OK &&
+        (r=hd_videoout_start_list(vout, m))==HD_OK) {
+        memcpy(g_disp.started_dec,  dec,  m*sizeof(HD_PATH_ID));
+        memcpy(g_disp.started_proc, proc, m*sizeof(HD_PATH_ID));
+        memcpy(g_disp.started_vout, vout, m*sizeof(HD_PATH_ID));
+        g_disp.started_n = m;
+        g_disp.commit_gen++;
+        for (int chn = 0; chn < n; chn++) {                 /* 全部预建窗初始隐藏 */
+            struct mhal_vdec *d = g_disp.ch[chn];
+            if (!d) continue;
+            HD_VIDEOOUT_WIN_ATTR wa; memset(&wa,0,sizeof(wa)); wa.visible = 0;
+            hd_videoout_set(d->vout_path, HD_VIDEOOUT_PARAM_IN_WIN_ATTR, &wa);
+        }
+        g_disp.prebuilt = 1;
+        NVR_LOGI("mhal", "★ 预建全窗成功:%d 路 dec/proc/vout 常驻(单图);运行期加/删/切只逐窗 visible/rect,不整图重建", m);
+    } else if (m > 0) {
+        NVR_LOGE("mhal", "★ 预建 start_list 失败 %d(%d 路)→ 回退按需模式(未预建)。多半是 proc/vout 池装不下这么多路。", r, m);
+        for (int chn = 0; chn < n; chn++) {                 /* 起图失败:全拆回退到原按需 open 模式 */
+            struct mhal_vdec *d = g_disp.ch[chn];
+            if (!d) continue;
+            mhal_vdec_teardown(d);
+            g_disp.ch[chn] = NULL;
+        }
+        g_disp.started_n = 0;
+    }
+    mhal_vout_clear_black();
+    mhal_unlock();
+    return g_disp.prebuilt ? 0 : -1;
+}
+
+/* ★ prebuild 下的"激活已建窗":不开路径、不整图重建。预算准入挪到此(Σ≤995);实际流 ≤ 已分配 max_mem
+ * → 零重配直接喂;codec 变 或 尺寸超已分配 → 只重配这一路(stop dec→cfg→start dec,proc/vout 不动)。
+ * 最后 apply_window(逐窗 visible/rect)。在 mhal_lock 内调用。 */
+static int mhal_vdec_reuse(int chn, mhal_codec_t codec, int w, int h, int fps,
+                           int win, mhal_vdec_t **out)
+{
+    struct mhal_vdec *d = g_disp.ch[chn];
+    HD_VIDEO_CODEC hc = (codec == MHAL_CODEC_H265) ? HD_CODEC_TYPE_H265 : HD_CODEC_TYPE_H264;
+    int nw = align64(w > 0 ? w : MHAL_DEC_RSV_W);
+    int nh = align64(h > 0 ? h : MHAL_DEC_RSV_H);
+    /* 预算:先释放旧(用旧 d->w/h)、再按新 reserve。超 995 → 拒该路(仅录不显),解码器保持隐藏。 */
+    vdec_budget_free_once(d);
+    if (mhal_budget_try_reserve(nw, nh, fps) != 0) {
+        d->budget_released = 1; d->active = 0;
+        NVR_LOGE("vdec", "chn%d 解码预算超限:需 %.1f/已用 %.1f/%.1f Mpix/s → 仅录不显", chn,
+                 mhal_budget_cost(nw,nh,fps)/1e6, mhal_budget_used()/1e6, mhal_budget_total()/1e6);
+        return MHAL_VDEC_EBUDGET;
+    }
+    d->budget_released = 0;
+    int need = (hc != d->codec) || (nw > d->cfg_w) || (nh > d->cfg_h);
+    d->codec = hc; d->w = nw; d->h = nh; d->fps = fps;
+    if (need) {
+        hd_videodec_stop(d->dec_path);
+        HD_RESULT r = cfg_dec_path(d);           /* 按实际(可能 >预留)重分配 max_mem+比特流窗口 */
+        cfg_proc_subyuv_thld(d);
+        if (r == HD_OK) r = hd_videodec_start(d->dec_path);
+        if (r != HD_OK) {
+            NVR_LOGE("vdec", "chn%d 自适应重配 %dx%d 失败 %d", chn, nw, nh, r);
+            vdec_budget_free_once(d); d->active = 0;
+            return -1;
+        }
+        NVR_LOGI("vdec", "chn%d 自适应重配解码器 → %dx%d(超预留,只重建该路,不碰别路)", chn, nw, nh);
+    }
+    mhal_crop_apply_pending(d);
+    d->active = 1; d->vout_win = win;
+    *out = d;
+    if (win >= 0) {
+        mhal_vout_bind(win, chn);            /* apply_window:逐窗 proc OUT rect + vout IN_WIN_ATTR(visible=1,rect) */
+    } else {
+        HD_VIDEOOUT_WIN_ATTR wa; memset(&wa,0,sizeof(wa)); wa.visible = 0;
+        hd_videoout_set(d->vout_path, HD_VIDEOOUT_PARAM_IN_WIN_ATTR, &wa);
+    }
+    return 0;
+}
+
 int mhal_vdec_open(int chn, mhal_codec_t codec, int w, int h, int fps,
                    int bind_vout_win, mhal_vdec_t **out)
 {
@@ -147,6 +280,14 @@ int mhal_vdec_open(int chn, mhal_codec_t codec, int w, int h, int fps,
         NVR_LOGE("vdec", "chn%d 分辨率 %dx%d 超单实例上限 %dx%d，拒绝解码",
                  chn, w, h, MHAL_DEC_MAX_W, MHAL_DEC_MAX_H);
         return MHAL_VDEC_EBUDGET;
+    }
+
+    /* ★ prebuild:预建全窗后,open = "激活已建窗"(自适应重配 + 逐窗 visible),不再开路径/不整图重建。 */
+    if (g_disp.prebuilt && g_disp.ch[chn] && g_disp.ch[chn]->opened) {
+        mhal_lock();
+        int rc = mhal_vdec_reuse(chn, codec, w, h, fps, bind_vout_win, out);
+        mhal_unlock();
+        return rc;
     }
 
     /* ★ 吞吐预算准入：算上这一路是否超 746 Mpix/s；超了就**不解码最新这一路** */
@@ -406,6 +547,17 @@ void mhal_vdec_close(mhal_vdec_t *d)
 {
     if (!d) return;
     mhal_lock();
+    /* ★ prebuild:关 = 隐藏该窗(visible=0)+ 归还预算,**保留**预建路径(解码器常驻,不 teardown、不整图重建)。
+     * 下次 open 同 chn 直接复用 g_disp.ch[chn]。→ 加/删设备只碰这一路,别路解码器从不重启。 */
+    if (g_disp.prebuilt && d->chn >= 0 && d->chn < MHAL_MAX_CH && g_disp.ch[d->chn] == d) {
+        vdec_budget_free_once(d);
+        HD_VIDEOOUT_WIN_ATTR wa; memset(&wa, 0, sizeof(wa)); wa.visible = 0;
+        hd_videoout_set(d->vout_path, HD_VIDEOOUT_PARAM_IN_WIN_ATTR, &wa);
+        d->active = 0; d->vout_win = -1;
+        NVR_LOGI("mhal", "chn%d ■隐藏(prebuild:窗visible=0,解码器常驻,不拆不重建)", d->chn);
+        mhal_unlock();
+        return;
+    }
     int chn = d->chn;
     /* ★ 是否"在显路径"(需走 commit 的 stop_list 停 dec+proc+vout 后再拆,否则 proc/vout 未停就 close
      *   → 下次 open 同通道 proc 报 ALREADY_OPEN(-25)/失败)。vout_win:≥0=宫格窗、-2=自由矩形(bind_rect,

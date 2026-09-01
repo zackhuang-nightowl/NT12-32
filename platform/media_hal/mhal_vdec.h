@@ -29,6 +29,11 @@ typedef struct mhal_vdec mhal_vdec_t;
 int  mhal_vdec_open(int chn, mhal_codec_t codec, int w, int h, int fps,
                     int bind_vout_win, mhal_vdec_t **out);
 
+/* ★ 开机预建全窗:一次性 open+bind+start n 路 dec/proc/vout 进单张合成图(解码器按预留档 768×576),
+ * 全部初始隐藏。成功后 open/close 只逐窗 visible/rect,运行期加/删/切设备不再整图重建("一路只影响一路")。
+ * 返回 0=预建成功;-1=失败(如 proc/vout 池装不下 n 路,已回退按需模式)。在 mhal_vout_init 之后调用一次。 */
+int  mhal_vdec_prebuild(int n);
+
 /* 送一帧 Annex-B 裸流（来自 streaming 的 CRtspClient video_cb）；ts 为 90kHz PTS。
  * 阻塞至多 200ms 等解码器输入 FIFO 腾空(关键帧/bootstrap 用,尽量送进)。 */
 int  mhal_vdec_send(mhal_vdec_t *d, const uint8_t *annexb, uint32_t len, uint32_t ts);
