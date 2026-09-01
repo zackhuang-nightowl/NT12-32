@@ -74,6 +74,10 @@ typedef struct {
     volatile int        commit_run;
     pthread_mutex_t     commit_mtx;
     pthread_cond_t      commit_cv;
+    /* ★ commit 代数:每次 commit(全停 started 集合→全起新集合)都会**重启所有可见解码器**,
+     * 重启后的解码器需重新喂关键帧才出图。此计数每成功 start_list 一次自增,供上层(streaming)
+     * 比对——发现代数变了即知本路解码器被 commit 重启过 → 重灌缓存 IDR 秒 repaint,不留黑。 */
+    volatile unsigned   commit_gen;
 } mhal_disp_t;
 
 /* 请求一次(防抖合并的)显示重建: 打 dirty + 时戳并唤醒 commit 线程。异步开/关解码器/切布局都用它,

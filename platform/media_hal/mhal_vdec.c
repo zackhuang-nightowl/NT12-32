@@ -96,6 +96,15 @@ static int cfg_dec_path(struct mhal_vdec *d)
         dec.data_pool[1].mode   = HD_VIDEODEC_POOL_ENABLE;
         dec.data_pool[1].ddr_id = g_ddr_dec_out_ratio;
         dec.data_pool[1].counts = HD_VIDEODEC_SET_COUNT(3, 0);
+    } else if ((long)w * h > 1920L * 1080) {
+        /* ★ 关键①(非 8K 的大主码流):4K / 12MP(如 4000×3000,宽 ≤4096 未触发 subyuv,VPE 可直吃)。
+         * 单帧 IDR 极大(4000×3000 实测 ~455KB),远超 AUTO 比特流窗口(max_bitrate/fps ≈ 50KB)→ 送流时
+         * VPD_PUT_COPY_MULTI_DIN 拷不进 DIN、**整批送流失败**,把**共享 DIN 池**堵死 → 同批别路一起丢帧变黑
+         * (真机实证:4000×3000 主流单宫格解码时 ch23 被拖黑)。大主流**只在单宫格解**(并发路数少,DIN 不争用),
+         * 给足 2MB 窗口装下 IDR;bs_counts=4 → 4×2MB=8MB ≤ DIN 池(部署 20.3MB)。小子流(宫格多路)保持 AUTO
+         * 小窗守住池(已验证 24 路稳),不受影响。 */
+        dec.max_mem.max_bs_size = 2 * 1024 * 1024;
+        dec.max_mem.bs_counts   = 4;
     }
 
     HD_RESULT ret = hd_videodec_set(d->dec_path, HD_VIDEODEC_PARAM_PATH_CONFIG, &dec);

@@ -48,28 +48,38 @@ static int stream_rec_stream_on(const stream_chan_t *c, int stream)
     return (stream == NVR_STREAM_SUB) ? c->rec_sub_on : c->rec_main_on;
 }
 
+/* 录像 writer 生命周期锁(定义在 stream_record_worker.c):按通道取其归属 shard 的锁, 与该 shard 的
+ * record worker 线程串行(防 close 释放 writer 时 worker 仍在写 → UAF/聚合撕裂)。一盘一写后按 chn 分片。 */
+void stream_rec_wlock(int chn);
+void stream_rec_wunlock(int chn);
+
 static void stream_close_writer_one(stream_chan_t *c, int stream)
 {
     if (!c) return;
+    /* ★ 持锁关闭:期间归属 shard 的 record worker 不能进入 write_frame/stage_flush 等 → 释放 writer 时它必不在用(杜绝 UAF)。 */
+    stream_rec_wlock(c->cfg.chn);
     if (stream == NVR_STREAM_SUB) {
-        if (!c->writer_sub) return;
-        rsdk_rec_close(c->writer_sub);
-        c->writer_sub = NULL;
-        c->rec_gated_sub = 0;
-        stream_record_q_flush(&c->psub.rec_q);
-        c->psub.rec_state = STREAM_REC_WAIT_IDR;
-        c->psub.rec_drop_until_key = 0;
-        c->psub.rec_seg_start_wall = 0;
+        if (c->writer_sub) {
+            rsdk_rec_close(c->writer_sub);
+            c->writer_sub = NULL;
+            c->rec_gated_sub = 0;
+            stream_record_q_flush(&c->psub.rec_q);
+            c->psub.rec_state = STREAM_REC_WAIT_IDR;
+            c->psub.rec_drop_until_key = 0;
+            c->psub.rec_seg_start_wall = 0;
+        }
     } else {
-        if (!c->writer_main) return;
-        rsdk_rec_close(c->writer_main);
-        c->writer_main = NULL;
-        c->rec_gated_main = 0;
-        stream_record_q_flush(&c->pmain.rec_q);
-        c->pmain.rec_state = STREAM_REC_WAIT_IDR;
-        c->pmain.rec_drop_until_key = 0;
-        c->pmain.rec_seg_start_wall = 0;
+        if (c->writer_main) {
+            rsdk_rec_close(c->writer_main);
+            c->writer_main = NULL;
+            c->rec_gated_main = 0;
+            stream_record_q_flush(&c->pmain.rec_q);
+            c->pmain.rec_state = STREAM_REC_WAIT_IDR;
+            c->pmain.rec_drop_until_key = 0;
+            c->pmain.rec_seg_start_wall = 0;
+        }
     }
+    stream_rec_wunlock(c->cfg.chn);
     stream_rec_mask_poke(c);
 }
 
@@ -239,10 +249,12 @@ static void stream_apply_event_tags_puller(stream_chan_t *c)
         (uint32_t)time(NULL) > c->pend_event_end && c->event_clip) {
         /* event-only(无持续录像):writer 即将 flush+关,趁其还开着把真实 end_time 写进事件槽
          * (否则 worker 侧闭合会遇到 writer 已关而漏写)。已闭合则清 pending 避免 worker 重复。 */
+        stream_rec_wlock(c->cfg.chn);   /* ★ 与归属 shard worker 串行访问 writer(end_event 也是 writer 操作) */
         if (c->writer_main)
             rsdk_rec_end_event(c->writer_main, c->applied_event_id, c->pend_event_end);
+        stream_rec_wunlock(c->cfg.chn);
         c->pend_event_close_id = 0;
-        stream_close_writer(c);
+        stream_close_writer(c);   /* 内部各 stream 自持锁,勿在持锁时调(否则非递归锁自死锁) */
         c->event_clip = 0;
         c->pmain.pre_flushed = 0;
         c->psub.pre_flushed = 0;
@@ -402,10 +414,24 @@ void stream_feed_keyframe(stream_chan_t *c)
     if (p->kf_len > 0) {
         if (mhal_vdec_send(c->vdec, p->kf, (uint32_t)p->kf_len, p->kf_ts) == 0) {
             c->fed_since_open++;
+            c->vdec_commit_gen = mhal_vout_commit_gen();   /* 记录本次喂帧时的 commit 代数(供刷屏后重灌比对) */
             NVR_LOGI("stream", "chn%d 喂 bootstrap 关键帧(%s)→ 即时出图(仍 WAIT_IDR)",
                      c->cfg.chn, c->decode_stream == NVR_STREAM_SUB ? "子" : "主");
         }
     }
+}
+
+/* ★ 刷屏(commit 全停全起)后重灌关键帧:每次 commit 会重启**所有**可见解码器,但只有主动 open 的那路会
+ * 走 bootstrap;其余已开的路(如切布局/加通道时不动的宫格)被重启后无人重灌 → 等相机下个自然 IDR(GOP
+ * 数秒)才出图 = 变黑。此处用 commit 代数比对:本路代数落后全局 = 被某次 commit 重启过 → 立即重灌缓存 IDR
+ * 秒 repaint。配合 Fix 1(DIN 不再被大主流堵),重灌一次即成,任何刷屏都不留黑。 */
+static void stream_refeed_after_commit(stream_chan_t *c)
+{
+    if (!c || !c->vdec || mhal_vout_is_deferred()) return;
+    if (c->vdec_commit_gen == mhal_vout_commit_gen()) return;   /* 本路未被重启 */
+    c->fed_since_open = 0;                 /* 放行再喂一帧关键帧 */
+    c->live_state = STREAM_LIVE_WAIT_IDR;  /* 解码器已被重启 → 回等 IDR(直灌的 kf 会立即出一帧) */
+    stream_feed_keyframe(c);               /* 灌成功即更新 vdec_commit_gen;失败(池忙)则下帧再试 */
 }
 
 /* 关解码器(隐藏)。只停解码,两路拉流+录像不动。 */
@@ -588,6 +614,24 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
         }
     }
 
+    /* ★ 按实际码流检测 codec(不信 SDP 声明):首 NAL 是参数集时可判 H264/H265。与当前 p->codec 不符
+     * → 纠正 + 强制重开解码器(用新 codec)。避免 H265 流被按 H264 开解码器 → VPU"scan first header
+     * error"反复失败刷屏、耗尽 VPU/系统资源(设备变不可达的真凶)。P 帧首 NAL 判不出 → 保持不变。 */
+    {
+        int actual = nal_detect_codec(data, len);
+        int cur    = (p->codec == RSDK_CODEC_H265) ? 1 : 0;
+        if (actual >= 0 && actual != cur) {
+            NVR_LOGW("router", "ch%d[%s] 实际码流=%s ≠ SDP codec=%s → 按实际码流重开解码",
+                     c->cfg.chn, p->stream == NVR_STREAM_SUB ? "子" : "主",
+                     actual ? "H265" : "H264", cur ? "H265" : "H264");
+            p->codec = actual ? RSDK_CODEC_H265 : RSDK_CODEC_H264;
+            if (c->vdec && c->decode_stream == p->stream) {
+                c->live_rebuild = 1;   /* 完整重开解码器,用纠正后的 codec */
+                c->decode_dirty = 1;
+            }
+        }
+    }
+
     /* ★ 兑现待处理的解码状态变更(show_win/decode_stream 变了)。只在**喂解码器那一路**的 puller
      * 线程里 open/close 解码器 → 与本函数下方 mhal_vdec_send 同线程,彻底消除跨线程 use-after-free。 */
     if (c->decode_dirty && p->stream == c->decode_stream) {
@@ -624,7 +668,10 @@ void stream_route_video(stream_pull_t *p, const uint8_t *data, int len, uint32_t
             stream_decode_open(c, win);
         }
     }
-    if (p->stream == c->decode_stream) stream_try_bootstrap(c);
+    if (p->stream == c->decode_stream) {
+        stream_try_bootstrap(c);        /* open 时 commit 未就绪的首灌 */
+        stream_refeed_after_commit(c);  /* 已开的路被某次 commit 全停全起重启后的重灌(刷屏不留黑) */
+    }
 
     nal_class_t nc;
     nal_classify(data, len, p->codec, &nc);
@@ -810,8 +857,10 @@ void stream_close_writer_noflush(stream_chan_t *c)
 {
     if (!c) return;
     if (!c->writer_main && !c->writer_sub) { c->rec_gated_main = 0; c->rec_gated_sub = 0; return; }
+    stream_rec_wlock(c->cfg.chn);   /* ★ 与归属 shard worker 串行:释放 writer 时它必不在用(防 UAF) */
     if (c->writer_main) { rsdk_rec_close(c->writer_main); c->writer_main = NULL; }
     if (c->writer_sub)  { rsdk_rec_close(c->writer_sub);  c->writer_sub  = NULL; }
+    stream_rec_wunlock(c->cfg.chn);
     stream_record_q_flush(&c->pmain.rec_q);
     stream_record_q_flush(&c->psub.rec_q);
     c->pmain.rec_state = c->psub.rec_state = STREAM_REC_WAIT_IDR;

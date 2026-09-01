@@ -15,6 +15,8 @@ typedef struct {
 
 /* codec: 0=H264 1=H265。扫描 Annex-B(00 00 01 / 00 00 00 01)首个有意义 NAL 分类。 */
 void nal_classify(const uint8_t *data, int len, int codec, nal_class_t *out);
+/* 从实际首 NAL 检测编码:0=H264 1=H265 -1=无法判定(不信 SDP,按实际码流开解码)。 */
+int  nal_detect_codec(const uint8_t *data, int len);
 
 /* H.264 连续性(配合 live 起播门控):从 SPS 取 log2_max_frame_num,从 VCL 取 frame_num。
  * 返回 1=相对 prev 发生 frame_num 跳变(参考链可能已断,应丢 P 等 IDR);0=连续/无法判定/IDR 重置。

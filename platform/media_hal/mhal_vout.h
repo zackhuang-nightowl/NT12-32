@@ -43,6 +43,7 @@ void mhal_vout_request_commit(void);
 void mhal_vout_defer_begin(void);
 void mhal_vout_defer_end(void);
 int  mhal_vout_is_deferred(void);   /* 1=当前在批量提交中(解码器已开但未 start) */
+unsigned mhal_vout_commit_gen(void); /* commit 代数:每次整屏重建自增,供 streaming 检测解码器被重启→重灌关键帧 */
 int  mhal_vout_bind(int win_idx, int decoder_chn);            /* 某分屏窗口绑某解码通道 */
 int  mhal_vout_bind_rect(int decoder_chn, int x, int y, int w, int h); /* 任意像素矩形 */
 /* 按布局算第 idx 格在 disp_w×disp_h 区域内的矩形(liveView 宫格;含 8=1大+7小)。

@@ -48,6 +48,23 @@ void nal_classify(const uint8_t *data, int len, int codec, nal_class_t *out)
     out->frame_type = (vcl_key || saw_param || !saw_vcl) ? 0 /*I*/ : 1 /*P*/;
 }
 
+/* ★ 从实际码流首 NAL 检测编码(不信 SDP 声明):关键帧首 NAL 是参数集,可靠区分 H264/H265。
+ * 返回 0=H264 / 1=H265 / -1=无法判定(首 NAL 非参数集,如 P 帧 → 保持原 codec)。
+ * H265 基层参数集 byte0:VPS=0x40 SPS=0x42 PPS=0x44(type 32/33/34, layer0);
+ * H264 参数集:type=(b0&0x1F)=7(SPS)/8(PPS)(如 0x67/0x27/0x68)。
+ * H264 P 帧首 NAL(0x41/0x61/0x01)既不在 H265 精确集、(b0&0x1F)也非 7/8 → 返 -1,不误判。 */
+int nal_detect_codec(const uint8_t *data, int len)
+{
+    if (!data || len < 5) return -1;
+    int sc = 0, off = next_nal(data, len, 0, &sc);
+    if (off < 0 || off >= len) return -1;
+    uint8_t b0 = data[off];
+    if (b0 == 0x40 || b0 == 0x42 || b0 == 0x44) return 1;   /* H265 VPS/SPS/PPS(基层) */
+    int t264 = b0 & 0x1F;
+    if (t264 == 7 || t264 == 8)               return 0;    /* H264 SPS/PPS */
+    return -1;                                              /* 首 NAL 非参数集 → 不判 */
+}
+
 /* ---- 轻量 bit reader:只服务 SPS log2 / slice frame_num 连续性 ---- */
 typedef struct { const uint8_t *p; int n; int bit; } nal_br_t;
 

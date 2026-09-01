@@ -260,6 +260,10 @@ void mhal_vout_defer_begin(void)
  * 供 streaming 判断"解码器还没起流, 别急着喂 bootstrap 关键帧"(起流后由 WAIT_IDR 喂下个 IDR)。 */
 int mhal_vout_is_deferred(void) { return g_disp.defer > 0 || g_disp.commit_pending; }
 
+/* commit 代数(见 mhal_disp_t.commit_gen):每次整屏重建自增。streaming 用它检测本路解码器是否被
+ * commit 重启过 → 重启过就重灌缓存关键帧,消除"刷屏后等相机自然 IDR"的黑屏。 */
+unsigned mhal_vout_commit_gen(void) { return g_disp.commit_gen; }
+
 void mhal_vout_defer_end(void)
 {
     mhal_lock();
@@ -311,6 +315,7 @@ int mhal_vout_commit(void)
             memcpy(g_disp.started_proc, proc, n * sizeof(HD_PATH_ID));
             memcpy(g_disp.started_vout, vout, n * sizeof(HD_PATH_ID));
             g_disp.started_n = n;
+            g_disp.commit_gen++;   /* ★ 本次全停全起重启了这批解码器 → 代数自增,上层据此重灌关键帧 */
             NVR_LOGD("mhal", "commit: %d 窗一次成图(start_list)", n);
             /* ★ 只在"可能出现空格"时清整屏黑:布局/分辨率变化(need_clear)或在显集合缩小/持平(移窗/换窗)。
              * 纯增量加窗(n>prev_started 且无布局变化)不清 → 已有窗不被一起刷黑,消除加设备的整屏黑闪。 */
