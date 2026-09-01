@@ -77,9 +77,13 @@ void nvr_chan_tick(nvr_chan_mgr_t *m);
  * 已是该码流且已解析则不动。返回 0/-1。 */
 int  nvr_chan_set_stream(nvr_chan_mgr_t *m, int chn, int stream);
 
-/* 读并清"状态变化位图"(bit=chn)。供 GUI_longPolling 返回 ChannelStatusNotify。 */
+/* 读并**清全部**"状态变化位图"(bit=chn)。仅 refresh 全量重同步用。 */
 unsigned nvr_chan_drain_notify(nvr_chan_mgr_t *m);
-/* 等到有状态变化或 timeout_ms。timeout_ms<=0 立即 drain(不清等待)。 */
+/* 只读位图,**不清**(锁存上报;longPolling 用)。 */
+unsigned nvr_chan_peek_notify(nvr_chan_mgr_t *m);
+/* GUI 经 getChannelStatus 收取某通道 → 清该位(锁存解除)。 */
+void     nvr_chan_clear_notify(nvr_chan_mgr_t *m, int chn);
+/* 挂起到有状态变化或 timeout_ms;**不清 notify**(锁存)。timeout_ms<=0 立即返回当前位图。 */
 unsigned nvr_chan_wait_notify(nvr_chan_mgr_t *m, int timeout_ms);
 /* 唤醒挂起的 GUI_longPolling(向导页跳转等,不置 ChannelStatusNotify 位)。 */
 void nvr_chan_poke_longpoll(nvr_chan_mgr_t *m);

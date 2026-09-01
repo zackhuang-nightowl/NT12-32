@@ -46,7 +46,8 @@ int  nvr_preview_set_mapping(nvr_preview_t *p, const int *map1based, int n);
 /* 自由矩形 liveView（GUI_setDeviceDisplayExt）。调用时宫格 liveView 已关。
  * 只在指定千分比矩形开对应通道/码流；n=0 或 b=NULL 清空全部。
  * 返回 0 成功，-1 参数错，-2 超出解码能力。 */
-int  nvr_preview_set_ext(nvr_preview_t *p, const nvr_pv_ext_t *b, int n);
+int  nvr_preview_set_ext(nvr_preview_t *p, const nvr_pv_ext_t *b, int n);   /* 重配(不阻塞) */
+int  nvr_preview_ext_settle(nvr_preview_t *p, int timeout_ms);             /* 定型(含 wait_ready,置 disp_lock 外调) */
 int  nvr_preview_set_hdmi(nvr_preview_t *p, int w, int h, int *eff_w, int *eff_h);  /* 分辨率热切 */
 
 /* 阻塞等待:切宫格/切码流后,轮询直到**任一可见格出图**或超时(ms)。供接口层"等图出了再回复"

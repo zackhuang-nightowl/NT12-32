@@ -210,12 +210,44 @@ static void chan_notify(nvr_chan_mgr_t *m, int chn)
     pthread_mutex_unlock(&m->notify_mu);
 }
 
-/* 读并清状态变化位图。供 GUI_longPolling 返回 ChannelStatusNotify（gui 据此重拉 getChannelStatus 出图）。 */
+/* 读并**清全部**状态变化位图。仅 refresh 全量重同步用(GUI 重启会重拉所有通道状态)。 */
 unsigned nvr_chan_drain_notify(nvr_chan_mgr_t *m)
 {
-    return nvr_chan_wait_notify(m, 0);
+    unsigned v;
+    if (!m) return 0;
+    pthread_mutex_lock(&m->notify_mu);
+    v = m->notify_mask;
+    m->notify_mask = 0;
+    m->lp_poke = 0;
+    pthread_mutex_unlock(&m->notify_mu);
+    return v;
 }
 
+/* 只读状态变化位图,**不清**。ChannelStatusNotify 是**锁存**态:置位后 longPolling 一直上报,
+ * 直到 GUI 经 X_NightOwl_getChannelStatus 收取(按位清)。这样即使某次 longPolling 响应丢失,
+ * 下次仍会带上 → GUI 决不漏掉设备状态变化(收取时 getChannelStatus 返回的是**当前实时**状态)。 */
+unsigned nvr_chan_peek_notify(nvr_chan_mgr_t *m)
+{
+    unsigned v;
+    if (!m) return 0;
+    pthread_mutex_lock(&m->notify_mu);
+    v = m->notify_mask;
+    pthread_mutex_unlock(&m->notify_mu);
+    return v;
+}
+
+/* GUI 收取了某通道状态(getChannelStatus)→ 清该通道 notify 位(锁存解除)。清位不广播:
+ * 不产生"新内容",longPolling 无需为清位而醒(它只在 notify 置位/事件变时才需返回)。 */
+void nvr_chan_clear_notify(nvr_chan_mgr_t *m, int chn)
+{
+    if (!m || chn < 0 || chn >= NVR_MAX_CH) return;
+    pthread_mutex_lock(&m->notify_mu);
+    m->notify_mask &= ~(1u << chn);
+    pthread_mutex_unlock(&m->notify_mu);
+}
+
+/* 挂起直到 notify 置位 / 被 poke / 超时;返回当前位图,**不清 notify**(锁存;仅消费一次性 lp_poke)。
+ * 供 GUI_longPolling 阻塞等"设备状态变化"。 */
 unsigned nvr_chan_wait_notify(nvr_chan_mgr_t *m, int timeout_ms)
 {
     unsigned v;
@@ -232,8 +264,7 @@ unsigned nvr_chan_wait_notify(nvr_chan_mgr_t *m, int timeout_ms)
         }
     }
     v = m->notify_mask;
-    m->notify_mask = 0;
-    m->lp_poke = 0;
+    m->lp_poke = 0;                 /* poke 一次性唤醒,消费掉;notify 锁存不清 */
     pthread_mutex_unlock(&m->notify_mu);
     return v;
 }

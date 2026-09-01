@@ -124,9 +124,16 @@ char *cmd_GUI_setDeviceDisplayExt(cJSON *a, const nvr_cmd_ctx_t *c)
         b[i].x = x; b[i].y = y; b[i].w = w; b[i].h = h;
         b[i].stream = (strcmp(st, "sub") == 0) ? NVR_STREAM_SUB : NVR_STREAM_MAIN;
     }
+    /* ★ 重配(set_ext)留在 disp_lock 内串行(与显示线程不并发抢 mhal);随后的 ~2s 定型等待
+     *   放到 disp_lock 外(CMD_UNBLOCK),不饿死其它 8089 命令——与 setDeviceDisplayMode/
+     *   setChannelMapping 同一范式(此前本处漏了 UNBLOCK,ext 切换会独占派发锁 2s)。 */
     int rc = nvr_preview_set_ext(c->pv, n ? b : NULL, n);
     if (rc == -2) return nvr_resp_err("Exceeded Device Capability Error");
     if (rc != 0)  return nvr_resp_err("Unknow Error");
+    CMD_UNBLOCK(c);
+    int rc2 = nvr_preview_ext_settle(c->pv, NVR_DEF_WAIT_READY_MS);
+    CMD_REBLOCK(c);
+    if (rc2 == -2) return nvr_resp_err("Exceeded Device Capability Error");
     return nvr_resp_ok();
 }
 char *cmd_GUI_getDeviceDisplayExt(cJSON *a, const nvr_cmd_ctx_t *c)
@@ -189,7 +196,9 @@ char *cmd_GUI_setSysDisplay(cJSON *a, const nvr_cmd_ctx_t *c)
 char *cmd_X_NightOwl_getChannelStatus(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     int ch1 = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(a, "channel"));
-    int code = c->cm ? nvr_chan_status_code_of(c->cm, ch1 - 1) : 0;
+    int code = c->cm ? nvr_chan_status_code_of(c->cm, ch1 - 1) : 0;  /* 当前**实时**状态 */
+    /* GUI 收取到本通道状态 → 清该通道 ChannelStatusNotify 锁存位(此后 longPolling 不再带,直到再变)。 */
+    if (c->cm) nvr_chan_clear_notify(c->cm, ch1 - 1);
     cJSON *o = cJSON_CreateObject(); cJSON_AddNumberToObject(o, "status", code);
     return nvr_resp_content(o);
 }
@@ -206,7 +215,7 @@ static int lp_masks_eq(const nvr_evt_mask_set_t *a, const nvr_evt_mask_set_t *b)
            a->car == b->car && a->animal == b->animal && a->package == b->package &&
            a->linecross == b->linecross && a->field == b->field;
 }
-/* 八类事件电平位图全量落 JSON(GUI_longPolling.txt 8 个 *Status 字段)。 */
+/* 八类事件电平位图**全量**落 JSON(refresh 全量同步用)。 */
 static void lp_add_event_masks(cJSON *o, const nvr_evt_mask_set_t *m)
 {
     lp_add_u32_if(o, "MotionStatus",         m->motion,    1);
@@ -218,19 +227,39 @@ static void lp_add_event_masks(cJSON *o, const nvr_evt_mask_set_t *m)
     lp_add_u32_if(o, "LineCrossStatus",      m->linecross, 1);
     lp_add_u32_if(o, "FieldIntrusionStatus", m->field,     1);
 }
+/* 非 refresh:仅回**相对上次已发**有变化的事件位(含跳回 0 的落沿=事件结束,回一次让 GUI 清图标);
+ * 与上次相同则省略 → 每次 longPolling 只带真正变化的字段。 */
+static void lp_add_event_deltas(cJSON *o, const nvr_evt_mask_set_t *m, const nvr_evt_mask_set_t *s)
+{
+    lp_add_u32_if(o, "MotionStatus",         m->motion,    m->motion    != s->motion);
+    lp_add_u32_if(o, "FaceStatus",           m->face,      m->face      != s->face);
+    lp_add_u32_if(o, "HumanStatus",          m->human,     m->human     != s->human);
+    lp_add_u32_if(o, "CarStatus",            m->car,       m->car       != s->car);
+    lp_add_u32_if(o, "AnimalStatus",         m->animal,    m->animal    != s->animal);
+    lp_add_u32_if(o, "PackageStatus",        m->package,   m->package   != s->package);
+    lp_add_u32_if(o, "LineCrossStatus",      m->linecross, m->linecross != s->linecross);
+    lp_add_u32_if(o, "FieldIntrusionStatus", m->field,     m->field     != s->field);
+}
+
+/* ★ 进程内"上次已发给 GUI"基线:longPolling 按此做**增量(delta)**,只回变化字段(含落沿归 0)。
+ * 单 GUI 客户端假设;GUI 重启用 refresh:true 全量重置。初值全 0 = 基线(首个 poll 把当前非零态各回一次)。 */
+static pthread_mutex_t    g_lp_mtx = PTHREAD_MUTEX_INITIALIZER;
+static nvr_evt_mask_set_t g_lp_sent_m;
+static uint32_t           g_lp_sent_rec;
 
 char *cmd_GUI_longPolling(cJSON *a, const nvr_cmd_ctx_t *c)
 {
     int refresh = a ? nvr_jbool(a, "refresh", 0) : 0;
     unsigned notify = 0;
-    nvr_evt_mask_set_t m0 = {0}, m = {0};
-    uint32_t rec0 = 0, rec = 0;
+    nvr_evt_mask_set_t sent = {0}, m = {0};
+    uint32_t sent_rec = 0, rec = 0;
     int setup0 = nvr_gui_setup_gen();
     int setup_has = 0, setup_now = 0;
 
-    if (c->eh) nvr_evt_masks(c->eh, &m0);
-    rec0 = c->sm ? nvr_stream_recording_mask(c->sm) : 0;
-    setup_now = nvr_gui_get_setup_status(&setup_has);
+    /* 取"上次已发"基线做增量比较(与 refresh 全量重置对称)。 */
+    pthread_mutex_lock(&g_lp_mtx);
+    sent = g_lp_sent_m; sent_rec = g_lp_sent_rec;
+    pthread_mutex_unlock(&g_lp_mtx);
 
     if (refresh) {
         int cap = c->settings ? nvr_settings_get_int(c->settings, "system.capacity", 32) : 32;
@@ -240,8 +269,12 @@ char *cmd_GUI_longPolling(cJSON *a, const nvr_cmd_ctx_t *c)
         int wait_s = a ? nvr_jint(a, "timeout", 25) : 25;
         if (wait_s < 1) wait_s = 1;
         if (wait_s > 30) wait_s = 30;
-        notify = c->cm ? nvr_chan_drain_notify(c->cm) : 0;
-        if (!notify && nvr_gui_setup_gen() == setup0) {
+        notify = c->cm ? nvr_chan_peek_notify(c->cm) : 0;   /* 锁存:只 peek 不清 */
+        if (c->eh) nvr_evt_masks(c->eh, &m);
+        rec = c->sm ? nvr_stream_recording_mask(c->sm) : 0;
+        /* 挂起直到出现**相对上次已发**的增量(事件位/录像位变、notify 置位、setup 变),最多 wait_s 秒。
+         * notify 非零(锁存未收取)→ 不阻塞,立即带上让 GUI 去 getChannelStatus 收取。 */
+        if (!notify && lp_masks_eq(&m, &sent) && rec == sent_rec && nvr_gui_setup_gen() == setup0) {
             struct timespec ts;
             long t0, deadline;
             clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -257,7 +290,7 @@ char *cmd_GUI_longPolling(cJSON *a, const nvr_cmd_ctx_t *c)
                 notify = c->cm ? nvr_chan_wait_notify(c->cm, (int)left) : 0;
                 if (c->eh) nvr_evt_masks(c->eh, &m);
                 rec = c->sm ? nvr_stream_recording_mask(c->sm) : 0;
-                if (notify || !lp_masks_eq(&m, &m0) || rec != rec0)
+                if (notify || !lp_masks_eq(&m, &sent) || rec != sent_rec)
                     break;
                 if (nvr_gui_setup_gen() != setup0)
                     break;
@@ -266,25 +299,28 @@ char *cmd_GUI_longPolling(cJSON *a, const nvr_cmd_ctx_t *c)
     }
     if (c->eh) nvr_evt_masks(c->eh, &m);
     rec = c->sm ? nvr_stream_recording_mask(c->sm) : 0;
+    if (!refresh) notify = c->cm ? nvr_chan_peek_notify(c->cm) : 0;   /* 最终锁存值(不清) */
     setup_now = nvr_gui_get_setup_status(&setup_has);
 
     cJSON *o = cJSON_CreateObject();
     if (refresh) {
+        /* 全量同步:所有长期/短期态各回一次。 */
         lp_add_u32_if(o, "ChannelStatusNotify", notify, 1);
-        lp_add_event_masks(o, &m);            /* 8 类事件位全量 */
+        lp_add_event_masks(o, &m);
         lp_add_u32_if(o, "RecordStatus", rec, 1);
         if (setup_has) cJSON_AddNumberToObject(o, "APPNotifySetupStatus", setup_now);
     } else {
-        /* ChannelStatusNotify 是**边沿**(drain 消费),按变化回。 */
-        lp_add_u32_if(o, "ChannelStatusNotify", notify, notify != 0);
-        /* 事件位/录像位是**电平/衰减态**:longPolling 无客户端游标是无状态的,若只在
-         * "相对本次进入前有变化" 才回,事件在两次 poll 之间衰减清零(icon decay)会丢失
-         * "事件结束" 这次跳变 → GUI 图标永不消失。故电平态**恒回当前值**保持同步。 */
-        lp_add_event_masks(o, &m);            /* 8 类事件位全量 */
-        lp_add_u32_if(o, "RecordStatus", rec, 1);
+        /* 增量:每类只在**相对上次已发**有变化时才带。 */
+        lp_add_u32_if(o, "ChannelStatusNotify", notify, notify != 0);   /* 边沿(drain 消费) */
+        lp_add_event_deltas(o, &m, &sent);                             /* 事件位:仅变化(含落沿) */
+        lp_add_u32_if(o, "RecordStatus", rec, rec != sent_rec);        /* 录像位:仅变化 */
         if (setup_has && nvr_gui_setup_gen() != setup0)
             cJSON_AddNumberToObject(o, "APPNotifySetupStatus", setup_now);
     }
+    /* 落基线:记下这次已发的电平态,供下次做增量(refresh 同样更新到当前)。 */
+    pthread_mutex_lock(&g_lp_mtx);
+    g_lp_sent_m = m; g_lp_sent_rec = rec;
+    pthread_mutex_unlock(&g_lp_mtx);
     return nvr_resp_content(o);
 }
 

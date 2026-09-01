@@ -104,7 +104,10 @@ int nvr_preview_set_hdmi(nvr_preview_t *p, int w, int h, int *eff_w, int *eff_h)
     pthread_mutex_unlock(&p->lock);
 
     if (mode > 0) nvr_preview_set_mode(p, mode, page);   /* 重排分屏(新画布) */
-    if (sn > 0)   nvr_preview_set_ext(p, saved, sn);     /* 重排悬浮块(按新 disp_w/h 换算) */
+    if (sn > 0) {                                        /* 重排悬浮块(按新 disp_w/h 换算) */
+        nvr_preview_set_ext(p, saved, sn);
+        nvr_preview_ext_settle(p, NVR_DEF_WAIT_READY_MS);/* 分辨率热切:重配后仍需定型(等解码起再绑矩形) */
+    }
 
     if (eff_w) *eff_w = ew;
     if (eff_h) *eff_h = eh;
@@ -505,12 +508,18 @@ static void ext_place(nvr_preview_t *p, const nvr_pv_ext_t *e)
     mhal_vout_bind_rect(e->chn0, x, y, w, h);
 }
 
+/* 悬浮块**重配**(仅设状态,不阻塞):清旧块→加新块→开解码门控→初排矩形。
+ * ★ 不再内含 ~2s 的 wait_ready:那段阻塞由调用方在 disp_lock 之外做(nvr_preview_ext_settle),
+ *   否则命令派发线程持 disp_lock 阻塞 2s 会饿死所有 8089 命令(与 set_mode/set_mapping 一致)。
+ * ★ fail-fast:先校验全部入参再动任何状态,杜绝"拆了旧块、加到一半非法 return"留下的黑格。 */
 int nvr_preview_set_ext(nvr_preview_t *p, const nvr_pv_ext_t *b, int n)
 {
     if (!p) return -1;
     if (n < 0) n = 0;
     if (n > 0 && !b) return -1;
     if (n > PV_MAX_WIN) return -2;
+    for (int i = 0; i < n; i++)                       /* 先全量校验,不动状态 */
+        if (b[i].chn0 < 0 || b[i].chn0 >= PV_MAX_CH) return -1;
 
     pthread_mutex_lock(&p->lock);
 
@@ -529,10 +538,6 @@ int nvr_preview_set_ext(nvr_preview_t *p, const nvr_pv_ext_t *b, int n)
     }
 
     for (int i = 0; i < n; i++) {
-        if (b[i].chn0 < 0 || b[i].chn0 >= PV_MAX_CH) {
-            pthread_mutex_unlock(&p->lock);
-            return -1;
-        }
         p->ext[p->ext_n++] = b[i];
         if (p->cfg.cm) nvr_chan_set_stream(p->cfg.cm, b[i].chn0, b[i].stream);
         /* win=0 只为把门控打开(vout 路径随 vdec_open 建好)，真正位置由 bind_rect 定。 */
@@ -540,9 +545,16 @@ int nvr_preview_set_ext(nvr_preview_t *p, const nvr_pv_ext_t *b, int n)
         ext_place(p, &p->ext[p->ext_n - 1]);
     }
     pthread_mutex_unlock(&p->lock);
+    return 0;
+}
 
-    /* 等解码器起来后再绑一次矩形（set_display 在 puller 线程兑现）。 */
-    nvr_preview_wait_ready(p, NVR_DEF_WAIT_READY_MS);
+/* 悬浮块**定型**:等解码器起来(wait_ready)→ 再绑一次矩形 + 提交 + 汇报预算超限。
+ * 与 set_ext 分离,让命令层把这 ~2s 阻塞放在 disp_lock 之外(CMD_UNBLOCK)。返回 -2=有块被预算拒。
+ * wait_ready 内部不持 p->lock;此处只在收尾短暂持锁重排矩形。 */
+int nvr_preview_ext_settle(nvr_preview_t *p, int timeout_ms)
+{
+    if (!p) return -1;
+    nvr_preview_wait_ready(p, timeout_ms > 0 ? timeout_ms : NVR_DEF_WAIT_READY_MS);
     pthread_mutex_lock(&p->lock);
     for (int i = 0; i < p->ext_n; i++) ext_place(p, &p->ext[i]);
     mhal_vout_request_commit();
