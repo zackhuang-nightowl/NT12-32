@@ -212,7 +212,13 @@ pfail:
         NVR_LOGI("mhal", "★ 预建全窗成功:%d 路 dec/proc/vout 常驻(单图);运行期加/删/切只逐窗 visible/rect,不整图重建", m);
     } else if (m > 0) {
         NVR_LOGE("mhal", "★ 预建 start_list 失败 %d(%d 路)→ 回退按需模式(未预建)。多半是 proc/vout 池装不下这么多路。", r, m);
-        for (int chn = 0; chn < n; chn++) {                 /* 起图失败:全拆回退到原按需 open 模式 */
+        /* ★ 关键:start_list 按 dec→proc→vout 顺序,失败时**前面已 start 的 dec/proc 仍处 started 态**,
+         * 必须**先 stop 再 close**——否则 hd_videodec_close 对 started 路径返回 -10、路径残留半开,
+         * 按需模式复用同号 open 会 ALREADY_OPEN → 全黑(真机实证)。防御式全停(未起的路 stop 报错无害)。 */
+        hd_videoout_stop_list(vout, m);
+        hd_videoproc_stop_list(proc, m);
+        hd_videodec_stop_list(dec, m);
+        for (int chn = 0; chn < n; chn++) {                 /* 停妥后再拆,回退到原按需 open 模式 */
             struct mhal_vdec *d = g_disp.ch[chn];
             if (!d) continue;
             mhal_vdec_teardown(d);
