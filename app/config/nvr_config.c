@@ -202,9 +202,8 @@ static void load_channels(nvr_config_t *c, cJSON *j)
     }
 
     cJSON *devs = cJSON_GetObjectItem(j, "devices");
-    if (!cJSON_IsArray(devs)) return;
-
     cJSON *dev;
+    if (cJSON_IsArray(devs))          /* 无 devices 也不早退——下方仍要补齐 16 个 PoE 口 */
     cJSON_ArrayForEach(dev, devs) {
         if (!jbool(dev, "enable", 1)) continue;
         const char *type = jstr(dev, "type", "ip");
@@ -275,6 +274,24 @@ static void load_channels(nvr_config_t *c, cJSON *j)
             e->poe_port = poe_port;
             e->onvif_auto = (e->url[0] == 0) && dev_onvif_auto;
             e->vout_win = chn;
+        }
+    }
+
+    /* ★ PoE 口是固定 16 口硬件:补齐 channels.json 未列的 PoE 口通道(只补缺失的,不动已配的单/多源口)。
+     * 修根因:channels.json 的 devices 漏列某口(实测漏口16)→ 该口通道从不生成 → install_slot 从不建成
+     * in_use PoE 槽 → nvr_channel.c 的 tick 发现(line ~1836)与 on_discovered(line ~1063)都要求
+     * "in_use && poe_port>0" 才探测/匹配 → 段 198.18.16.x 从不被广播探测 → 口16 永不发现、DB camera
+     * 永远空(死循环:不 in_use→不探测→不发现→不落库→不 in_use)。补齐后 16 个 PoE 口全预建、全被探测。 */
+    {
+        int poe_n = (c->sys.poe_ports > 0) ? c->sys.poe_ports : 16;
+        if (poe_n > NVR_CFG_MAX_CH) poe_n = NVR_CFG_MAX_CH;
+        for (int port = 1; port <= poe_n; port++) {
+            int chn = d.ch_base + (port - 1);
+            int exists = 0;
+            for (int i = 0; i < c->nch; i++)
+                if (c->ch[i].chn == chn) { exists = 1; break; }
+            if (!exists)
+                fill_poe_channel(c, &d, port, NULL);   /* 缺失口:按默认预建(enabled=1,占位 IP 198.18.<口>.1) */
         }
     }
 }
