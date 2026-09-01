@@ -18,15 +18,6 @@
 #define MHAL_COMMIT_DEBOUNCE_MS 150      /* 防抖窗:变更静默此时长后才重建一次(合并突发开/关) */
 #define MHAL_COMMIT_MAX_MS      600      /* 最大合并窗:首次请求起最迟此时限必重建一次(防持续上线饿死) */
 
-/* ★ 预建全窗(prebuild)架构:开机一次性把 N 路 dec/proc/vout 全部 open+bind+start 进**同一张**合成图
- * (single VPD large graph),之后运行期加/删/切设备**只逐窗 IN_WIN_ATTR(visible/rect)+ proc OUT(rect)**,
- * 永不再 stop_list/start_list 整图重建 → "一路问题只影响一路"(见官方样例 playback_1div_to_4div.c)。
- * 解码器按**预留档 768×576(64 对齐,覆盖 640x360/704x480/704x576/720x480 主力子流)**分配 max_mem;
- * 实际流 ≤ 预留 → 直接喂零重配;> 预留(1280x720/1080x1080 等少数)→ 只重配那一路(stop dec→cfg→start dec,
- * 不碰 proc/vout、不碰别路)。DEC_OUT 32×768x576 ≈ 64MB < 池;不扩 DTB。 */
-#define MHAL_DEC_RSV_W 768               /* 预留解码宽(align64(720)=768) */
-#define MHAL_DEC_RSV_H 576               /* 预留解码高(覆盖 704x576) */
-
 /* 单通道解码路径 */
 struct mhal_vdec {
     int          chn;
@@ -39,8 +30,6 @@ struct mhal_vdec {
     HD_PATH_ID   vout_path;              /* videoout 输入路径 */
     int          crop_on;                /* 数字变焦:IN_CROP 是否已从 OFF 切到 ON(切模式需 start，只切一次) */
     int          budget_released;        /* 解码预算是否已归还(关闭即还,拆解幂等,防 defer 期间占额→回放误判超预算) */
-    int          cfg_w, cfg_h;           /* ★ prebuild:当前已分配 max_mem 的对齐尺寸(≥预留)。实际流 ≤ 此则零重配;超此才重配该路。 */
-    int          active;                 /* ★ prebuild:1=已激活(可见/在喂),0=预建但隐藏空闲(解码器常驻、不占预算/不喂帧) */
 };
 
 /* 全局显示设备状态 */
@@ -53,7 +42,6 @@ typedef struct {
     int                 disp_w, disp_h;
     mhal_layout_t       layout;          /* 当前分屏 */
     struct mhal_vdec   *ch[MHAL_MAX_CH]; /* 已开的解码通道（按 chn 索引） */
-    int                 prebuilt;        /* ★ 1=已开机预建全窗(单图)。此后 open/close 只逐窗 visible/rect,不整图重建。 */
 
     /* 已 start_list 的显示集合快照（SDK 一次成图流程：stop_list 旧集合 → start_list 新集合，
      * stop 在 start 前 → 任一时刻只需 1 块 VPD_graph_info_large(reserve=1)，
