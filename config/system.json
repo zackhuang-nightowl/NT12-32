@@ -37,9 +37,9 @@
     },
     "eth1": {
       "role": "poe_uplink",
-      "_note": "PoE 汇聚口：物理口 P → 交换芯片 tag VLAN(2000+P)=2001..2016；NVR 侧 eth1.(2000+P)=198.18.P.100，内建 udhcpd 给相机 198.18.P.1。口↔段 1:1(口3→段3，口1→VLAN2001)。与 ODC 固件一致，vlan_base=2000。",
+      "_note": "PoE 汇聚口：物理口 P → 交换芯片 tag VLAN(2000+P)=2001..2016；NVR 侧 eth1.(2000+P)=198.18.P.100，DHCP 给相机 198.18.P.1。口↔段 1:1(口1→VLAN2001，口3→段3)。权威=ODC.frm(S30 2001..2016 + dhcpd subnet 198.18.P→eth1.(2000+P))；dhcp 去 NOIPC 过滤/去 ping-check/租约300s 为我方改进。三处一致:vlan_base + S30 + dhcpd_vlan.conf。",
       "mask": "255.255.255.0",
-      "vlan_base": 2001,
+      "vlan_base": 2000,
       "dhcp_server": { "enable": true, "server_ip": "198.18.%d.1", "pool": "198.18.%d.100-199", "mask": "255.255.255.0" }
     }
   },

@@ -50,10 +50,10 @@
 #define NVR_DEF_ETH0_IP     "192.168.1.100"    /* eth0 静态缺省 IP */
 #define NVR_DEF_ETH0_MASK   "255.255.255.0"    /* eth0 静态缺省掩码 */
 /* eth1 PoE VLAN 基号:物理口 P → vid = base + P。
- * ★ base=2001 → 口 P 走 VLAN(2001+P)=2002..2017,与 PoE 交换芯片对物理口的 tag 一致
- *   (实测 口1→VLAN2002、口3→VLAN2004)。段(198.18.<seg>)仍取口号 P,故口↔段 1:1
- *   (口3→段3),且口16→VLAN2017 有对应接口。VLAN2001 留作 NVR 管理口。 */
-#define NVR_DEF_VLAN_BASE   2001   /* 本机 PoE 交换芯片 tag 口P→VLAN(2001+P);eth1.(2001+P)=段P。实测口9→VLAN2010 */
+ * ★ base=2000 → 口 P 走 VLAN(2000+P)=2001..2016,与 ODC 原厂固件一致(口1→VLAN2001、
+ *   口16→VLAN2016)。eth1.(2000+P)=198.18.P.100,段=vid−2000=口号。权威=ODC.frm:
+ *   S30eth1vlan(2001..2016) + dhcpd subnet 198.18.P→eth1.(2000+P)。三处须一致。 */
+#define NVR_DEF_VLAN_BASE   2000   /* PoE 交换芯片 tag 口P→VLAN(2000+P);eth1.(2000+P)=段P。对齐 ODC 原厂 */
 #define NVR_DEF_TIMEZONE    "UTC"       /* 缺省时区(系统时钟恒 UTC,时区仅显示) */
 /* NTP 保留 3 个:主(当前)+ Apple + Google */
 #define NVR_DEF_NTP1        "pool.ntp.org"

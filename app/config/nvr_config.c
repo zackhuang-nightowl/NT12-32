@@ -169,8 +169,8 @@ static void fill_poe_channel(nvr_config_t *c, const ch_defaults_t *d, int port, 
     snprintf(e->name, sizeof(e->name), "Camera %d", port);
     snprintf(e->user, sizeof(e->user), "%s", d->user);
     snprintf(e->pass, sizeof(e->pass), "%s", d->pass);
-    /* ★ PoE 口↔网段 1:1:口 P → 段 P(198.18.P.x)。交换芯片把口 P tag 到 VLAN(2001+P),
-     * NVR 侧 eth1.(2001+P) 取 IP 198.18.P.100(见 nvr_netime + NVR_DEF_VLAN_BASE=2001),
+    /* ★ PoE 口↔网段 1:1:口 P → 段 P(198.18.P.x)。交换芯片把口 P tag 到 VLAN(2000+P),
+     * NVR 侧 eth1.(2000+P) 取 IP 198.18.P.100(见 nvr_netime + NVR_DEF_VLAN_BASE=2000,对齐 ODC),
      * 相机固定 198.18.P.1。故 onvif_ip 段号 = 口号(与 sources 路径一致,无偏移)。 */
     ipfmt(e->onvif_ip, sizeof(e->onvif_ip), d->ip_pattern, port);
     e->onvif_port = 80;

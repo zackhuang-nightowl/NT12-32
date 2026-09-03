@@ -189,7 +189,7 @@ static void seed_from_json(nvr_settings_t *s, const char *dir)
                 nvr_settings_set_str(s, "network.eth0.gw",   jstr(e0, "gw",   ""));
             }
             cJSON *e1 = cJSON_GetObjectItem(net, "eth1");
-            if (e1) nvr_settings_set_int(s, "network.eth1.vlan_base", jint(e1, "vlan_base", 2001));
+            if (e1) nvr_settings_set_int(s, "network.eth1.vlan_base", jint(e1, "vlan_base", 2000));
             /* 种子 local_link(与 eth0 KV 对齐,供 GUI_getLocalLink) */
             {
                 nvr_local_link_t lk;

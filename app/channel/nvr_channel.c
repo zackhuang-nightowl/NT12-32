@@ -1045,7 +1045,7 @@ static void on_discovered(const nvr_onvif_cam_t *cam, void *user)
         return;
     }
 
-    /* ★ PoE 网段发现:相机在 198.18.<seg>.x(seg=第3段=口号,口 P→VLAN 2001+P→段 P)。
+    /* ★ PoE 网段发现:相机在 198.18.<seg>.x(seg=第3段=口号,口 P→VLAN 2000+P→段 P)。
      * 按 seg 匹配到**同网段的预建 PoE 口通道**(其 onvif_ip 也是 198.18.<seg>.x),更新为相机真实 IP
      * 并置在场+重解析。用 seg 匹配而非 octet-1,兼容任意配置映射。 */
     {

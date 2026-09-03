@@ -398,6 +398,13 @@ int nvr_net_local_link_apply(nvr_settings_t *s, const nvr_local_link_t *in)
 }
 
 /* ---------------- 网络 ---------------- */
+/* ★ PoE 板硬件规格(端口 PVID 示意图 + 真机确认):物理口 P 的 PVID 与相邻口**对调**——
+ *   口1→VLAN2002、口2→VLAN2001、口3→VLAN2004…口15→VLAN2016、口16→VLAN2015。
+ *   即 PVID = vlan_base + swap(P),swap 对调相邻奇偶(1↔2,3↔4,…,15↔16)。
+ *   故建 VLAN 接口/查口 VLAN 都走此换算(否则口P相机会错位到相邻口通道)。
+ *   段(198.18.P)仍=口号 P:eth1.(base+swap(P)) 配 198.18.P.100,让口P相机拿段P。 */
+#define POE_PVID_OFF(p)  (((p) & 1) ? (p) + 1 : (p) - 1)   /* 口→PVID 偏移:1↔2,3↔4,…,15↔16 */
+
 int nvr_net_apply(nvr_settings_t *s)
 {
     if (!s) return -1;
@@ -420,7 +427,7 @@ int nvr_net_apply(nvr_settings_t *s)
         snprintf(pkey, sizeof(pkey), "network.poe.port.%d.enable", p);
         if (!nvr_settings_get_int(s, pkey, 1)) continue;
 
-        int vid = vlan_base + p;
+        int vid = vlan_base + POE_PVID_OFF(p);   /* 口p→PVID(相邻奇偶对调,硬件规格) */
         run("vconfig add %s %d 2>/dev/null", NVR_ETH1, vid);
         run("ifconfig eth1.%d 198.18.%d.100 netmask 255.255.255.0 up 2>/dev/null", vid, p);
     }
@@ -486,7 +493,7 @@ int nvr_net_upnp_apply(nvr_settings_t *s)
 static int poe_vlan_id(nvr_settings_t *s, int channel)
 {
     int base = nvr_settings_get_int(s, "network.eth1.vlan_base", NVR_DEF_VLAN_BASE);
-    return base + channel;
+    return base + POE_PVID_OFF(channel);   /* 口→PVID 相邻对调(硬件规格) */
 }
 
 int nvr_net_poe_fill(nvr_chan_mgr_t *cm, nvr_settings_t *s, int channel,
