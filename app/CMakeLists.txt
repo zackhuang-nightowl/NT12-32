@@ -86,6 +86,7 @@ add_library(nvr_app_core STATIC
     ota/nvr_ota.c
     ota/nvr_ipc_ota.c
     netime/nvr_netime.c
+    netime/nvr_dhcp_omapi.c
     ble/nvr_ble.c
     playback/nvr_playback.c
     talk/nvr_talk.c

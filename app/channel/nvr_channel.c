@@ -1728,6 +1728,8 @@ int nvr_chan_set_stream(nvr_chan_mgr_t *m, int chn, int stream)
     return 0;
 }
 
+extern int nvr_dhcp_release_seg(int seg);   /* app/netime/nvr_dhcp_omapi.c:释放该段 DHCP 租约 */
+
 /* PoE 口相机移除:复位为空口占位(清 mac/serial/url/present/能力,IP 回 198.18.<口>.1,状态回
  * BOUND),停拉流并通知 GUI。PoE 口通道本身保留(不删 slot),仅清"设备"。见 [PoE 拔线即清]。 */
 static void clear_poe_port(nvr_chan_mgr_t *m, slot_t *s)
@@ -1748,6 +1750,11 @@ static void clear_poe_port(nvr_chan_mgr_t *m, slot_t *s)
     sync_nop_registry(m, &s->d);
     if (m->cfg.on_offline) m->cfg.on_offline(m->cfg.user, chn);
     chan_notify(m, chn);
+    /* ★ 主动释放该口 DHCP 租约:单地址池 range x.1 x.1,ISC dhcpd 只到期(300s)才释放、
+     * 不主动检测离线 → 旧机占着唯一地址,换机/重连拿不到 IP。此处离线确认(poe_miss≥阈值)
+     * 即经 OMAPI 释放 198.18.<口>.1,让新机即时获取。见 nvr_dhcp_omapi.c。 */
+    if (port >= 1)
+        nvr_dhcp_release_seg(port);
 }
 
 /* ---- 发现"扫一次"缓存刷新:后台线程,一次广播扫 LAN + 各 PoE 段,把全部相机 scopes 存缓存
