@@ -192,7 +192,7 @@ static void *worker_main(void *arg)
                     for (int di = 0; di < rsdk_group_count(up->cfg.group) && up->running; di++) {
                         rsdk_dev_t *d = rsdk_group_dev(up->cfg.group, di);
                         if (!d) continue;
-                        int m = rsdk_evtidx_query(d, 0, 0xFFFFFFFFu, -1, -1, ss, MAX_PENDING);
+                        int m = rsdk_evtidx_query(d, 0, 0xFFFFFFFFu, -1, -1, ss, MAX_PENDING, 0); /* FIFO: 最旧待传优先 */
                         for (int i = 0; i < m && up->running; i++) {
                             if (ss[i].state != RSDK_CLOUD_PENDING && ss[i].state != RSDK_CLOUD_RETRY)
                                 continue;

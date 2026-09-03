@@ -138,42 +138,51 @@ static int evt_cmp_desc(const void *a, const void *b)
 }
 
 /* 从事件索引区(盘上权威)收集事件:遍历盘组各盘的事件槽。 */
+/* 多盘 + 按通道收集事件(倒叙取最新)。
+ * per_ch_cap = 每个通道最多取"自己最新的"多少条(下推到每盘查询);
+ * 关键:按请求的每个通道分别下推 chn 过滤(chs0[qi]==-1 表示全通道单次查询),
+ * 这样低频通道不会被同盘高频通道占满"全局最新 cap"名额而漏掉——真正做到"按 ch 收集"。
+ * 各通道 × 各盘的结果并入 out(cap 上限),调用方再全局倒序 + 取 listNumber。 */
 static int collect_from_evtidx(rsdk_group_t *g, uint32_t t0, uint32_t t1,
                                const int *chs0, int nch,
                                const int *want, int nw,
-                               evt_rec_t *out, int cap)
+                               evt_rec_t *out, int cap, int per_ch_cap)
 {
     if (!g || cap <= 0) return 0;
-    rsdk_evt_slot_t *slots = (rsdk_evt_slot_t *)calloc(512, sizeof(rsdk_evt_slot_t));
+    int qcap = (per_ch_cap > 0 && per_ch_cap < cap) ? per_ch_cap : cap;
+    rsdk_evt_slot_t *slots = (rsdk_evt_slot_t *)calloc((size_t)qcap, sizeof(rsdk_evt_slot_t));
     if (!slots) return 0;
     int n = 0;
-    for (int di = 0; di < rsdk_group_count(g) && n < cap; di++) {
-        rsdk_dev_t *d = rsdk_group_dev(g, di);
-        if (!d) continue;
-        int m = rsdk_evtidx_query(d, t0, t1 ? t1 : 0xFFFFFFFFu, -1, -1, slots, 512);
-        for (int i = 0; i < m && n < cap; i++) {
-            rsdk_evt_slot_t *s = &slots[i];
-            int chn0 = (int)s->chn;
-            if (!chan_allowed(chs0, nch, chn0)) continue;
-            int rectype = (int)s->rectype;
-            uint32_t mask = s->type_mask ? s->type_mask
-                                         : ((rectype > 0 && rectype < 32) ? (1u << rectype) : 0);
-            if (!filter_types_hit(want, nw, rectype, mask)) continue;
-            uint32_t start = s->start_time;
-            if (start < t0 || (t1 && start > t1)) continue;
-            int dup = 0;   /* 多盘/多次收集去重 */
-            for (int k = 0; k < n; k++)
-                if (out[k].event_id && out[k].event_id == s->event_id) { dup = 1; break; }
-            if (dup) continue;
-            uint32_t end = (s->end_time == 0xFFFFFFFFu) ? 0 : s->end_time;
-            out[n].chn0 = chn0;
-            out[n].ts = start;
-            out[n].duration = (end > start) ? (end - start) : (uint32_t)NVR_EVT_POST_RECORD_S;
-            out[n].rectype = rectype;
-            out[n].type_mask = mask;
-            out[n].event_id = s->event_id;
-            out[n].has_snap = (s->flags & RSDK_EVT_HAS_SNAP) ? 1 : 0;
-            n++;
+    for (int qi = 0; qi < nch && n < cap; qi++) {
+        int chn_q = chs0[qi];   /* -1 = 全通道单次查询 */
+        for (int di = 0; di < rsdk_group_count(g) && n < cap; di++) {
+            rsdk_dev_t *d = rsdk_group_dev(g, di);
+            if (!d) continue;
+            int m = rsdk_evtidx_query(d, t0, t1 ? t1 : 0xFFFFFFFFu, chn_q, -1, slots, qcap, 1);
+            for (int i = 0; i < m && n < cap; i++) {
+                rsdk_evt_slot_t *s = &slots[i];
+                int chn0 = (int)s->chn;
+                if (chn_q < 0 && !chan_allowed(chs0, nch, chn0)) continue;
+                int rectype = (int)s->rectype;
+                uint32_t mask = s->type_mask ? s->type_mask
+                                             : ((rectype > 0 && rectype < 32) ? (1u << rectype) : 0);
+                if (!filter_types_hit(want, nw, rectype, mask)) continue;
+                uint32_t start = s->start_time;
+                if (start < t0 || (t1 && start > t1)) continue;
+                int dup = 0;   /* 多盘/多通道/多次收集去重 */
+                for (int k = 0; k < n; k++)
+                    if (out[k].event_id && out[k].event_id == s->event_id) { dup = 1; break; }
+                if (dup) continue;
+                uint32_t end = (s->end_time == 0xFFFFFFFFu) ? 0 : s->end_time;
+                out[n].chn0 = chn0;
+                out[n].ts = start;
+                out[n].duration = (end > start) ? (end - start) : (uint32_t)NVR_EVT_POST_RECORD_S;
+                out[n].rectype = rectype;
+                out[n].type_mask = mask;
+                out[n].event_id = s->event_id;
+                out[n].has_snap = (s->flags & RSDK_EVT_HAS_SNAP) ? 1 : 0;
+                n++;
+            }
         }
     }
     free(slots);
@@ -245,11 +254,25 @@ static char *query_event_list_common(cJSON *a, const nvr_cmd_ctx_t *c, int speci
         if (t1 < t0) t1 = t0;
     }
 
-    const int CAP = 2048;
+    /* 每通道取"最新 per_ch 条"即可覆盖最终排序输出的 list_num;分页(next/previous)时
+     * 还要覆盖 offset 深度。总缓冲 = per_ch × 通道数(带安全上限)。 */
+    int depth = list_num;
+    if (specific_order) {
+        int off_max = query_id + list_num;   /* next 的最大 offset */
+        if (off_max < 0) off_max = 0;
+        depth = off_max + list_num;
+    }
+    if (depth < list_num) depth = list_num;
+    if (depth > 4096) depth = 4096;          /* 安全上限(单通道单次拉取) */
+    int per_ch = depth;
+    long capL = (long)per_ch * (nch > 0 ? nch : 1);
+    if (capL < per_ch) capL = per_ch;
+    if (capL > 65536) capL = 65536;
+    const int CAP = (int)capL;
     evt_rec_t *buf = (evt_rec_t *)calloc((size_t)CAP, sizeof(evt_rec_t));
     int n = 0;
     if (buf) {
-        n = collect_from_evtidx(c->group, t0, t1, chs0, nch, want, nw, buf, CAP);
+        n = collect_from_evtidx(c->group, t0, t1, chs0, nch, want, nw, buf, CAP, per_ch);
         if (n > 1) qsort(buf, (size_t)n, sizeof(evt_rec_t), evt_cmp_desc);
     }
 
@@ -421,7 +444,9 @@ char *cmd_X_NightOwl_queryEventCalendar(cJSON *a, const nvr_cmd_ctx_t *c)
     evt_rec_t *buf = (evt_rec_t *)calloc((size_t)CAP, sizeof(evt_rec_t));
     int n = 0;
     if (buf) {
-        n = collect_from_evtidx(c->group, t0, t1, chs0, nch, NULL, 0, buf, CAP);
+        /* 月历是"哪天有事件"的覆盖统计:per_ch=CAP,全通道(chs0=[-1])即单次 chn=-1
+         * 扫描(与旧行为一致,只是改倒叙取最新);单/低频通道也不会被同盘高频挤掉。 */
+        n = collect_from_evtidx(c->group, t0, t1, chs0, nch, NULL, 0, buf, CAP, CAP);
     }
 
     if (strcmp(res, "month") == 0) {

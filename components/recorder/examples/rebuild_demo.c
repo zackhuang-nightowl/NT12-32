@@ -84,7 +84,7 @@ int main(int argc, char **argv) {
 
     /* ---- query 也能查到 ---- */
     rsdk_evt_slot_t out[8];
-    int n = rsdk_evtidx_query(d, t0 - 10, t1 + 10, 7, -1, out, 8);
+    int n = rsdk_evtidx_query(d, t0 - 10, t1 + 10, 7, -1, out, 8, 1);
     CHECK(n == 1 && out[0].event_id == eid, "query recovered event");
 
     rsdk_dev_close(d);

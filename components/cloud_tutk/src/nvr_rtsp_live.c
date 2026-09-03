@@ -160,7 +160,7 @@ static uint32_t pb_event_window_of(struct rsdk_group *grp, int chn, uint32_t sta
         rsdk_dev_t *d = rsdk_group_dev(grp, di);
         if (!d) continue;
         /* 窗口取 [start, start+1]:fileName 恰为事件槽 start_time,精确命中即可。 */
-        int m = rsdk_evtidx_query(d, start, start + 1, chn, -1, slots, 64);
+        int m = rsdk_evtidx_query(d, start, start + 1, chn, -1, slots, 64, 1);
         for (int i = 0; i < m; i++) {
             if ((int)slots[i].chn != chn || slots[i].start_time != start) continue;
             uint32_t end = slots[i].end_time;

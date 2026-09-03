@@ -83,12 +83,21 @@ rsdk_err_t rsdk_evtidx_get(rsdk_dev_t *d, uint64_t event_id, rsdk_evt_slot_t *ou
 }
 
 int rsdk_evtidx_query(rsdk_dev_t *d, uint32_t t0, uint32_t t1, int chn,
-                      int state, rsdk_evt_slot_t *out, int cap) {
+                      int state, rsdk_evt_slot_t *out, int cap, int newest_first) {
     if (!d || !out || cap <= 0) return 0;
     rsdk_systab_t *st = rsdk_dev_systab(d);
+    uint32_t count = st->evtidx_slot_count;
+    if (count == 0) return 0;
     if (t1 == 0) t1 = 0xFFFFFFFFu;
     int found = 0;
-    for (uint32_t i = 0; i < st->evtidx_slot_count && found < cap; i++) {
+    /* 环形按写入顺序排布(evtidx_next 指向下一写入位)。命中超过 cap 时:
+     *   newest_first: 从最近写入槽(next-1)倒叙扫,保留**最新** cap 条
+     *                 (旧实现从槽 0 顺扫凑满即停 → 返回最旧,回放"取最新"看不到近期事件)。
+     *   否则:         从最旧槽(next)顺叙扫,保留**最旧** cap 条(上传器 FIFO 补捞)。 */
+    uint32_t next = st->evtidx_next % count;
+    for (uint32_t k = 0; k < count && found < cap; k++) {
+        uint32_t i = newest_first ? (next + count - 1 - k) % count
+                                  : (next + k) % count;
         rsdk_evt_slot_t s; rd_evt(d, i, &s);
         if (!(s.flags & (RSDK_EVT_VALID | RSDK_EVT_OPEN))) continue;
         if (evt_crc(&s) != s.crc32) continue;                 /* 跳损坏槽 */
@@ -98,7 +107,7 @@ int rsdk_evtidx_query(rsdk_dev_t *d, uint32_t t0, uint32_t t1, int chn,
         if (state >= 0 && s.state != (uint8_t)state) continue;
         out[found++] = s;
     }
-    /* 按 start_time 升序 */
+    /* 按 start_time 升序(消费者/既有测试依赖升序输出) */
     for (int a = 0; a < found; a++)
         for (int b = a + 1; b < found; b++)
             if (out[b].start_time < out[a].start_time) {

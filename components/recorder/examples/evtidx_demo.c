@@ -62,11 +62,11 @@ int main(int argc, char **argv) {
 
     /* query: 通道13 全时段 → 2 条(e1,e2),按时间升序 */
     rsdk_evt_slot_t out[16];
-    int n = rsdk_evtidx_query(d, 0, 0, 13, -1, out, 16);
+    int n = rsdk_evtidx_query(d, 0, 0, 13, -1, out, 16, 1);
     CHECK(n == 2 && out[0].event_id == e1 && out[1].event_id == e2, "query chn13 -> e1,e2");
 
     /* query: 按状态 PENDING → 3 条 */
-    n = rsdk_evtidx_query(d, 0, 0, -1, RSDK_CLOUD_PENDING, out, 16);
+    n = rsdk_evtidx_query(d, 0, 0, -1, RSDK_CLOUD_PENDING, out, 16, 1);
     CHECK(n == 3, "query PENDING -> 3");
 
     /* patch 截图 */
@@ -79,14 +79,14 @@ int main(int argc, char **argv) {
     CHECK(rsdk_evtidx_get(d, e2, &g) == RSDK_OK && g.state == RSDK_CLOUD_UPLOADING
           && g.attempts == 1, "e2 uploading attempts=1");
     CHECK(rsdk_evtidx_patch_state(d, e2, RSDK_CLOUD_DONE, 0, 2070) == RSDK_OK, "e2 done");
-    n = rsdk_evtidx_query(d, 0, 0, -1, RSDK_CLOUD_DONE, out, 16);
+    n = rsdk_evtidx_query(d, 0, 0, -1, RSDK_CLOUD_DONE, out, 16, 1);
     CHECK(n == 1 && out[0].event_id == e2, "query DONE -> e2");
 
     /* invalidate chunk 20(e2) → 该事件消失 */
     int cl = rsdk_evtidx_invalidate_chunk(d, 20);
     CHECK(cl == 1, "invalidate chunk20 -> 1");
     CHECK(rsdk_evtidx_get(d, e2, &g) == RSDK_E_NOTFOUND, "e2 gone");
-    n = rsdk_evtidx_query(d, 0, 0, -1, -1, out, 16);
+    n = rsdk_evtidx_query(d, 0, 0, -1, -1, out, 16, 1);
     CHECK(n == 2, "remaining 2 events");
 
     rsdk_dev_close(d);

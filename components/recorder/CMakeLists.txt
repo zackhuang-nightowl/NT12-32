@@ -86,6 +86,9 @@ if(RSDK_BUILD_EXAMPLES)
 
   add_executable(evtidx_demo examples/evtidx_demo.c)   # 事件索引区: 写/查/patch/失效
   target_link_libraries(evtidx_demo rsdk)
+
+  add_executable(evtidx_newest_test examples/evtidx_newest_test.c)  # 事件查询倒叙(超 cap 取最新)
+  target_link_libraries(evtidx_newest_test rsdk)
 endif()
 
 install(TARGETS rsdk ARCHIVE DESTINATION lib)

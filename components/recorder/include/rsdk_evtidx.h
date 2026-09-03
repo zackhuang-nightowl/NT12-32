@@ -33,9 +33,12 @@ RSDK_API rsdk_err_t rsdk_evtidx_write(rsdk_dev_t *d, const rsdk_evt_slot_t *s);
 RSDK_API rsdk_err_t rsdk_evtidx_get(rsdk_dev_t *d, uint64_t event_id, rsdk_evt_slot_t *out);
 
 /* 按时间区间[t0,t1] + 通道 + 云存态过滤,时间升序返回。
- * chn<0=任意通道;state<0=任意态;t1=0 视为到最新。返回条数(≤cap)。 */
+ * chn<0=任意通道;state<0=任意态;t1=0 视为到最新。返回条数(≤cap)。
+ * newest_first!=0:命中超过 cap 时保留**最新的 cap 条**(回放"取最新"用,倒叙扫描);
+ * newest_first==0:保留**最旧的 cap 条**(上传器 FIFO 补捞用,顺叙扫描)。
+ * 两种模式返回结果都仍按 start_time 升序排列。 */
 RSDK_API int rsdk_evtidx_query(rsdk_dev_t *d, uint32_t t0, uint32_t t1, int chn,
-                               int state, rsdk_evt_slot_t *out, int cap);
+                               int state, rsdk_evt_slot_t *out, int cap, int newest_first);
 
 /* 回填截图指针到事件槽(抓拍落 MetaRegion 后调用),并置 RSDK_EVT_HAS_SNAP。 */
 RSDK_API rsdk_err_t rsdk_evtidx_patch_snap(rsdk_dev_t *d, uint64_t event_id,
