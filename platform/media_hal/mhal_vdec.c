@@ -270,7 +270,11 @@ fail:
     d->opened = 0;
     g_disp.ch[chn] = NULL;
     /* ★ 关键:关掉本次已开的 dec/proc/vout 路径。否则任一步失败后路径泄漏 → 同号(IN/OUT)下次
-     * hd_videodec_open 复用即 ALREADY_OPEN(-25),一路失败级联到全部通道黑屏。 */
+     * hd_videodec_open 复用即 ALREADY_OPEN(-25),一路失败级联到全部通道黑屏。
+     * 同 teardown 纪律:close 前先 stop(幂等,失败步可能已 start 过在显路径),满足 stop→unbind→close。 */
+    if (d->dec_path)  hd_videodec_stop(d->dec_path);
+    if (d->proc_path) hd_videoproc_stop(d->proc_path);
+    if (d->vout_path) hd_videoout_stop(d->vout_path);
     hd_videodec_unbind(HD_VIDEODEC_OUT(0, chn));
     hd_videoproc_unbind(HD_VIDEOPROC_OUT(chn, 0));
     if (d->vout_path) hd_videoout_close(d->vout_path);
@@ -377,9 +381,14 @@ int mhal_vdec_recv(mhal_vdec_t *d, void *yuv_buf, uint32_t *inout_len, uint32_t 
     return 0;
 }
 
-/* 拆绑/关路径/归还预算/释放。★ 前提:本路 dec/proc/vout 路径**已停**(离屏路径独立停,或
- * 在显路径已随一次 stop_list 停)。不做 commit、不动 g_disp.ch(调用方已摘)。commit 的 pending
- * 释放、以及非批量 close 都走这里。在 mhal_lock 保护下调用。 */
+/* 拆绑/关路径/归还预算/释放。不做 commit、不动 g_disp.ch(调用方已摘)。commit 的 pending
+ * 释放、以及非批量 close 都走这里。在 mhal_lock 保护下调用。
+ * ★ HDAL 拆路必须 stop→unbind→close 三步顺序:少了 stop,SDK 拒绝 unbind/close
+ *   ("should be stop at first" / "still bound ... please stop and unbind")→ 路径泄漏 →
+ *   同通道重开撞 ALREADY_OPEN(-25)/videoout busy(-22)→ 该格持久黑(真机:批量切子码流/
+ *   自由窗/变焦并发下 started_* 记账漏停即触发)。故此处**自洽地先停**,不再依赖调用方或
+ *   commit 的 stop_list 一定停过:stop 幂等——正常路径已停,此处再停是无害空操作;记账漏停
+ *   的异常路径靠这次 stop 兜住。 */
 /* 归还解码预算一次(幂等):关闭即还,避免在显解码器 defer 期间(未拆)仍占额 → 回放/新预览误判超预算。 */
 static void vdec_budget_free_once(struct mhal_vdec *d)
 {
@@ -393,6 +402,11 @@ void mhal_vdec_teardown(struct mhal_vdec *d)
 {
     if (!d) return;
     int chn = d->chn;
+    /* ① 先停(幂等):满足 HDAL stop→unbind→close,杜绝"未停就 close"导致的路径泄漏。 */
+    if (d->dec_path)  hd_videodec_stop(d->dec_path);
+    if (d->proc_path) hd_videoproc_stop(d->proc_path);
+    if (d->vout_path) hd_videoout_stop(d->vout_path);
+    /* ② 再拆绑、③ 再关路径。 */
     hd_videodec_unbind(HD_VIDEODEC_OUT(0, chn));
     hd_videoproc_unbind(HD_VIDEOPROC_OUT(chn, 0));
     if (d->vout_path) hd_videoout_close(d->vout_path);

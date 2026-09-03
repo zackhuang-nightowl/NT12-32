@@ -324,6 +324,12 @@ int mhal_vout_commit(void)
                 g_disp.need_clear = 0;
             }
         }
+    } else if (prev_started > 0) {
+        /* ★ 新集合为空(进 playback / 退 liveView:全部隐藏)。上面的 stop_list 只是**停解码**,
+         * vout 硬件仍残留最后一帧 → 屏幕冻结在原 liveView 画面。原逻辑清黑只在 if(n>0) 内,
+         * n==0 时被整段跳过 → 冻结不清。此处补:从"有窗"变为"无窗"时主动清整屏黑。 */
+        mhal_vout_clear_black();
+        g_disp.need_clear = 0;
     }
     mhal_unlock();
     return rc;
