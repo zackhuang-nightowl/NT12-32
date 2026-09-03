@@ -3,6 +3,7 @@
     "model": "NT12-32",
     "soc": "NT98633",
     "name": "NVR-01",
+    "type": "networkVideoRecorder",
     "sn": ""
   },
 

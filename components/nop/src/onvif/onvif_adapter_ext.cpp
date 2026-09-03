@@ -805,7 +805,7 @@ int nop_onvif_analytics_get_ai_caps(nop_onvif_device_t *device,
         return 0;
     memset(out, 0, sizeof(*out));
 
-    /* GetSupportedRules -> presence + @maxInstances per rule type. */
+    /* GetSupportedRules 为主：先登记支持的规则类型（含 ObjectDetection）。 */
     {
         tan_GetSupportedRules_REQ req;
         tan_GetSupportedRules_RES res;
@@ -826,8 +826,8 @@ int nop_onvif_analytics_get_ai_caps(nop_onvif_device_t *device,
         onvif_free_ConfigDescriptions(&res.SupportedRules.RuleDescription);
     }
 
-    /* GetRuleOptions -> option ranges/lists, parsed from Options.any raw XML. */
-    {
+    /* 只解析 SupportedRules 已声明的 RuleType；未声明的（如本例无 ObjectDetection）不读 Options。 */
+    if (out->line_present || out->field_present || out->object_present) {
         tan_GetRuleOptions_REQ req;
         tan_GetRuleOptions_RES res;
         memset(&req, 0, sizeof(req));
@@ -839,14 +839,14 @@ int nop_onvif_analytics_get_ai_caps(nop_onvif_device_t *device,
                 const char *rt  = strip_ns(o->RuleType);
                 const char *nm  = o->Name;
                 const char *any = o->any;
-                if (!strcmp(rt, "LineDetector")) {
+                if (out->line_present && !strcmp(rt, "LineDetector")) {
                     if (!strcmp(nm, "Segments"))         out->line_max_points = parse_range_max(any);
                     else if (!strcmp(nm, "Direction"))   parse_directions(any, out->line_directions, sizeof(out->line_directions));
                     else if (!strcmp(nm, "ClassFilter")) parse_classes(any, out->line_classes, sizeof(out->line_classes));
-                } else if (!strcmp(rt, "FieldDetector")) {
+                } else if (out->field_present && !strcmp(rt, "FieldDetector")) {
                     if (!strcmp(nm, "Field"))            out->field_max_vertices = parse_range_max(any);
                     else if (!strcmp(nm, "ClassFilter")) parse_classes(any, out->field_classes, sizeof(out->field_classes));
-                } else if (!strcmp(rt, "ObjectDetection")) {
+                } else if (out->object_present && !strcmp(rt, "ObjectDetection")) {
                     if (!strcmp(nm, "ClassFilter"))      parse_classes(any, out->object_classes, sizeof(out->object_classes));
                 }
             }
@@ -855,6 +855,106 @@ int nop_onvif_analytics_get_ai_caps(nop_onvif_device_t *device,
     }
     nop_onvif_device_ai_cache_put(device, config_token, out);
     return 0;
+}
+
+/* ConfigurationsSupported 空格/逗号分隔: "VideoSource VideoEncoder ... AudioSource AudioOutput"。 */
+static int media2_cfg_has(const char *list, const char *name)
+{
+    const char *p;
+    size_t      nlen;
+
+    if (!list || !name || !name[0])
+        return 0;
+    nlen = strlen(name);
+    p = list;
+    while (*p) {
+        const char *end;
+        size_t      len, i;
+        int         eq = 1;
+
+        while (*p == ' ' || *p == ',' || *p == '\t')
+            p++;
+        if (!*p)
+            break;
+        end = p;
+        while (*end && *end != ' ' && *end != ',' && *end != '\t')
+            end++;
+        len = (size_t)(end - p);
+        if (len != nlen)
+            eq = 0;
+        else {
+            for (i = 0; i < len; i++) {
+                if (tolower((unsigned char)p[i]) != tolower((unsigned char)name[i])) {
+                    eq = 0;
+                    break;
+                }
+            }
+        }
+        if (eq)
+            return 1;
+        p = end;
+    }
+    return 0;
+}
+
+static int media2_service_present(const ONVIF_DEVICE *dev)
+{
+    if (!dev)
+        return 0;
+    if (dev->Capabilities.media2.support)
+        return 1;
+    if (dev->Capabilities.media2.XAddr.url[0])
+        return 1;
+    if (dev->media_profiles)
+        return 1;
+    return 0;
+}
+
+/* GetServices(IncludeCapability) 已解析到 ConfigurationsSupported 则直接用;
+ * 解析不到且设备有 Media2 → 补打一次 tr2 GetServiceCapabilities,回写 handle,后续源复用。 */
+static const char *media2_configurations_supported(ONVIF_DEVICE *dev)
+{
+    onvif_ProfileCapabilities *pc;
+
+    if (!dev)
+        return NULL;
+    pc = &dev->Capabilities.media2.ProfileCapabilities;
+    if (pc->ConfigurationsSupportedFlag)
+        return pc->ConfigurationsSupported[0] ? pc->ConfigurationsSupported : NULL;
+    if (!media2_service_present(dev))
+        return NULL;
+
+    {
+        tr2_GetServiceCapabilities_REQ req;
+        tr2_GetServiceCapabilities_RES res;
+
+        memset(&req, 0, sizeof(req));
+        memset(&res, 0, sizeof(res));
+        if (onvif_tr2_GetServiceCapabilities(dev, &req, &res) &&
+            res.Capabilities.ProfileCapabilities.ConfigurationsSupported[0]) {
+            memcpy(pc, &res.Capabilities.ProfileCapabilities, sizeof(*pc));
+            pc->ConfigurationsSupportedFlag = 1;
+            fprintf(stderr, "[onvif] media2 GetServiceCapabilities fallback cfg=%s\n",
+                    pc->ConfigurationsSupported);
+            return pc->ConfigurationsSupported;
+        }
+    }
+    /* 已探过(失败或空):置 Flag,避免每源再打。 */
+    pc->ConfigurationsSupportedFlag = 1;
+    pc->ConfigurationsSupported[0] = '\0';
+    return NULL;
+}
+
+static void media2_cfg_apply_audio(const char *cfg, int *mic, int *speaker, int *decoder)
+{
+    if (!cfg)
+        return;
+    if (mic && media2_cfg_has(cfg, "AudioSource"))
+        *mic = 1;
+    if (speaker && media2_cfg_has(cfg, "AudioOutput"))
+        *speaker = 1;
+    if (decoder && media2_cfg_has(cfg, "AudioDecoder"))
+        *decoder = 1;
 }
 
 int nop_onvif_get_device_caps(nop_onvif_device_t *device, const char *source_token,
@@ -896,6 +996,11 @@ int nop_onvif_get_device_caps(nop_onvif_device_t *device, const char *source_tok
             if (p->va_cfg)                    out->has_analytics = 1;
         }
     }
+    /* profile 未带 AudioSource/AudioOutput:用 GetServices ConfigurationsSupported;
+     * 解析不到且有 Media2 → GetServiceCapabilities 候补(NOPMappingONVIF.md mic/speaker)。 */
+    if (!out->has_mic || !out->has_speaker)
+        media2_cfg_apply_audio(media2_configurations_supported(&device->dev),
+                               &out->has_mic, &out->has_speaker, NULL);
 
     /* focus: Imaging Move 支持。无 VideoSourceToken 则跳过，不空等。 */
     if (target[0]) {
@@ -1652,6 +1757,9 @@ int nop_onvif_get_media_caps(nop_onvif_device_t *device, nop_onvif_media_caps_t 
             if (p->ptz_cfg)                   out->ptz = 1;
         }
     }
+    if (!out->mic || !out->audio_out || !out->audio_dec)
+        media2_cfg_apply_audio(media2_configurations_supported(&device->dev),
+                               &out->mic, &out->audio_out, &out->audio_dec);
     if (out->mic || out->ptz || out->analytics || out->audio_out || out->audio_dec)
         return 0;
 

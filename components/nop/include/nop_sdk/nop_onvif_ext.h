@@ -350,6 +350,7 @@ int nop_onvif_analytics_delete_rule(nop_onvif_device_t *device, const char *conf
  * Class/direction lists are comma-joined ONVIF names ("Human,Vehicle" /
  * "Left,Right,Any"); a *_max_instances / *_max_* of 0 means the device did not
  * advertise a limit. Fields left 0/empty when the option is absent.
+ * GetRuleOptions 只解析 GetSupportedRules 已声明的 RuleType。
  */
 typedef struct nop_onvif_ai_caps {
     int  line_present;          /**< tt:LineDetector advertised            */

@@ -73,13 +73,15 @@ char *cmd_X_NightOwl_setInputChannelName(cJSON *a, const nvr_cmd_ctx_t *c)
 }
 char *cmd_getDeviceInfo(cJSON *a, const nvr_cmd_ctx_t *c)
 {
-    (void)a; char nm[64], sn[64], mdl[32], fw[32], mac[32] = "";
+    (void)a; char nm[64], sn[64], mdl[32], fw[32], typ[32], mac[32] = "";
     nvr_settings_get_str(c->settings, "system.device_name", nm, sizeof(nm), NVR_DEF_NAME);
     nvr_identity_get_sn(sn, sizeof(sn));   /* SN 由数据分区 /User/OWLSerialNumber 读取,恒定 */
     nvr_settings_get_str(c->settings, "system.model", mdl, sizeof(mdl), NVR_DEF_MODEL);
     nvr_settings_get_str(c->settings, "system.fw_version", fw, sizeof(fw), NVR_DEF_FW_VERSION);
+    nvr_settings_get_str(c->settings, "system.device_type", typ, sizeof(typ), NVR_DEF_DEVICE_TYPE);
     nvr_identity_get_mac("eth0", mac, sizeof(mac));
     cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "type", typ);
     cJSON_AddStringToObject(o, "name", nm); cJSON_AddStringToObject(o, "sn", sn);
     cJSON_AddStringToObject(o, "model", mdl);
     cJSON_AddNumberToObject(o, "channels", nvr_settings_get_int(c->settings, "system.capacity", NVR_DEF_CAPACITY));

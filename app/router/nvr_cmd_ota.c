@@ -38,8 +38,8 @@ static int build_nvr_url(const nvr_cmd_ctx_t *c, char *out, size_t cap)
 {
     char base[256], env[64], prod[64], model[48];
     ota_cfg(c, base, sizeof(base), env, sizeof(env));
-    nvr_settings_get_str(c->settings, "ota.nvr_product", prod, sizeof(prod),
-                         NVR_URL_OTA_NVR_PRODUCT);
+    nvr_settings_get_str(c->settings, "system.device_type", prod, sizeof(prod),
+                         NVR_DEF_DEVICE_TYPE);
     nvr_identity_get_model(model, sizeof(model));
     if (!model[0])
         nvr_settings_get_str(c->settings, "system.model", model, sizeof(model), NVR_DEF_MODEL);

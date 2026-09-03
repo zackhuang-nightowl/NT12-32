@@ -51,7 +51,7 @@ typedef struct {
 
 /* 系统级 */
 typedef struct {
-    char model[32], name[64], sn[64];
+    char model[32], name[64], sn[64], type[32];
     int  capacity, poe_ports, ip_channels;
     int  hdmi_w, hdmi_h, default_layout;
 } nvr_sys_cfg_t;

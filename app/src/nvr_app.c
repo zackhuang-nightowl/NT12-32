@@ -725,7 +725,7 @@ static int write_tutk_profile(nvr_app_t *a)
 
     char fw[32], type[32], model[32], sn[64] = "";
     nvr_settings_get_str(a->settings, "system.fw_version",  fw,   sizeof(fw),   NVR_DEF_FW_VERSION);
-    nvr_settings_get_str(a->settings, "tutk.device_type",   type, sizeof(type), NVR_DEF_TUTK_DEV_TYPE);
+    nvr_settings_get_str(a->settings, "system.device_type", type, sizeof(type), NVR_DEF_DEVICE_TYPE);
     nvr_identity_get_model(model, sizeof(model));              /* MODEL ← /User/OWLModel */
     nvr_identity_get_sn(sn, sizeof(sn));                       /* SN ← /User/OWLSerialNumber */
 

@@ -81,6 +81,7 @@ static void load_system(nvr_config_t *c, cJSON *j)
     if (dev) {
         snprintf(s->model, sizeof(s->model), "%s", jstr(dev, "model", NVR_DEF_MODEL));
         snprintf(s->name,  sizeof(s->name),  "%s", jstr(dev, "name",  NVR_DEF_NAME));
+        snprintf(s->type,  sizeof(s->type),  "%s", jstr(dev, "type",  NVR_DEF_DEVICE_TYPE));
     }
     /* SN 来自数据分区 /User/OWLSerialNumber(恒定),非 JSON;供磁盘加密派生 device_sn。 */
     nvr_identity_get_sn(s->sn, sizeof(s->sn));

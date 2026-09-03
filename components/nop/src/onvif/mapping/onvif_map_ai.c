@@ -613,37 +613,11 @@ nop_status_t onvif_map_AI_setDetectThreshold(nop_onvif_map_backend_t *be, int ch
 static nop_json_t *make_obj_caps(void)
 {
     nop_json_t *e = nop_json_obj();
-    nop_json_t *draw_in = nop_json_arr();
     nop_json_t *meta = nop_json_obj();
-    // nop_json_add_bool(e, "drawRegion", true);
-    // nop_json_add_bool(e, "drawText", true);
-    // nop_json_arr_push_str(draw_in, "main");
-    // nop_json_arr_push_str(draw_in, "sub");
-    // nop_json_add(e, "drawIn", draw_in);
-    // nop_json_add(e, "minMaxFilter", nop_json_obj());
     nop_json_add(e, "threshold", nop_json_obj());
     nop_json_add_bool(meta, "eventExtInfo", true);
     nop_json_add(e, "metaData", meta);
     return e;
-}
-
-/* ONVIF direction CSV ("Left,Right,Any") -> NOP direction json array. */
-static nop_json_t *onvif_dirs_to_nop_arr(const char *csv)
-{
-    nop_json_t *arr = nop_json_arr();
-    const char *p = csv;
-    char        tok[16];
-    while (p && *p) {
-        const char *comma = strchr(p, ',');
-        int len = comma ? (int)(comma - p) : (int)strlen(p);
-        if (len > 0 && len < (int)sizeof(tok)) {
-            memcpy(tok, p, len); tok[len] = '\0';
-            nop_json_arr_push_str(arr, onvif_dir_to_nop(tok));
-        }
-        if (!comma) break;
-        p = comma + 1;
-    }
-    return arr;
 }
 
 /* Add one objectDetection entry per ONVIF-advertised class (CSV of ONVIF names). */
@@ -663,6 +637,25 @@ static void add_object_caps(nop_json_t *obj, const char *onvif_classes_csv)
         if (!comma) break;
         p = comma + 1;
     }
+}
+
+/* ONVIF direction CSV ("Left,Right,Any") -> NOP direction json array. */
+static nop_json_t *onvif_dirs_to_nop_arr(const char *csv)
+{
+    nop_json_t *arr = nop_json_arr();
+    const char *p = csv;
+    char        tok[16];
+    while (p && *p) {
+        const char *comma = strchr(p, ',');
+        int len = comma ? (int)(comma - p) : (int)strlen(p);
+        if (len > 0 && len < (int)sizeof(tok)) {
+            memcpy(tok, p, len); tok[len] = '\0';
+            nop_json_arr_push_str(arr, onvif_dir_to_nop(tok));
+        }
+        if (!comma) break;
+        p = comma + 1;
+    }
+    return arr;
 }
 
 nop_status_t onvif_map_AI_getChannelAICapabilities(nop_onvif_map_backend_t *be, int ch,
@@ -687,12 +680,13 @@ nop_status_t onvif_map_AI_getChannelAICapabilities(nop_onvif_map_backend_t *be, 
     resp->content = nop_json_obj();
     if (!resp->content) return NOP_ERR_NOMEM;
 
-    /* objectDetection: one entry per ONVIF-advertised class. */
+    /* objectDetection: 仅当 GetSupportedRules 含 ObjectDetection 时才有 classes。 */
     obj = nop_json_obj();
-    add_object_caps(obj, caps.object_classes);
+    if (caps.object_present)
+        add_object_caps(obj, caps.object_classes);
     nop_json_add(resp->content, "objectDetection", obj);
 
-    /* ruledDetection: lineCross + fieldIntrusion (ObjectMissing has no ONVIF rule). */
+    /* ruledDetection: lineCross + fieldIntrusion (ObjectMissing has no ONVIF rule)。 */
     ruled = nop_json_obj();
     if (caps.line_present) {
         nop_json_t *line = nop_json_obj();

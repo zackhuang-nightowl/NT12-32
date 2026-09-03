@@ -54,7 +54,9 @@ nvr_gql_rc_t nvr_graphql_add_device(const nvr_gql_add_device_in_t *in,
     cJSON_AddStringToObject(data, "locationId", "default");
     cJSON_AddStringToObject(data, "name",
                             (in->name && in->name[0]) ? in->name : "NVR");
-    cJSON_AddStringToObject(data, "deviceType", "videoRecorder");
+    cJSON_AddStringToObject(data, "deviceType",
+                            (in->device_type && in->device_type[0])
+                                ? in->device_type : NVR_DEF_DEVICE_TYPE);
     cJSON_AddStringToObject(data, "role", "admin");
     cJSON_AddStringToObject(data, "p2pProvider", "tutk");
     cJSON_AddStringToObject(cred, "primaryKey",

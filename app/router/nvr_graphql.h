@@ -24,6 +24,7 @@ typedef struct {
     const char *access_token;    /* Cognito AccessToken（必填） */
     const char *uid;             /* TUTK UID */
     const char *name;            /* 设备显示名 */
+    const char *device_type;     /* networkVideoRecorder 等；空则用 NVR_DEF_DEVICE_TYPE */
     const char *primary_key;     /* IOTC authkey */
     const char *av_key;          /* AV 密码 */
     const char *bluetooth_id;    /* 可空 */

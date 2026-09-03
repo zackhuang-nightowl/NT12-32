@@ -15,7 +15,8 @@
 #define NVR_DEF_MODEL       "NOP12-32"  /* 机型(权威源 /User/OWLModel;此为回退缺省) */
 #define NVR_DEF_NAME        "NVR"       /* 设备名缺省 */
 #define NVR_DEF_FW_VERSION  "1.0.0"           /* 固件版本(getDeviceInfo/TUTK profile) */
-#define NVR_DEF_TUTK_DEV_TYPE "videoRecorder" /* TUTK profile 设备类型(APP 向导契约) */
+#define NVR_DEF_DEVICE_TYPE "networkVideoRecorder" /* getDeviceInfo.type / OTA / addDevice / TUTK；权威源 system.json device.type */
+#define NVR_DEF_TUTK_DEV_TYPE NVR_DEF_DEVICE_TYPE
 #define NVR_DEF_CAPACITY    32          /* 整机通道容量(= 16 PoE + 16 LAN) */
 
 /* ================= 事件录像 出厂默认(UI 设置库缺省时回退;库存在则以库为准) =====

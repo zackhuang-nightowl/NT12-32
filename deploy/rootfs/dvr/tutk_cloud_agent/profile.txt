@@ -9,7 +9,7 @@
     "address": "XXXX",
     "email": "XXX"
   },
-  "type": "videoRecorder",
+  "type": "networkVideoRecorder",
   "devicePicture": "https://XXXX",
   "p2pProtocols": [
     "iotc-tunnel:8554",

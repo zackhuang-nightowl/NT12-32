@@ -170,6 +170,8 @@ static void seed_from_json(nvr_settings_t *s, const char *dir)
         if (dev) {
             nvr_settings_set_str(s, "system.model", jstr(dev, "model", "NT12-32"));
             nvr_settings_set_str(s, "system.device_name", jstr(dev, "name", "NVR"));
+            nvr_settings_set_str(s, "system.device_type",
+                                 jstr(dev, "type", "networkVideoRecorder"));
             /* system.sn 不再种子:SN 由数据分区 /User/OWLSerialNumber 读取(见 nvr_identity)。 */
         }
         cJSON *tm = cJSON_GetObjectItem(sys, "time");
@@ -486,6 +488,15 @@ int nvr_settings_open(const char *db_path, const char *json_defaults_dir, nvr_se
         sqlite3_finalize(st);
     }
     if (!seeded) seed_from_json(s, json_defaults_dir);
+    /* device.type 以 system.json 为准：已播种库也覆盖，与机型 config 同源。 */
+    if (json_defaults_dir) {
+        cJSON *sys = load_json_dir(json_defaults_dir, "system.json");
+        cJSON *dev = sys ? cJSON_GetObjectItem(sys, "device") : NULL;
+        const char *typ = jstr(dev, "type", "networkVideoRecorder");
+        nvr_settings_set_str(s, "system.device_type",
+                             (typ && typ[0]) ? typ : "networkVideoRecorder");
+        if (sys) cJSON_Delete(sys);
+    }
 
     *out = s;
     return 0;

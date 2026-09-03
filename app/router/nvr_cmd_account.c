@@ -258,11 +258,15 @@ static char *login_aws(const nvr_cmd_ctx_t *c, const char *username, const char 
             NVR_LOGW("account", "aws bind: empty tutk.uid");
             return login_result(NOP_RESULT_FAIL_ADD_TO_ACCOUNT, "aws", NULL);
         }
+        char devtype[32];
+        nvr_settings_get_str(c->settings, "system.device_type", devtype, sizeof(devtype),
+                             NVR_DEF_DEVICE_TYPE);
         char stoken[256];
         nvr_gql_add_device_in_t gin = {
             .access_token = u.access_token,
             .uid = uid,
             .name = name,
+            .device_type = devtype,
             .primary_key = authkey,
             .av_key = avkey,
             .bluetooth_id = blekey,
