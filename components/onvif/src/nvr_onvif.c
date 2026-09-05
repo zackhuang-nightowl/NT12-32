@@ -69,6 +69,26 @@ int nvr_onvif_cached_scopes(const char *ip, char *scopes, int scopes_cap,
     return rc;
 }
 
+/* ★ 外部直接播种发现缓存:LanSearch 已经拿到该机 scopes(含 nopOnvif 标识)+service_url+port,
+ * add 后首解析(resolve_stream_url 第①步)即命中缓存 → 立刻判成 NOPONVIF → try_activate 算 P_act
+ * → 秒连;不再回落**全局串行的单路 2s probe**(未命中/慢/失败 → kind 停 ONVIF、auth_locked 短路 P_act
+ * → 首次添加密码对也不出图/要很久)。开机广播扫描同样经此缓存,语义一致。 */
+void nvr_onvif_cache_seed(const char *ip, const char *scopes, const char *service_url, int port)
+{
+    if (!ip || !ip[0] || !scopes || !scopes[0]) return;
+    pthread_mutex_lock(&g_disc_lock);
+    int i, slot = -1;
+    for (i = 0; i < g_disc_n; i++) if (strcmp(g_disc[i].ip, ip) == 0) { slot = i; break; }
+    if (slot < 0) { slot = (g_disc_n < NVR_DISC_MAX) ? g_disc_n++ : 0; memset(&g_disc[slot], 0, sizeof(g_disc[slot])); }
+    snprintf(g_disc[slot].ip, sizeof(g_disc[slot].ip), "%s", ip);
+    snprintf(g_disc[slot].scopes, sizeof(g_disc[slot].scopes), "%s", scopes);
+    if (service_url && service_url[0])
+        snprintf(g_disc[slot].service_url, sizeof(g_disc[slot].service_url), "%s", service_url);
+    if (port > 0) g_disc[slot].port = port;
+    g_disc[slot].ts = time(NULL);
+    pthread_mutex_unlock(&g_disc_lock);
+}
+
 int nvr_onvif_init(void)
 {
     if (g_inited) return 0;
@@ -178,6 +198,23 @@ int nvr_onvif_connect(const char *ip, int port, const char *service_url,
                   path[0] ? path : "/onvif/device_service",
                   rc == 0 ? "ok" : (rc == NVR_ONVIF_AUTH ? "AUTH" : "FAIL"));
     return rc;
+}
+
+/* 轻量鉴权探针(试密码用):端点定位 + GetProfiles 判鉴权。0=对;NVR_ONVIF_AUTH=401;NVR_ONVIF_ERR=其它。
+ * 短超时(3s),不建完整会话——错密码快速否决。命中后调用方再 nvr_onvif_connect+get_url 完整构建。 */
+int nvr_onvif_try_auth(const char *ip, int port, const char *user, const char *pass)
+{
+    nop_onvif_device_t *dev;
+    int p, rc;
+    if (!ip || !ip[0]) return NVR_ONVIF_ERR;
+    if (nvr_onvif_init() != 0) return NVR_ONVIF_ERR;
+    p = port > 0 ? port : 80;
+    dev = nop_onvif_device_retain(ip, p, NULL, 0);
+    if (!dev) return NVR_ONVIF_ERR;
+    nop_onvif_device_set_timeout(dev, 3000);   /* 试密码短超时;命中后 connect 用长超时 */
+    rc = nop_onvif_device_try_auth(dev, user, pass);
+    nop_onvif_device_drop(ip, p);
+    return (rc == 0) ? 0 : (rc == -2 ? NVR_ONVIF_AUTH : NVR_ONVIF_ERR);
 }
 
 int nvr_onvif_auth_failed(const char *ip, int port)

@@ -84,6 +84,8 @@ static const char *DDL =
     "  codec INTEGER, stream INTEGER, record INTEGER,"
     "  uuid TEXT, serial TEXT, manufacturer TEXT, model TEXT, firmware TEXT,"
     "  bound INTEGER, active INTEGER, video_source_token TEXT, enh_random TEXT,"
+    "  is_main INTEGER DEFAULT 0,"          /* 多源:首分配通道=主 channel 持久标记(只 delDevice 清) */
+    "  enh_on INTEGER DEFAULT 0,"           /* enhancedSecurity 开关(NOP/ONVIF 统一持久化;off=无鉴权连接) */
     "  updated INTEGER DEFAULT (strftime('%s','now')));"
     /* 每通道能力集(开库预置空行;上线探测后 UPDATE。删设备只把本行清成空,不删行)。 */
     "CREATE TABLE IF NOT EXISTS camera_capability("
@@ -320,7 +322,7 @@ static void seed_from_json(nvr_settings_t *s, const char *dir)
  * (DDL 已按当前结构建好)重复跑迁移也安全。 */
 /* 当前结构版本 = 2(camera 取代 channel、网络服务表取代 netif、录像/推送/云存排程规范化;见文件头)。
  * 这是已发布基线,无 v1→v2 迁移(v1 未出厂)。以后改结构 → 版本 +1 + 在 migrate_settings 加 ALTER。 */
-#define NVR_SETTINGS_SCHEMA_VERSION 10
+#define NVR_SETTINGS_SCHEMA_VERSION 12
 
 /* 通道 PK 表出厂默认:开库 / 恢复出厂都 INSERT OR IGNORE 补齐 0..31,绝不覆盖用户已改。
  * 之后接口只 UPDATE 已有行。schedule 是 (chn,domain,sensor,rule_id) 复合键,事件排程按
@@ -440,6 +442,13 @@ static void migrate_settings(sqlite3 *db, int from)
         sqlite3_exec(db, "ALTER TABLE camera ADD COLUMN url_main TEXT;", 0, 0, 0);
         sqlite3_exec(db, "ALTER TABLE camera ADD COLUMN url_sub TEXT;", 0, 0, 0);
     }
+    /* v11:多视频源 —— camera 增列 is_main(首分配通道=主 channel 持久标记,与当前显示的源解耦;
+     * 只有 delDevice 才清)。ADD COLUMN 幂等。 */
+    if (from < 11)
+        sqlite3_exec(db, "ALTER TABLE camera ADD COLUMN is_main INTEGER DEFAULT 0;", 0, 0, 0);
+    /* v12:enhancedSecurity 统一开关列(NOP/ONVIF 都用;off=无鉴权连接)。ADD COLUMN 幂等。 */
+    if (from < 12)
+        sqlite3_exec(db, "ALTER TABLE camera ADD COLUMN enh_on INTEGER DEFAULT 0;", 0, 0, 0);
 }
 
 int nvr_settings_open(const char *db_path, const char *json_defaults_dir, nvr_settings_t **out)
@@ -664,7 +673,7 @@ int nvr_settings_camera_upsert(nvr_settings_t *s, const nvr_camera_row_t *r)
         "dev_chn=?,ip=?,mac=?,username=?,password=?,onvif_port=?,nop_port=?,service_url=?,"
         "url=?,url_main=?,url_sub=?,onvif_auto=?,poe_port=?,codec=?,stream=?,record=?,uuid=?,serial=?,"
         "manufacturer=?,model=?,firmware=?,bound=?,active=?,video_source_token=?,"
-        "enh_random=?,updated=strftime('%s','now') WHERE chn=?;",
+        "enh_random=?,is_main=?,enh_on=?,updated=strftime('%s','now') WHERE chn=?;",
         -1, &st, NULL) != SQLITE_OK) return -1;
     int c = 1;
     bind_txt(st, c++, r->name);
@@ -699,6 +708,8 @@ int nvr_settings_camera_upsert(nvr_settings_t *s, const nvr_camera_row_t *r)
     sqlite3_bind_int (st, c++, r->active);
     bind_txt(st, c++, r->video_source_token);
     bind_txt(st, c++, r->enh_random);
+    sqlite3_bind_int (st, c++, r->is_main);
+    sqlite3_bind_int (st, c++, r->enh_on);
     sqlite3_bind_int (st, c++, r->chn);
     if (finish_update(s->db, st) != 0) return -1;
     notify(s, "camera."); return 0;
@@ -706,7 +717,7 @@ int nvr_settings_camera_upsert(nvr_settings_t *s, const nvr_camera_row_t *r)
 static const char *CAMERA_COLS =
     "chn,name,enabled,source,protocol,kind,backend,type,dev_chn,ip,mac,username,password,"
     "onvif_port,nop_port,service_url,url,url_main,url_sub,onvif_auto,poe_port,codec,stream,record,"
-    "uuid,serial,manufacturer,model,firmware,bound,active,video_source_token,enh_random";
+    "uuid,serial,manufacturer,model,firmware,bound,active,video_source_token,enh_random,is_main,enh_on";
 static void camera_row_from_stmt(sqlite3_stmt *st, nvr_camera_row_t *r)
 {
     memset(r, 0, sizeof(*r)); int c = 0;
@@ -743,6 +754,8 @@ static void camera_row_from_stmt(sqlite3_stmt *st, nvr_camera_row_t *r)
     r->active = sqlite3_column_int(st, c++);
     col_txt(st, c++, r->video_source_token, sizeof(r->video_source_token));
     col_txt(st, c++, r->enh_random, sizeof(r->enh_random));
+    r->is_main = sqlite3_column_int(st, c++);
+    r->enh_on = sqlite3_column_int(st, c++);
 }
 /* 删除设备 = 只清空该 chn 的 camera 字段 + 能力探测结果,**不删任何通道行**
  * (录像/推送/云存/排程跟槽位走,换机保留)。主键恒稳,杜绝跨行删。 */
@@ -755,7 +768,7 @@ int nvr_settings_camera_delete(nvr_settings_t *s, int chn)
             "UPDATE camera SET name='',enabled=0,source='',protocol='',kind=0,backend=0,type='single',"
             "dev_chn=1,ip='',mac='',username='',password='',onvif_port=0,nop_port=0,service_url='',url='',"
             "onvif_auto=0,poe_port=0,codec=0,stream=0,record=0,uuid='',serial='',manufacturer='',model='',"
-            "firmware='',bound=0,active=0,video_source_token='',enh_random='',updated=strftime('%s','now') WHERE chn=?;",
+            "firmware='',bound=0,active=0,video_source_token='',enh_random='',is_main=0,enh_on=0,updated=strftime('%s','now') WHERE chn=?;",
             -1, &st, NULL) != SQLITE_OK) { exec_sql(s->db, "ROLLBACK;"); return -1; }
     sqlite3_bind_int(st, 1, chn);
     if (sqlite3_step(st) != SQLITE_DONE) { sqlite3_finalize(st); exec_sql(s->db, "ROLLBACK;"); return -1; }

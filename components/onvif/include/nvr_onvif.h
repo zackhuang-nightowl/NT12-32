@@ -41,6 +41,10 @@ int  nvr_onvif_connect(const char *ip, int port, const char *service_url,
                        const char *user, const char *pass);
 void nvr_onvif_disconnect(const char *ip, int port);
 
+/* 轻量鉴权探针(试密码用):端点定位 + GetProfiles 判鉴权。0=账密对;NVR_ONVIF_AUTH=401;NVR_ONVIF_ERR=其它。
+ * 错密码快速否决(不建完整会话);命中后再 nvr_onvif_connect + get_url 完整构建取流。 */
+int  nvr_onvif_try_auth(const char *ip, int port, const char *user, const char *pass);
+
 /** 借 retain 查该机 handle 是否刚发生 ONVIF 鉴权失败。 */
 int  nvr_onvif_auth_failed(const char *ip, int port);
 
@@ -54,6 +58,8 @@ int  nvr_onvif_probe_scopes(const char *ip, char *scopes, int scopes_cap,
 int  nvr_onvif_scan(const char *local_ip, int seconds);
 int  nvr_onvif_cached_scopes(const char *ip, char *scopes, int scopes_cap,
                              char *service_url, int svc_cap, int *port_io);
+/* 外部播种发现缓存(LanSearch 已拿到 scopes 时):add 后首解析命中缓存,免慢/串行的单路 probe。 */
+void nvr_onvif_cache_seed(const char *ip, const char *scopes, const char *service_url, int port);
 
 /* 已连接则 GetScopes SOAP；否则只靠 probe_scopes。优先 SOAP。0=有内容。 */
 int  nvr_onvif_get_scopes(const char *ip, int port, const char *user, const char *pass,

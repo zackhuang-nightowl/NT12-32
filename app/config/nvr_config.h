@@ -47,6 +47,8 @@ typedef struct {
     int  dev_chn;                 /* 源序号(设备侧 channel;单源=1;透传改写目标) */
     char type[8];                 /* "single" | "multi"(多源;同 mac 归组) */
     char enh_random[32];          /* NOP digest random；空=普通模式。NVR reset 才清。 */
+    int  is_main;                 /* 多源:1=首分配通道(主 channel,设备代表);只 delDevice 清 */
+    int  enh_on;                  /* enhancedSecurity 开关(NOP/ONVIF 统一;off=无鉴权连接) */
 } nvr_channel_t;
 
 /* 系统级 */

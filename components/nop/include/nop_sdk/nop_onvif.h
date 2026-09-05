@@ -89,6 +89,10 @@ void nop_onvif_device_drop(const char *host, int port);
 /** 连接时一次：set_auth + GetCapabilities + GetServices + GetProfiles + 各源 token/caps/OSD/venc。已连接则只改密。 */
 int  nop_onvif_device_connect(nop_onvif_device_t *device,
                               const char *username, const char *password);
+/** 轻量鉴权探针(试密码用):定位端点 + GetProfiles 判鉴权。0=账密对;-2=401;-1=连不上/无 profile。
+ *  不缓存/不置 connected;命中后再 nop_onvif_device_connect 完整构建。 */
+int  nop_onvif_device_try_auth(nop_onvif_device_t *device,
+                               const char *username, const char *password);
 int  nop_onvif_device_connected(const nop_onvif_device_t *device);
 /** 401/NotAuthorized（digest 重试耗尽）后由 ONVIF 栈置位。 */
 int  nop_onvif_device_auth_failed(const nop_onvif_device_t *device);

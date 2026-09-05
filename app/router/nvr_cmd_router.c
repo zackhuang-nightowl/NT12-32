@@ -157,6 +157,25 @@ static char *fallback_nop(nvr_cmd_router_t *r, const char *json_in)
     return nvr_resp_not_support();
 }
 
+/* 映射(ONVIF)路径按 0-based 回显 content.channel;GUI 协议是 1-based。把响应里的
+ * channel 改回请求的 1-based(仅动 channel 字段,不碰其它内容)。返回新串(释放旧串);
+ * 无 content.channel 或解析失败则原样返回。透传路径不经过此处(设备应答原样返回)。 */
+static char *restore_resp_channel(char *out, int channel_1based)
+{
+    if (!out) return out;
+    cJSON *root = cJSON_Parse(out);
+    if (!root) return out;
+    cJSON *content = cJSON_GetObjectItem(root, "content");
+    cJSON *cf = content ? cJSON_GetObjectItem(content, "channel") : NULL;
+    if (cJSON_IsNumber(cf)) {
+        cJSON_SetIntValue(cf, channel_1based);
+        char *fixed = cJSON_PrintUnformatted(root);
+        if (fixed) { free(out); out = fixed; }
+    }
+    cJSON_Delete(root);
+    return out;
+}
+
 /* ------------------------- 顶层分派 ------------------------- */
 char *nvr_cmd_dispatch(nvr_cmd_router_t *r, const char *json_in)
 {
@@ -243,6 +262,9 @@ char *nvr_cmd_dispatch(nvr_cmd_router_t *r, const char *json_in)
                     NVR_LOGI("router", "%s mapping-fallback ch%d %ldms",
                              func, channel, mono_ms() - t0);
                 }
+                /* 透传下发设备时 channel 已改成 dev_ch(见上,通常 1);设备按自己的 channel 回显,
+                 * 这里把响应 channel 改回请求的 NVR 1-based(仅 channel,不动其它内容)。 */
+                out = restore_resp_channel(out, channel);
                 free(rewritten);
                 cJSON_Delete(req);
                 return out;
@@ -262,6 +284,8 @@ char *nvr_cmd_dispatch(nvr_cmd_router_t *r, const char *json_in)
         {
             long t0 = mono_ms();
             char *out = fallback_nop(r, rewritten ? rewritten : json_in);
+            /* 映射内部按 0-based 回显 channel → 转回请求的 1-based(仅 channel,不动内容)。 */
+            out = restore_resp_channel(out, channel);
             NVR_LOGI("router", "%s mapping ch%d %ldms",
                      func ? func : "?", channel, mono_ms() - t0);
             free(rewritten);
@@ -322,6 +346,12 @@ int nvr_cmd_router_start(const nvr_cmd_router_cfg_t *cfg, nvr_cmd_router_t **out
     NVR_LOGI("router", "命令路由就绪(表驱动 %d 项;作为 8089 入口处理器)", g_nvr_cmd_table_len);
     *out = r;
     return 0;
+}
+
+void nvr_cmd_router_expand_sources(nvr_cmd_router_t *r, const char *ip)
+{
+    if (!r || !ip || !ip[0]) return;
+    nvr_lan_expand_sources(&r->ctx, ip);   /* 用 router 自持 ctx(长生命)后台展开,不阻塞、不碰 disp_lock */
 }
 
 void nvr_cmd_router_stop(nvr_cmd_router_t *r)

@@ -380,6 +380,8 @@ int nvr_config_overlay_from_settings(nvr_config_t *cfg, nvr_settings_t *settings
         e->vout_win   = e->chn;
         /* 多视频源:恢复源序号/类型/token(重启后 get_url 按 token 拉各自源流) */
         e->dev_chn    = r->dev_chn > 0 ? r->dev_chn : 1;
+        e->is_main    = r->is_main;      /* 多源:恢复主 channel 标记 */
+        e->enh_on     = r->enh_on;       /* enhancedSecurity 开关恢复 */
         if (r->type[0]) snprintf(e->type, sizeof(e->type), "%s", r->type);
         snprintf(e->video_source_token, sizeof(e->video_source_token), "%s", r->video_source_token);
         snprintf(e->enh_random, sizeof(e->enh_random), "%s", r->enh_random);

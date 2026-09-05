@@ -50,6 +50,10 @@ void nvr_cmd_router_stop (nvr_cmd_router_t *r);
 /* 纯函数：一条 NOP JSON → 应答(malloc；调用方 free)。可主机单测(不起 HTTP)。 */
 char *nvr_cmd_dispatch(nvr_cmd_router_t *r, const char *json_in);
 
+/* 代表通道(主源)出图后触发默认多源展开:用 router 自持的 ctx 后台枚举源、其余源各占一路出图。
+ * 由 app 的通道上线事件(chan_online_apply)对 is_main / 首源通道调用。幂等、不阻塞、不碰 disp_lock。 */
+void nvr_cmd_router_expand_sources(nvr_cmd_router_t *r, const char *ip);
+
 #ifdef __cplusplus
 }
 #endif

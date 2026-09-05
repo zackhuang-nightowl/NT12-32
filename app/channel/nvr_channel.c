@@ -756,6 +756,8 @@ static void persist_camera_write(nvr_settings_t *settings, const nvr_channel_t *
      * token=VideoSourceToken);重启后 get_url 按 token 拉各自的源流。 */
     snprintf(r.type, sizeof(r.type), "%s", d->type[0] ? d->type : "single");
     r.dev_chn = d->dev_chn > 0 ? d->dev_chn : 1;
+    r.is_main = d->is_main;                                /* 多源:首分配通道=主 channel 持久标记 */
+    r.enh_on  = d->enh_on;                                 /* enhancedSecurity 开关持久化 */
     snprintf(r.video_source_token, sizeof(r.video_source_token), "%s", d->video_source_token);
     snprintf(r.enh_random, sizeof(r.enh_random), "%s", d->enh_random);
     snprintf(r.ip,       sizeof(r.ip),       "%s", d->onvif_ip);
@@ -899,6 +901,37 @@ int nvr_chan_remove(nvr_chan_mgr_t *m, int chn)
     return 0;
 }
 
+/* ★ setLanDevice 权威落库:把账密/enh/端口写进 slot 并**无条件落库**,不重装流(免黑闪)。
+ * 根因:resolve 连上后把工作凭据写回内存 s->d 却没落库 → DB 与内存脱节(DB 空/旧);setLanDevice 的
+ * "内存已一致就跳过写库"门控据此漏写。此函数不看门控:内存改到目标值 + 落库;凭据有变则清 url + 复位
+ * auth_ready 触发按新账密重解析(tick 重连,不整屏 remove/install)。返回 1=有变,0=无变(仅补落库)。 */
+int nvr_chan_set_creds(nvr_chan_mgr_t *m, int chn, const char *user, const char *pass,
+                       const char *enh_random, int enh_on, int onvif_port)
+{
+    if (!m) return -1;
+    CM_LOCK(m);
+    slot_t *s = slot_of(m, chn);
+    if (!s || !s->in_use) { CM_UNLOCK(m); return -1; }
+    const char *nu = user ? user : "", *np = pass ? pass : "", *nr = enh_random ? enh_random : "";
+    int changed = strcmp(s->d.user, nu) != 0 || strcmp(s->d.pass, np) != 0 ||
+                  strcmp(s->d.enh_random, nr) != 0 || s->d.enh_on != (enh_on ? 1 : 0) ||
+                  (onvif_port > 0 && s->d.onvif_port != onvif_port);
+    snprintf(s->d.user, sizeof(s->d.user), "%s", nu);
+    snprintf(s->d.pass, sizeof(s->d.pass), "%s", np);
+    snprintf(s->d.enh_random, sizeof(s->d.enh_random), "%s", nr);
+    s->d.enh_on = enh_on ? 1 : 0;
+    if (onvif_port > 0) s->d.onvif_port = onvif_port;
+    if (changed) {                       /* 账密真变 → 清已解析 URL + 复位鉴权,tick 按新账密重解析 */
+        s->d.url[0] = 0; s->url_main[0] = 0; s->url_sub[0] = 0;
+        s->d.url_main[0] = 0; s->d.url_sub[0] = 0;
+        s->auth_ready = 0; s->first_add = 1; s->sub.auth_fail = 0;
+    }
+    persist_camera(m, &s->d);            /* ★ 无条件落库(权威) */
+    if (changed && m->cfg.sm) nvr_stream_start(m->cfg.sm, chn);   /* 触发按新账密重解析(不重装) */
+    CM_UNLOCK(m);
+    return changed ? 1 : 0;
+}
+
 int nvr_chan_bind_poe(nvr_chan_mgr_t *m, int poe_port, const char *ip,
                       const char *user, const char *pass)
 {
@@ -906,6 +939,7 @@ int nvr_chan_bind_poe(nvr_chan_mgr_t *m, int poe_port, const char *ip,
     nvr_channel_t d; memset(&d, 0, sizeof(d));
     d.chn = poe_port - 1;                 /* PoE 口 P → 通道 P-1 */
     d.enabled = 1; d.record = 1;
+    d.dev_chn = 1; d.is_main = 1;          /* PoE 口通道=该设备首分配通道=主 channel */
     d.poe_port = poe_port;
     d.onvif_auto = 1; d.onvif_port = 80;
     d.stream = NVR_STREAM_MAIN; d.codec = NVR_CODEC_AUTO;
@@ -1099,6 +1133,7 @@ static void on_discovered(const nvr_onvif_cam_t *cam, void *user)
                     if (mac_swap || !(s->first_add && s->url_tries >= 1)) {
                         s->url_tries = 0; s->url_next = 0; s->sub.auth_fail = 0;
                     }
+                    s->d.is_main = 1;   /* PoE 口通道=该设备主 channel */
                     persist_camera(m, &s->d);
                     sync_nop_registry(m, &s->d);
                     chan_notify(m, s->d.chn);   /* 物理机已在 → status 3 */
@@ -1208,6 +1243,11 @@ static int resolve_stream_url(nvr_chan_mgr_t *m, slot_t *s, int stream)
     CM_UNLOCK(m);
     int grc = -1;
     int auth_seen = 0;
+    /* ★ 用户经 setLanDevice/LanAddDevice 配置的密码是**权威**:非空、非增强(enh_random 空)、
+     *   非 nopOnvif(kind!=NOPONVIF,那类是设备端私有算法自算)→ 只用该密码直连,不再尝试其它
+     *   候选(P_enh/P_act/无鉴权),鉴权失败也**绝不改写库里的密码**(只报 status 4)。
+     *   nopOnvif(P_act)/增强(P_enh 由设备随机数自算)仍走自动发现+自愈+落库。 */
+    int auth_locked = 0;
     if (need_auth) {
         char scopes_disc[1024];
         char svc_disc[128];
@@ -1238,28 +1278,46 @@ static int resolve_stream_url(nvr_chan_mgr_t *m, slot_t *s, int stream)
             }
         }
 
+        /* 密码权威判定放在 discovery/activate 之后:discovery 会把 nopOnvif 的 kind 纠正为 NOPONVIF。 */
+        auth_locked = snap.pass[0] && !snap.enh_random[0] && snap.kind != NVR_DEV_KIND_NOPONVIF;
         nvr_auth_cred_t creds[NVR_AUTH_CRED_MAX];
-        int nc = nvr_chan_auth_candidates(&snap, m->cfg.settings, &sub, creds, NVR_AUTH_CRED_MAX);
+        int nc;
+        if (auth_locked) {
+            /* 只用配置的密码直连,终止其它候选尝试。 */
+            snprintf(creds[0].user, sizeof(creds[0].user), "%s", snap.user[0] ? snap.user : "admin");
+            snprintf(creds[0].pass, sizeof(creds[0].pass), "%s", snap.pass);
+            nc = 1;
+        } else {
+            nc = nvr_chan_auth_candidates(&snap, m->cfg.settings, &sub, creds, NVR_AUTH_CRED_MAX);
+        }
         int i;
         for (i = 0; i < nc; i++) {
             snprintf(user, sizeof(user), "%s", creds[i].user);
             snprintf(pass, sizeof(pass), "%s", creds[i].pass);
-            nvr_onvif_disconnect(ip, port);   /* 换密重建，避免沿用失败会话 */
+            /* ★ 轻量双验找密码:GetProfiles + GetStreamUri(见 nop_onvif_device_try_auth)。验证阶段
+             *   只发 caps/services/profiles/streamUri,不做 scopes/多源 → 试密码轻、错密码快速否决。
+             *   GetStreamUri 作为强鉴权门(挡住"GetProfiles 宽松、取流才强鉴权"的设备,如 P_act)。 */
+            int tr = nvr_onvif_try_auth(ip, port, user, pass);
+            if (tr != 0) {
+                if (tr == NVR_ONVIF_AUTH) auth_seen = 1;
+                continue;                     /* 密码不对/连不上 → 下一个候选 */
+            }
+            /* ★ 验证完成(账密对)→ 用中标账密完整建连,补回整体内容(取流 URL + scopes + 多源)。 */
+            nvr_onvif_disconnect(ip, port);   /* 清探针遗留,干净完整重建 */
             nvr_onvif_connect(ip, port, svc[0] ? svc : (snap.service_url[0] ? snap.service_url : NULL),
                               user, pass);
             scopes[0] = 0;
             grc = nvr_onvif_get_url(ip, port, user, pass, st, url, sizeof(url),
                                     scopes, sizeof(scopes), vst);
-            if (grc == 0) break;
-            if (grc == NVR_ONVIF_AUTH || nvr_onvif_auth_failed(ip, port))
-                auth_seen = 1;
+            break;                            /* 鉴权已确认,其它候选无意义 */
         }
     } else {
+        auth_locked = snap.pass[0] && !snap.enh_random[0] && snap.kind != NVR_DEV_KIND_NOPONVIF;
         nvr_onvif_connect(ip, port, svc[0] ? svc : NULL, user, pass);
         grc = nvr_onvif_get_url(ip, port, user, pass, st, url, sizeof(url),
                                 scopes, sizeof(scopes), vst);
     }
-    if (grc != 0 && snap.kind == NVR_DEV_KIND_NOP) {
+    if (grc != 0 && !auth_locked && snap.kind == NVR_DEV_KIND_NOP) {
         int rec = nvr_chan_enh_on_auth_fail(&snap);
         if (rec >= 0) {
             snprintf(user, sizeof(user), "%s", snap.user);
@@ -1282,8 +1340,9 @@ static int resolve_stream_url(nvr_chan_mgr_t *m, slot_t *s, int stream)
     }
     CM_LOCK(m);
     if (grc != 0) {
-        /* 401/402/501 自愈后的 random/P_enh 必须回写，下次开机才是普通或增强模式。 */
-        if (s->in_use && s->d.chn == chn && snap.kind == NVR_DEV_KIND_NOP) {
+        /* 401/402/501 自愈后的 random/P_enh 必须回写，下次开机才是普通或增强模式。
+         * ★ 但用户配置的权威密码(auth_locked)绝不因失败被改写。 */
+        if (!auth_locked && s->in_use && s->d.chn == chn && snap.kind == NVR_DEV_KIND_NOP) {
             int chg = strcmp(s->d.enh_random, snap.enh_random) != 0 ||
                       strcmp(s->d.pass, snap.pass) != 0;
             snprintf(s->d.user, sizeof(s->d.user), "%s", snap.user);
@@ -1300,9 +1359,18 @@ static int resolve_stream_url(nvr_chan_mgr_t *m, slot_t *s, int stream)
         return auth_seen ? NVR_ONVIF_AUTH : NVR_ONVIF_ERR;
     }
     if (!s->in_use || s->d.chn != chn) return -1;   /* 解析期间 slot 被增删/换设备 → 丢弃结果 */
-    snprintf(s->d.user, sizeof(s->d.user), "%s", user);
-    snprintf(s->d.pass, sizeof(s->d.pass), "%s", pass);
-    snprintf(s->d.enh_random, sizeof(s->d.enh_random), "%s", snap.enh_random);
+    /* ★ 只有"账密在这~2s 解析窗口内没被用户改过(setLanDevice)"才回写中标凭据。否则用户刚设的密码
+     *   会被本次解析中标的候选(如无鉴权空密)覆盖回去 → 真机 ch19(192.168.9.117 无鉴权相机):
+     *   设了多次都变回空。改了就保留用户的,下次解析用新密(auth_locked 会只试它)。 */
+    if (strcmp(s->d.user, snap.user) == 0 && strcmp(s->d.pass, snap.pass) == 0) {
+        int cred_chg = strcmp(s->d.user, user) != 0 || strcmp(s->d.pass, pass) != 0;
+        snprintf(s->d.user, sizeof(s->d.user), "%s", user);
+        snprintf(s->d.pass, sizeof(s->d.pass), "%s", pass);
+        snprintf(s->d.enh_random, sizeof(s->d.enh_random), "%s", snap.enh_random);
+        /* ★ 连上用的工作凭据(自愈到的 P_act/P_enh 或中标密码)**落库**,否则内存有、DB 无 →
+         * DB 与内存脱节,setLanDevice"内存已一致就跳过写库"门控据此漏写(真机 ch19 密码进不了库)。 */
+        if (cred_chg) persist_camera(m, &s->d);
+    }
     if (need_auth) s->sub = sub;
     s->sub.auth_fail = 0;
     s->auth_ready = 1;
@@ -1608,7 +1676,20 @@ static void tick_slot(nvr_chan_mgr_t *m, slot_t *s, time_t now, int *resolve_bud
                 cJSON *root = cJSON_Parse(out);
                 cJSON *content = root ? cJSON_GetObjectItem(root, "content") : NULL;
                 cJSON *chs = content ? cJSON_GetObjectItem(content, "channels") : NULL;
-                cJSON *ch0 = (chs && cJSON_IsArray(chs)) ? cJSON_GetArrayItem(chs, 0) : NULL;
+                /* 多源设备:getDeviceCapabilities 每源返回一条 channels[](各带自己的
+                 * channel 字段=0-based NVR 通道号)。取**本通道绑定源**那条(channel==chn),
+                 * 使 sensors 与 _ai(AI_getChannelAICapabilities 走同一绑定源)同源一致;
+                 * 单源设备退化取 channels[0]。 */
+                cJSON *ch0 = NULL;
+                if (chs && cJSON_IsArray(chs)) {
+                    int nch = cJSON_GetArraySize(chs), k;
+                    for (k = 0; k < nch; k++) {
+                        cJSON *it = cJSON_GetArrayItem(chs, k);
+                        cJSON *cf = it ? cJSON_GetObjectItem(it, "channel") : NULL;
+                        if (cJSON_IsNumber(cf) && (int)cf->valuedouble == chn) { ch0 = it; break; }
+                    }
+                    if (!ch0) ch0 = cJSON_GetArrayItem(chs, 0);
+                }
                 if (ch0) {
                     cJSON *e = cJSON_Duplicate(ch0, 1);
                     /* 合并 AI 明细 → _ai(objectDetection + ruledDetection),供 AI_getChannelAICapabilities。 */

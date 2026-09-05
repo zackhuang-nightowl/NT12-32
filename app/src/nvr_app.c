@@ -535,6 +535,11 @@ static void chan_online_apply(nvr_app_t *a, int chn)
     if (have && a->settings && ch.onvif_ip[0])
         (void)nvr_time_push_device(a->settings, ch.onvif_ip,
                                    ch.onvif_port > 0 ? ch.onvif_port : 80, ch.user, ch.pass);
+    /* ★ 主源真正出图后触发默认多源展开(修「第二路源打不开」根因):代表通道(is_main;旧库退首源
+     *   dev_chn<=1)ONLINE 这一刻,设备若报多源则其余源自动各占一路出图。放在这里=主源必已 status 1,
+     *   稳过展开门控;而原 LanAddDevice 一次性等 8s 对慢启动 nopOnvif 必然错过。幂等、后台、不阻塞。 */
+    if (have && a->router && ch.onvif_ip[0] && (ch.is_main || ch.dev_chn <= 1))
+        nvr_cmd_router_expand_sources(a->router, ch.onvif_ip);
 }
 static void chan_offline_apply(nvr_app_t *a, int chn)
 {

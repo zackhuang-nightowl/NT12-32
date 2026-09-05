@@ -56,6 +56,9 @@ int  nvr_chan_load_config(nvr_chan_mgr_t *m, const nvr_config_t *cfg);
 /* 动态增删/绑定 */
 int  nvr_chan_add        (nvr_chan_mgr_t *m, const nvr_channel_t *desc); /* 返回 chn 或 -1 */
 int  nvr_chan_remove     (nvr_chan_mgr_t *m, int chn);
+/* setLanDevice 权威落库账密/enh/端口(无条件写库,凭据变则触发重解析;不重装流)。返回 1=变/0=无变/-1=错。 */
+int  nvr_chan_set_creds  (nvr_chan_mgr_t *m, int chn, const char *user, const char *pass,
+                          const char *enh_random, int enh_on, int onvif_port);
 int  nvr_chan_bind_poe   (nvr_chan_mgr_t *m, int poe_port,
                           const char *ip, const char *user, const char *pass);
 /* 发现结果落地：按 scopes 分类并写 kind/backend（见 nvr_dev_classify）。 */

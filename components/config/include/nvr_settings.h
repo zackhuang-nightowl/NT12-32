@@ -75,6 +75,8 @@ typedef struct {
     int  bound, active;
     char video_source_token[100]; /* 多源:该通道绑定的 ONVIF VideoSourceToken(空=单源/首源) */
     char enh_random[32];          /* NOP EnhancedSecurity random；空=普通模式 */
+    int  is_main;                 /* 多源:1=首分配通道(主 channel,设备代表);只 delDevice 清 */
+    int  enh_on;                  /* enhancedSecurity 开关(NOP/ONVIF 统一;off=无鉴权连接) */
 } nvr_camera_row_t;
 
 /* 通道 PK 表(camera / camera_capability / record_* / push_config / cloud_channel)

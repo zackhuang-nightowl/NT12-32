@@ -106,6 +106,10 @@ char *cmd_GUI_LanSearch(cJSON *a, const nvr_cmd_ctx_t *c){
         NVR_LOGI("lansearch", "发现 ip=%s port=%d kind=%s active=%d mac=[%s] sn=[%s] scopes=[%s]",
                  cm->host, cm->port > 0 ? cm->port : 80, proto_of_kind(cls.kind),
                  cls.active, cls.mac, cls.serial, cm->scopes[0] ? cm->scopes : "(空)");
+        /* ★ 播种发现缓存:用户随后添加这台时,resolve 首解析直接命中(免慢/串行 probe)→ 立刻判
+         * nopOnvif → 算 P_act → 秒出图。修"首次添加密码对也不出图/要很久"。 */
+        if (cm->scopes[0])
+            nvr_onvif_cache_seed(cm->host, cm->scopes, cm->service_url, cm->port);
         cJSON *o = cJSON_CreateObject();
         cJSON_AddStringToObject(o, "mac", cls.mac);
         cJSON_AddStringToObject(o, "ip", cm->host);
@@ -134,10 +138,10 @@ char *cmd_GUI_GetAddedLanDevices(cJSON *a, const nvr_cmd_ctx_t *c){
         if (list[i].mac[0] == 0 && nvr_chan_status_code_of(c->cm, list[i].chn) == 0) continue;
         cJSON *o = cJSON_CreateObject();
         cJSON_AddNumberToObject(o, "channel", list[i].chn + 1);
-        /* mainSource(可选,仅双视频源设备才带):0=主 channel(实际物理设备,源1);1=子 channel(第二路,dev_chn>1)。
-         * GUI 据此判断哪个通道是物理设备口(见 nop_api_doc GUI_GetAddedLanDevices)。单源设备不带此字段。 */
+        /* mainSource(可选,仅双视频源设备才带):0=主 channel(设备代表,首分配通道 is_main=1);
+         * 1=子 channel(额外源)。按持久 is_main 标记判定(与当前显示哪个源解耦)。单源设备不带此字段。 */
         if (strcmp(list[i].type, "multi") == 0)
-            cJSON_AddNumberToObject(o, "mainSource", (list[i].dev_chn > 1) ? 1 : 0);
+            cJSON_AddNumberToObject(o, "mainSource", list[i].is_main ? 0 : 1);
         cJSON_AddNumberToObject(o, "status", nvr_chan_status_code_of(c->cm, list[i].chn));
         cJSON_AddStringToObject(o, "protocol", proto_of_kind(list[i].kind));
         cJSON_AddNumberToObject(o, "port", list[i].onvif_port > 0 ? list[i].onvif_port : 80);
@@ -157,9 +161,13 @@ char *cmd_GUI_getLanDevice(cJSON *a, const nvr_cmd_ctx_t *c){
     const char *ip = nvr_jstr(a, "ip", NULL);
     if (!ip) return nvr_resp_err("invalid_param");
     nvr_channel_t list[NVR_MAX_CH]; int n = c->cm ? nvr_chan_list(c->cm, list, NVR_MAX_CH) : 0;
+    /* 设备代表通道:优先 is_main(首分配通道);旧库无 is_main → 退同 IP 最小通道号。 */
     nvr_channel_t *found = NULL;
-    for (int i = 0; i < n; i++)
-        if (strcmp(list[i].onvif_ip, ip) == 0 && (!found || list[i].chn < found->chn)) found = &list[i];
+    for (int i = 0; i < n; i++) {
+        if (strcmp(list[i].onvif_ip, ip) != 0) continue;
+        if (list[i].is_main) { found = &list[i]; break; }
+        if (!found || list[i].chn < found->chn) found = &list[i];
+    }
 
     cJSON *o = cJSON_CreateObject();
     if (found) cJSON_AddNumberToObject(o, "channel", found->chn + 1);
@@ -192,6 +200,8 @@ char *cmd_GUI_getLanDevice(cJSON *a, const nvr_cmd_ctx_t *c){
                 nvr_chan_set_enh(c->cm, found->chn, "", "");
                 enh = 0;
             } else enh = cur.enh_random[0] ? 1 : 0;
+        } else if (found) {
+            enh = found->enh_on ? 1 : 0;   /* ONVIF/其它:持久开关(on=标准 digest;off=无鉴权) */
         }
         cJSON_AddBoolToObject(o, "enhancedSecurity", enh);
     }
@@ -289,128 +299,184 @@ static int lan_json_enabled(cJSON *en, int deflt){
     return deflt;
 }
 
-/* 该 channel 当前绑的源序号(1-based):优先 VideoSourceToken 对上枚举表,否则 dev_chn(空=1)。 */
-static int src_of_ch(const nvr_channel_t *ch, char toks[][100], int ntok){
-    if (ch && ch->video_source_token[0] && ntok > 0) {
-        for (int k = 0; k < ntok; k++)
-            if (toks[k][0] && strcmp(ch->video_source_token, toks[k]) == 0) return k + 1;
-    }
-    return (ch && ch->dev_chn > 0) ? ch->dev_chn : 1;
+/* 比对"免黑闪"用:清掉**运行期由发现/解析异步填充**的字段(非本函数所配置),避免它们造成假差异
+ * 触发无谓重装。清的都是设备侧稍后各自补的:每路自解析的取流 URL、发现/getDeviceInfo 填的 mac/型号/
+ * 固件/SN/service_url。**配置字段一律不清** → 新增结构配置字段自动参与比对,不会漏。 */
+static void lan_src_mask_runtime(nvr_channel_t *e){
+    e->url[0] = 0; e->url_main[0] = 0; e->url_sub[0] = 0;
+    e->mac[0] = 0; e->model[0] = 0; e->firmware[0] = 0; e->serial[0] = 0;
+    e->service_url[0] = 0;
 }
 
-static void bind_ch_to_source(nvr_chan_mgr_t *cm, nvr_channel_t *e, int source,
-                              const char *tok, int ntok, const nvr_channel_t *creds){
-    e->dev_chn = source;
-    e->enabled = 1;
-    e->poe_port = 0;          /* ★ LAN 视频源恒非 PoE:复用旧槽也强制清 poe_port,绝不落 PoE 板 */
-    e->url[0] = 0;
-    snprintf(e->video_source_token, sizeof(e->video_source_token), "%s", (tok && tok[0]) ? tok : "");
-    snprintf(e->type, sizeof(e->type), ntok > 1 ? "multi" : "single");
-    if (creds) {
-        snprintf(e->user, sizeof(e->user), "%s", creds->user);
-        snprintf(e->pass, sizeof(e->pass), "%s", creds->pass);
-        snprintf(e->enh_random, sizeof(e->enh_random), "%s", creds->enh_random);
-        if (creds->onvif_port > 0) e->onvif_port = creds->onvif_port;
+/* 绑定"源 source"到通道 chn = **把当前物理设备(主/creds)整份内容"再添加一次"**,只把**源相关**
+ * 字段换成本路的(chn/vout_win/dev_chn/video_source_token/type);额外源恒 LAN(poe=0)+默认录像。
+ *   ✦ 用户模型:开启一路源 = NVR 用主设备内容再添加一次设备,源按指定;关闭一路源 = 删除该源通道
+ *     (在上层 lan_bind_source_set 里 nvr_chan_remove,不走本函数)。
+ *   ✦ **整份 *creds 拷贝**,绝不逐字段挑拷 → 不可能漏设备字段(历史坑:漏 onvif_ip→空 ip 黑、漏
+ *     record→第二源不录)。结构新增字段自动随 *creds 带过来、并自动参与下面的免黑闪比对。
+ *   ✦ 免黑闪:与现槽(忽略运行期 URL/发现字段)完全一致才跳过,避免每次展开都 remove+install 刷屏。 */
+static void lan_bind_src(const nvr_cmd_ctx_t *c, int chn, int source,
+                         char toks[][100], int ntok, const nvr_channel_t *creds, int is_main){
+    if (!c || !c->cm || chn < 0 || !creds) return;
+    const char *tok = (source - 1 >= 0 && source - 1 < ntok) ? toks[source - 1] : "";
+
+    /* 1) 以主设备内容为模板整份继承,只改源相关字段 */
+    nvr_channel_t want = *creds;
+    want.chn      = chn;
+    want.vout_win = chn;
+    want.dev_chn  = source;
+    want.is_main  = is_main ? 1 : 0;
+    want.enabled  = 1;
+    if (tok[0]) snprintf(want.video_source_token, sizeof(want.video_source_token), "%s", tok);
+    snprintf(want.type, sizeof(want.type), "%s", ntok > 1 ? "multi" : "single");
+    if (!is_main) { want.poe_port = 0; want.record = 1; }   /* 额外源:恒 LAN、默认录像 */
+    want.url[0] = want.url_main[0] = want.url_sub[0] = 0;    /* 每路各自按本路 token 解析取流 URL */
+
+    /* 2) 找现槽:保留用户可能改过的名字;没有则默认名 */
+    nvr_channel_t list[NVR_MAX_CH]; int n = nvr_chan_list(c->cm, list, NVR_MAX_CH);
+    const nvr_channel_t *cur = NULL;
+    for (int i = 0; i < n; i++) if (list[i].chn == chn) { cur = &list[i]; break; }
+    if (cur && cur->name[0]) snprintf(want.name, sizeof(want.name), "%s", cur->name);
+    else                     snprintf(want.name, sizeof(want.name), "Camera %d", chn + 1);
+
+    /* 3) 免黑闪:现槽与目标(掩掉运行期字段后)逐字节一致 → 不动 */
+    if (cur) {
+        nvr_channel_t a = want, b = *cur;
+        lan_src_mask_runtime(&a); lan_src_mask_runtime(&b);
+        if (memcmp(&a, &b, sizeof(a)) == 0) return;
     }
-    nvr_chan_add(cm, e);
+    nvr_chan_add(c->cm, &want);   /* = 用主设备内容"再添加一次",源用本路的(remove+install+持久化+起流) */
 }
 
-static void lan_wait_same_ip(const nvr_cmd_ctx_t *c, const char *ip){
+/* 等同 IP 各通道首次绑定(每通道上限 per_ch_ms)。★ 本函数**自身绝不碰 disp_lock**:
+ * 它也被 attach_worker(detached 线程,不持锁)调用,在此 unlock 未持有的锁是 UB。放锁由
+ * **前台 handler** 在调用前后自己做 CMD_UNBLOCK/REBLOCK(见 setLanDevice/LanAddDevice)。
+ * per_ch_ms 小(前台)→ 提交快回;大(后台 attach)→ 尽量等出图。 */
+static void lan_wait_same_ip(const nvr_cmd_ctx_t *c, const char *ip, int per_ch_ms){
     if (!c || !c->cm || !ip || !ip[0]) return;
+    if (per_ch_ms < 0) per_ch_ms = 0;
     nvr_channel_t list[NVR_MAX_CH];
     int n = nvr_chan_list(c->cm, list, NVR_MAX_CH);
-    /* ★ 绝不在此处 CMD_UNBLOCK/REBLOCK 暂放派发锁:本函数除了命令 handler(持锁)外,
-     * 还被 attach_worker 这个 **detached 线程**(不持有 disp_lock,见文件末 attach_worker)调用。
-     * 对**本线程未持有**的普通互斥量做 pthread_mutex_unlock 是未定义行为,会损坏 disp_lock →
-     * 之后所有 8089 命令派发在 disp_lock 上永久 hang(真机:开机 attach 16 台 LAN 相机后
-     * 8089 全堵、liveView 仍正常=媒体不碰此锁)。宁可同步调用方持锁多等几秒,也不碰锁。 */
     for (int i = 0; i < n; i++) {
         if (strcmp(list[i].onvif_ip, ip) != 0) continue;
-        nvr_chan_wait_bind(c->cm, list[i].chn, NVR_DEF_CMD_TIMEOUT_S * 1000);
+        nvr_chan_wait_bind(c->cm, list[i].chn, per_ch_ms);
         if (c->pv && nvr_chan_status_code_of(c->cm, list[i].chn) == 1)
             nvr_preview_wait_ready(c->pv, NVR_DEF_WAIT_READY_MS);
     }
 }
+/* 前台快等(提交快回 + 不饿死其它 8089 命令):放 disp_lock 外、每通道上限短。 */
+#define LAN_WAIT_FG_MS 1200
+static void lan_wait_same_ip_fg(const nvr_cmd_ctx_t *c, const char *ip){
+    CMD_UNBLOCK(c);
+    lan_wait_same_ip(c, ip, LAN_WAIT_FG_MS);
+    CMD_REBLOCK(c);
+}
 
-/* videoSources[{source,enabled}] 是启用权威(可只开源2、不开源1)。
- * 每个 enabled 源 ↔ 一只 channel(dev_chn=source, token=toks[source-1])。
- * 关掉的源:其 channel 优先复用给尚无槽的启用源(Add 后只开源2 → 原槽改绑源2),否则删除。 */
+/* videoSources[{source,enabled}] = 期望的"启用源集"(权威)。多源模型:
+ *  · 主 channel(is_main=首分配通道;缺则退同 IP 最小通道号)**恒在、只 delDevice 删**;绑启用集第一个源。
+ *  · 其余启用源各占一路:优先复用同 IP 的非主通道,不够再分配空闲 LAN 通道。
+ *  · 超出启用数的非主通道 → 移除回收(compact)。启用集为空 → 只留主 channel(不动其源)。
+ *  · 主 channel 若原是 PoE 口通道,保留其 poe_port;额外源恒 LAN。绝不移除主 channel。 */
+/* 把"启用源集 en[0..nen)"落到同 IP 的通道上(setLanDevice / 默认展开共用):
+ *  · 主 channel(is_main;缺退同 IP 最小通道号)恒在 ← en[0];
+ *  · en[1..] 各占一路:先复用同 IP 非主通道,不够再分配空闲 LAN 通道;
+ *  · 富余的非主通道 compact 回收;nen==0 → 只留主 channel。
+ * toks/ntok 为已枚举的源 token(调用方负责用**已验证账密**枚举)。 */
+static void lan_bind_source_set(const nvr_cmd_ctx_t *c, const char *ip,
+                                const nvr_channel_t *tmpl,
+                                const int *en, int nen,
+                                char toks[][100], int ntok){
+    if (!c || !c->cm || !ip || !tmpl) return;
+
+    /* 找主 channel + 收集同 IP 非主通道(升序) */
+    nvr_channel_t cur[NVR_MAX_CH];
+    int m = nvr_chan_list(c->cm, cur, NVR_MAX_CH);
+    int main_chn = -1, lowest = -1;
+    for (int i = 0; i < m; i++) {
+        if (strcmp(cur[i].onvif_ip, ip) != 0) continue;
+        if (cur[i].is_main && main_chn < 0) main_chn = cur[i].chn;
+        if (lowest < 0 || cur[i].chn < lowest) lowest = cur[i].chn;
+    }
+    if (main_chn < 0) main_chn = lowest;   /* 旧库无 is_main → 退最小通道号 */
+    if (main_chn < 0) return;              /* 该 IP 无通道 */
+
+    int extra[NVR_MAX_CH], nex = 0;
+    for (int i = 0; i < m; i++)
+        if (strcmp(cur[i].onvif_ip, ip) == 0 && cur[i].chn != main_chn && nex < NVR_MAX_CH)
+            extra[nex++] = cur[i].chn;
+    for (int a = 0; a < nex; a++) for (int b = a + 1; b < nex; b++)
+        if (extra[b] < extra[a]) { int t = extra[a]; extra[a] = extra[b]; extra[b] = t; }
+
+    /* 启用集为空 → 只留主 channel(不动其当前源),移除其余额外通道 */
+    if (nen == 0) {
+        for (int j = 0; j < nex; j++) nvr_chan_remove(c->cm, extra[j]);
+        return;
+    }
+
+    /* 主 channel ← en[0];en[1..] ← 复用 extra[] 或分配新 LAN 通道 */
+    lan_bind_src(c, main_chn, en[0], toks, ntok, tmpl, 1);
+    int ux = 0;
+    for (int i = 1; i < nen; i++) {
+        int chn;
+        if (ux < nex) chn = extra[ux++];
+        else { chn = alloc_free_lan(c); if (chn < 0) continue; }
+        lan_bind_src(c, chn, en[i], toks, ntok, tmpl, 0);
+    }
+    /* 富余的非主通道 → 移除回收(compact);主 channel 永不动 */
+    while (ux < nex) nvr_chan_remove(c->cm, extra[ux++]);
+}
+
 static void lan_apply_video_sources(const nvr_cmd_ctx_t *c, const char *ip,
                                     const nvr_channel_t *tmpl, cJSON *vs){
     if (!c || !c->cm || !ip || !tmpl || !cJSON_IsArray(vs)) return;
 
-    int want[17];
-    memset(want, 0, sizeof(want));
-    int any = 0;
+    /* 1) 启用源集 E(升序去重) */
+    int en[17], nen = 0;
     cJSON *it;
     cJSON_ArrayForEach(it, vs) {
-        int source = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(it, "source"));
-        int enabled = lan_json_enabled(cJSON_GetObjectItem(it, "enabled"), 1);
-        if (source < 1 || source > 16) continue;
-        want[source] = enabled ? 1 : 0;
-        any = 1;
+        int s = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(it, "source"));
+        if (s < 1 || s > 16) continue;
+        if (!lan_json_enabled(cJSON_GetObjectItem(it, "enabled"), 1)) continue;
+        int dup = 0; for (int k = 0; k < nen; k++) if (en[k] == s) { dup = 1; break; }
+        if (!dup && nen < 16) en[nen++] = s;
     }
-    if (!any) return;
+    for (int a = 0; a < nen; a++) for (int b = a + 1; b < nen; b++)
+        if (en[b] < en[a]) { int t = en[a]; en[a] = en[b]; en[b] = t; }
 
-    char toks[16][100];
-    memset(toks, 0, sizeof(toks));
+    /* 2) token 枚举(缓存;拿不到则空 token,lan_bind_src 按 dev_chn 兜底) */
+    char toks[16][100]; memset(toks, 0, sizeof(toks));
     int ntok = lan_list_sources(ip, tmpl->onvif_port, tmpl->user, tmpl->pass, toks, 16);
 
+    lan_bind_source_set(c, ip, tmpl, en, nen, toks, ntok);
+}
+
+/* 默认多源展开:主源验密出图后,用**已验证账密**枚举源;多源(ntok>1)则把源 1..ntok
+ * 全部落地出图(主=源1,其余各占一路)。单源(ntok<=1)不动。返回 ntok(0=枚举失败,可重试)。
+ *  · 只在主通道 status==1(=账密已验、已写回 slot)后调用 → list_sources 用的是验过的密码。
+ *  · 复用主通道在线的 ONVIF 连接(pool 按 ip:port),只发 GetVideoSources,不重连。
+ *  · 各源能力集不在此收集,由通道 online 后 tick 各自后台补(见 nvr_channel.c caps_probed)。 */
+static int lan_auto_expand_sources(const nvr_cmd_ctx_t *c, const char *ip){
+    if (!c || !c->cm || !ip || !ip[0]) return 0;
+    /* 取在线主通道(is_main;缺退首个同 IP)的已验证 creds 作模板 */
     nvr_channel_t cur[NVR_MAX_CH];
     int m = nvr_chan_list(c->cm, cur, NVR_MAX_CH);
-    int bound[17];
-    int reuse_chn[NVR_MAX_CH], nre = 0;
-    for (int s = 0; s < 17; s++) bound[s] = -1;
-
+    nvr_channel_t tmpl; int found = 0;
     for (int i = 0; i < m; i++) {
         if (strcmp(cur[i].onvif_ip, ip) != 0) continue;
-        /* ★ LAN 设备的视频源绝不能落 PoE 通道(<NVR_IP_CH_BASE)。历史误占的 PoE 通道直接删除,
-         * 既不作源槽也不复用——LAN 源只允许 LAN 通道。 */
-        if (cur[i].chn < NVR_IP_CH_BASE) { nvr_chan_remove(c->cm, cur[i].chn); continue; }
-        int s = src_of_ch(&cur[i], toks, ntok);
-        if (s >= 1 && s <= 16 && want[s] && bound[s] < 0) bound[s] = cur[i].chn;
-        else reuse_chn[nre++] = cur[i].chn;
+        if (cur[i].is_main) { tmpl = cur[i]; found = 1; break; }
+        if (!found) { tmpl = cur[i]; found = 1; }
     }
+    if (!found) return 0;
 
-    int reuse_i = 0;
-    for (int s = 1; s <= 16; s++) {
-        if (!want[s]) continue;
-        const char *tok = (s - 1 < ntok) ? toks[s - 1] : "";
-        if (bound[s] >= 0) {
-            nvr_channel_t latest[NVR_MAX_CH];
-            int nm = nvr_chan_list(c->cm, latest, NVR_MAX_CH);
-            for (int i = 0; i < nm; i++) if (latest[i].chn == bound[s]) {
-                nvr_channel_t e = latest[i];
-                int need = (e.dev_chn != s);
-                if (tok[0] && strcmp(e.video_source_token, tok) != 0) need = 1;
-                if (strcmp(e.user, tmpl->user) != 0 || strcmp(e.pass, tmpl->pass) != 0) need = 1;
-                if (tmpl->onvif_port > 0 && e.onvif_port != tmpl->onvif_port) need = 1;
-                if (need) bind_ch_to_source(c->cm, &e, s, tok, ntok, tmpl);
-                break;
-            }
-            continue;
-        }
-        nvr_channel_t e;
-        memset(&e, 0, sizeof(e));
-        int have = 0;
-        if (reuse_i < nre) {
-            int chn = reuse_chn[reuse_i++];
-            nvr_channel_t latest[NVR_MAX_CH];
-            int nm = nvr_chan_list(c->cm, latest, NVR_MAX_CH);
-            for (int i = 0; i < nm; i++) if (latest[i].chn == chn) { e = latest[i]; have = 1; break; }
-        }
-        if (!have) {
-            int chn = alloc_free_lan(c);
-            if (chn < 0) continue;
-            e = *tmpl;
-            e.chn = chn; e.poe_port = 0; e.vout_win = chn;
-            e.enabled = 1; e.record = 1; e.url[0] = 0;
-            snprintf(e.name, sizeof(e.name), "Camera %d", chn + 1);
-        }
-        bind_ch_to_source(c->cm, &e, s, tok, ntok, tmpl);
-        bound[s] = e.chn;
-    }
-    while (reuse_i < nre) nvr_chan_remove(c->cm, reuse_chn[reuse_i++]);
+    char toks[16][100]; memset(toks, 0, sizeof(toks));
+    int ntok = lan_list_sources(ip, tmpl.onvif_port, tmpl.user, tmpl.pass, toks, 16);
+    if (ntok <= 1) return ntok;   /* 单源/枚举失败:不展开(0 供调用方重试) */
+
+    int en[17], nen = 0;
+    for (int s = 1; s <= ntok && nen < 16; s++) en[nen++] = s;
+    NVR_LOGI("lan", "%s 默认展开多源: ntok=%d → 源 1..%d 全部出图", ip, ntok, ntok);
+    lan_bind_source_set(c, ip, &tmpl, en, nen, toks, ntok);
+    return ntok;
 }
 
 /* 删物理台:同 IP 的全部源通道一起删(含 type=multi 的额外源)。 */
@@ -438,8 +504,11 @@ char *cmd_GUI_setLanDevice(cJSON *a, const nvr_cmd_ctx_t *c){
         return nvr_resp_err("invalid_param");
 
     nvr_channel_t list[NVR_MAX_CH]; int n = c->cm ? nvr_chan_list(c->cm, list, NVR_MAX_CH) : 0;
+    /* 模板/代表通道:优先 is_main(首分配通道);旧库无 is_main → 退同 IP 最小通道号。 */
     nvr_channel_t d; int found = 0;
-    for (int i = 0; i < n; i++) if (strcmp(list[i].onvif_ip, ip) == 0) {
+    for (int i = 0; i < n; i++) {
+        if (strcmp(list[i].onvif_ip, ip) != 0) continue;
+        if (list[i].is_main) { d = list[i]; found = 1; break; }
         if (!found || list[i].chn < d.chn) { d = list[i]; found = 1; }
     }
     if (!found) return nvr_resp_result("OK");
@@ -459,12 +528,19 @@ char *cmd_GUI_setLanDevice(cJSON *a, const nvr_cmd_ctx_t *c){
         if (er != 0) return nvr_resp_err("failed");
         snprintf(d.user, sizeof(d.user), "admin");
         snprintf(d.pass, sizeof(d.pass), "%s", enh ? penh : "");
+        d.enh_on = enh ? 1 : 0;
         NVR_LOGI("lan", "setLanDevice ip=%s enhancedSecurity=%d pass=%s",
                  ip, enh, enh ? "P_enh" : "(empty)");
     } else {
         if (usr && usr[0]) snprintf(d.user, sizeof(d.user), "%s", usr);
         else               snprintf(d.user, sizeof(d.user), "admin");
+        /* ★ 普通 ONVIF:**用户填了密码就一律用它**(标准 digest),enhancedSecurity 不再吞掉密码——
+         *   之前 `enh ? (pw?pw:"") : ""` 在 enh 关时把用户输入的密码清空 → 普通设备配了密码也连不上
+         *   (真机 ch12:配密码没生效、反复重发现)。仅当**没填密码**才空(=无鉴权连接)。enh_on 另行记录。 */
         snprintf(d.pass, sizeof(d.pass), "%s", pw ? pw : "");
+        d.enh_on = enh ? 1 : 0;
+        NVR_LOGI("lan", "setLanDevice ip=%s onvif user=%s pass=%s enh=%d protocol=%s",
+                 ip, d.user, d.pass[0] ? "(set)" : "(empty)", enh, protocol ? protocol : "(null)");
     }
 
     cJSON *vs = cJSON_GetObjectItem(a, "videoSources");
@@ -475,16 +551,14 @@ char *cmd_GUI_setLanDevice(cJSON *a, const nvr_cmd_ctx_t *c){
         int m = nvr_chan_list(c->cm, cur, NVR_MAX_CH);
         for (int i = 0; i < m; i++) {
             if (strcmp(cur[i].onvif_ip, ip) != 0) continue;
-            nvr_channel_t e = cur[i];
-            snprintf(e.user, sizeof(e.user), "%s", d.user);
-            snprintf(e.pass, sizeof(e.pass), "%s", d.pass);
-            snprintf(e.enh_random, sizeof(e.enh_random), "%s", d.enh_random);
-            if (d.onvif_port > 0) e.onvif_port = d.onvif_port;
-            e.url[0] = 0;
-            if (nvr_chan_add(c->cm, &e) < 0) return nvr_resp_result("Failed for other reason");
+            /* ★ setLanDevice 权威:**无条件落库**账密/enh/端口。不再用"内存已一致就跳过写库"的门控——
+             * resolve 连上后会把工作凭据写回内存却没落库,DB 与内存脱节,老门控据此漏写(真机 ch19:
+             * 密码设了进不了库)。nvr_chan_set_creds:改内存值 + 无条件落库;凭据真变才清 url 重解析,
+             * 不整屏 remove/install(免黑闪)。 */
+            nvr_chan_set_creds(c->cm, cur[i].chn, d.user, d.pass, d.enh_random, d.enh_on, d.onvif_port);
         }
     }
-    lan_wait_same_ip(c, ip);
+    lan_wait_same_ip_fg(c, ip);
     return nvr_resp_result("OK");
 }
 
@@ -522,6 +596,81 @@ static int assign_channel(const nvr_cmd_ctx_t *c, cJSON *a, const char *ip, int 
     for (int i = NVR_IP_CH_BASE; i < lan_cap; i++) if (!occ[i]) return i;   /* LAN 槽满 → -1 添加失败 */
     return -1;
 }
+/* ── 多源"首次自动展开"一次性标记 ───────────────────────────────────────────
+ * 需求:加设备时首次把多源全铺开出图(用户要的),之后**完全听开关**(setLanDevice
+ * videoSources)——关掉的源不被"主源每次上线"重新强开(否则关不掉、还多占解码窗把别路挤黑,
+ * 真机 ch10:第二源 ch17 占窗 → 4K 的 ch9 被挤出 16 路解码上限 → 黑)。
+ * 做法:LanAddDevice/attach 落库后按 IP 置"待展开",主源 ONLINE 事件**消费一次即清** → 只展开
+ * 一次;重启由 load_config 恢复上次留下的通道集,主源上线时标记已无 → 不再强铺。 */
+#define LAN_EXPAND_PENDING_MAX 32
+static struct { char ip[64]; } g_expand_pending[LAN_EXPAND_PENDING_MAX];
+static pthread_mutex_t g_expand_pending_mu = PTHREAD_MUTEX_INITIALIZER;
+static void lan_expand_pending_mark(const char *ip){
+    if (!ip || !ip[0]) return;
+    pthread_mutex_lock(&g_expand_pending_mu);
+    int free_i = -1;
+    for (int i = 0; i < LAN_EXPAND_PENDING_MAX; i++){
+        if (strcmp(g_expand_pending[i].ip, ip) == 0) { pthread_mutex_unlock(&g_expand_pending_mu); return; }
+        if (free_i < 0 && !g_expand_pending[i].ip[0]) free_i = i;
+    }
+    if (free_i >= 0) snprintf(g_expand_pending[free_i].ip, sizeof(g_expand_pending[free_i].ip), "%s", ip);
+    pthread_mutex_unlock(&g_expand_pending_mu);
+}
+static int lan_expand_pending_take(const char *ip){  /* 命中即清,返回 1;否则 0 */
+    if (!ip || !ip[0]) return 0;
+    int took = 0;
+    pthread_mutex_lock(&g_expand_pending_mu);
+    for (int i = 0; i < LAN_EXPAND_PENDING_MAX; i++)
+        if (strcmp(g_expand_pending[i].ip, ip) == 0) { g_expand_pending[i].ip[0] = 0; took = 1; break; }
+    pthread_mutex_unlock(&g_expand_pending_mu);
+    return took;
+}
+
+/* 默认多源展开(LanAddDevice 后台):等主源在线(已验密)→ 枚举源 → 其余源自动出图。
+ * 派 detached 线程,handler 秒回;ctx 长生命(与 attach_worker 一致按指针持有)。 */
+typedef struct { const nvr_cmd_ctx_t *c; char ip[64]; } expand_work_t;
+static void *lan_expand_worker(void *arg){
+    expand_work_t *w = (expand_work_t *)arg;
+    if (!w || !w->c || !w->c->cm) { free(w); return NULL; }
+    lan_wait_same_ip(w->c, w->ip, NVR_DEF_CMD_TIMEOUT_S * 1000);   /* 等主源验密出图 */
+    /* 主通道(is_main;缺退首个同 IP)在线(status==1=账密已验)才展开 */
+    nvr_channel_t list[NVR_MAX_CH];
+    int n = nvr_chan_list(w->c->cm, list, NVR_MAX_CH);
+    int main_chn = -1, lowest = -1;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(list[i].onvif_ip, w->ip) != 0) continue;
+        if (list[i].is_main && main_chn < 0) main_chn = list[i].chn;
+        if (lowest < 0 || list[i].chn < lowest) lowest = list[i].chn;
+    }
+    if (main_chn < 0) main_chn = lowest;
+    if (main_chn >= 0 && nvr_chan_status_code_of(w->c->cm, main_chn) == 1 &&
+        lan_auto_expand_sources(w->c, w->ip) > 1)
+        lan_wait_same_ip(w->c, w->ip, NVR_DEF_CMD_TIMEOUT_S * 1000);   /* 等新源出图 */
+    free(w);
+    return NULL;
+}
+static void lan_spawn_expand(const nvr_cmd_ctx_t *c, const char *ip){
+    if (!c || !ip || !ip[0]) return;
+    expand_work_t *w = (expand_work_t *)calloc(1, sizeof(*w));
+    if (!w) return;
+    w->c = c; snprintf(w->ip, sizeof(w->ip), "%s", ip);
+    pthread_t th;
+    if (pthread_create(&th, NULL, lan_expand_worker, w) == 0) pthread_detach(th);
+    else free(w);
+}
+
+/* ★ 事件驱动的默认多源展开:代表通道(主源)**真正出图(ONLINE)后**由 app 的 on_online 事件调用。
+ * 修根因——原来只有 LanAddDevice/attach 添加后**一次性**等 8s(NVR_DEF_CMD_TIMEOUT_S)就检查
+ * status==1,而 nopOnvif 相机激活+解析常需数十秒~数分钟才出图,那一次检查必然失败 → 展开被永久跳过,
+ * 第二路源永不分配。改由「主源出图」这个边沿事件触发:此刻 status 必为 1,门控稳过;掉线再上线会
+ * 重新 fire(edge:notified_online),故枚举瞬时失败也能在下次重连自愈。lan_expand_worker 幂等
+ * (lan_bind_source_set 无变化不重装),重复触发安全。**不碰 disp_lock**(worker 是 detached 线程)。 */
+void nvr_lan_expand_sources(const nvr_cmd_ctx_t *c, const char *ip){
+    /* ★ 只在"添加时置了待展开标记"的那一次展开;之后主源再上线(重连/重启)不再强铺 → 听开关。 */
+    if (!lan_expand_pending_take(ip)) return;
+    lan_spawn_expand(c, ip);
+}
+
 char *cmd_GUI_LanAddDevice(cJSON *a, const nvr_cmd_ctx_t *c){
     const char *protocol = nvr_jstr(a, "protocol", NULL);
     const char *ip = nvr_jstr(a, "ip", NULL);
@@ -545,7 +694,7 @@ char *cmd_GUI_LanAddDevice(cJSON *a, const nvr_cmd_ctx_t *c){
     }
 
     nvr_channel_t d; memset(&d, 0, sizeof(d));
-    d.chn = chn; d.enabled = 1; d.record = 1; d.dev_chn = 1;
+    d.chn = chn; d.enabled = 1; d.record = 1; d.dev_chn = 1; d.is_main = 1;  /* 首分配通道=主 channel */
     snprintf(d.type, sizeof(d.type), "single");
     d.poe_port = poe_port;
     d.onvif_auto = 1; d.onvif_port = nvr_jint(a, "port", 0) > 0 ? nvr_jint(a, "port", 0) : 80;
@@ -570,17 +719,41 @@ char *cmd_GUI_LanAddDevice(cJSON *a, const nvr_cmd_ctx_t *c){
         sub.inactive = 1;
         nvr_chan_set_substate(c->cm, chn, &sub);
     } else {
-        lan_wait_same_ip(c, ip);
+        /* ★ 置"首次自动展开"标记(主源上线事件消费一次)。之后多源全听开关,不再强铺。
+         *   须在等待/上线之前置好,避免主源上线事件早于标记。 */
+        lan_expand_pending_mark(ip);
+        lan_wait_same_ip_fg(c, ip);
     }
     return nvr_resp_result("OK");
 }
 
 /* ------------------------- GUI_LanDelDevice ------------------------- */
-/* 删物理台:同 IP 多源 channel 一并删除(不控制相机)。 */
+/* 删物理台:同 IP 多源 channel 一并删除(不控制相机)。
+ * ★ 后台执行、立即返回:删除内含停流(可能阻塞在 RTSP puller 网络 I/O 到超时)+ ONVIF 断连
+ * (设备不可达时秒级)+ 多源逐路 → 同步做会卡住派发线程/UI 数秒。改为 detached 线程做真删除
+ * (lan_remove_device 用 CM_LOCK 自串行、不碰 disp_lock;attach_worker 已证明可后台调),handler 秒回。
+ * GUI 靠 longPolling ChannelStatusNotify 收到删除后重拉清单。 */
+typedef struct { nvr_chan_mgr_t *cm; int chn; } lan_del_work_t;
+static void *lan_del_worker(void *arg){
+    lan_del_work_t *w = (lan_del_work_t *)arg;
+    if (w && w->cm) lan_remove_device(w->cm, w->chn);
+    free(w);
+    return NULL;
+}
 char *cmd_GUI_LanDelDevice(cJSON *a, const nvr_cmd_ctx_t *c){
     if (!nvr_jhas(a, "channel")) return nvr_resp_err("invalid_param");
     int ch = nvr_jint(a, "channel", 0);
-    if (c->cm && ch > 0) lan_remove_device(c->cm, ch - 1);
+    if (c->cm && ch > 0) {
+        lan_del_work_t *w = (lan_del_work_t *)calloc(1, sizeof(*w));
+        pthread_t th;
+        if (w) {
+            w->cm = c->cm; w->chn = ch - 1;
+            if (pthread_create(&th, NULL, lan_del_worker, w) == 0) pthread_detach(th);
+            else { lan_remove_device(c->cm, ch - 1); free(w); }   /* 起线程失败 → 同步兜底 */
+        } else {
+            lan_remove_device(c->cm, ch - 1);
+        }
+    }
     return nvr_resp_ok();
 }
 
@@ -750,11 +923,9 @@ static void *attach_worker(void *arg)
         d.url[0] = 0;
         nvr_chan_add(w->c->cm, &d);
     }
-    lan_wait_same_ip(w->c, w->ip);
-    if (nvr_chan_status_code_of(w->c->cm, w->chn) == 1)
-        att_upsert(w->mac, "attached", "");
-    else
-        att_upsert(w->mac, "attaching", "");
+    lan_wait_same_ip(w->c, w->ip, NVR_DEF_CMD_TIMEOUT_S * 1000);  /* 后台 attach:等足,不持锁 */
+    /* 首次自动展开走"待展开标记 + 主源 ONLINE 事件"(标记已在 attachIPDevices 落库后置),此处只记状态。 */
+    att_upsert(w->mac, nvr_chan_status_code_of(w->c->cm, w->chn) == 1 ? "attached" : "attaching", "");
     free(w);
     return NULL;
 }
@@ -790,7 +961,7 @@ char *cmd_X_NightOwl_attachIPDevices(cJSON *a, const nvr_cmd_ctx_t *c)
         acct = nvr_jstr(it, "account", "admin");
         pw = nvr_jstr(it, "password", "");
         memset(&d, 0, sizeof(d));
-        d.chn = chn; d.enabled = 1; d.record = 1; d.dev_chn = 1;
+        d.chn = chn; d.enabled = 1; d.record = 1; d.dev_chn = 1; d.is_main = 1;  /* 首分配通道=主 channel */
         snprintf(d.type, sizeof(d.type), "single");
         d.poe_port = poe;
         d.onvif_auto = 1;
@@ -809,6 +980,7 @@ char *cmd_X_NightOwl_attachIPDevices(cJSON *a, const nvr_cmd_ctx_t *c)
             att_upsert(nmac, "error", "can't find the device");
             continue;
         }
+        lan_expand_pending_mark(ip);   /* 首次自动展开一次性标记;主源上线事件消费 */
         w = (attach_work_t *)calloc(1, sizeof(*w));
         if (!w) continue;
         w->c = c;

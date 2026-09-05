@@ -531,6 +531,44 @@ static int pool_pick_uri(nop_onvif_device_t *dev, int media2, int n, int want_su
     return -1;
 }
 
+/* 轻量鉴权探针(试密码用):定位端点 + GetProfiles + **GetStreamUri** 双验。
+ *   0=账密对(拿到取流 URL);-2=AUTH(401);-1=ERR(连不上/无 profile/取不到 URL)。
+ * ★ 鉴权判定门必须是 GetStreamUri:有些设备 GetProfiles 宽松(弱/无鉴权也过),取流才强鉴权
+ *   (如 nopOnvif 激活密码 P_act)——只判 GetProfiles 会选错凭据 → ONVIF 过了但 RTSP AUTHFAILED。
+ * ★ set_auth 前置(有些设备 GetServices 也要鉴权)。**全程不缓存/不置 endpoints_ready/connected**:
+ *   错密码不污染端点缓存;中标后由 nop_onvif_device_connect 用中标账密**干净完整重建**
+ *   (取流 URL + scopes + 多源 = 验证完成后的"补充")。验证阶段只发 caps/services/profiles/streamUri。 */
+int nop_onvif_device_try_auth(nop_onvif_device_t *device,
+                              const char *username, const char *password)
+{
+    nop_onvif_pool_ent_t *e;
+    int n1, n2;
+    char uri[300];
+    if (!device) return -1;
+    e = pool_find_dev(device);
+    if (e && e->lock) osal_mutex_lock(e->lock);
+    nop_onvif_device_set_auth(device, (username && username[0]) ? username : "admin",
+                              password ? password : "");   /* set_auth 前置 */
+    device->dev.authFailed = 0;
+    nop_onvif_get_capabilities(device);   /* 用本候选账密定位端点(不写 endpoints_ready,避免错密污染) */
+    nop_onvif_get_services(device);
+    n1 = nop_onvif_get_profiles(device);
+    if (n1 <= 0 && device->dev.authFailed) { if (e && e->lock) osal_mutex_unlock(e->lock); return -2; }
+    n2 = (n1 <= 0) ? nop_onvif_get_profiles2(device) : 1;
+    if (n1 <= 0 && n2 <= 0) {
+        int af = device->dev.authFailed;
+        if (e && e->lock) osal_mutex_unlock(e->lock);
+        return af ? -2 : -1;
+    }
+    /* ★ 真鉴权门:GetStreamUri 拿到 URL 才算账密对 */
+    uri[0] = 0;
+    if (n1 > 0) pool_pick_uri(device, 0, n1, 0, NULL, uri, sizeof(uri));
+    if (!uri[0] && n2 > 0) pool_pick_uri(device, 1, n2, 0, NULL, uri, sizeof(uri));
+    if (e && e->lock) osal_mutex_unlock(e->lock);
+    if (!uri[0]) return device->dev.authFailed ? -2 : -1;
+    return 0;
+}
+
 int nop_onvif_device_connect(nop_onvif_device_t *device,
                              const char *username, const char *password)
 {

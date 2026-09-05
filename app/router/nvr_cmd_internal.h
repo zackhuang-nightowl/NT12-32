@@ -71,6 +71,9 @@ extern const nvr_cmd_route_t g_nvr_cmd_table[];
 extern const int             g_nvr_cmd_table_len;
 nvr_cmd_fn nvr_cmd_table_lookup(const char *func);
 
+/* 默认多源展开:由代表通道(主源)出图事件触发(见 nvr_cmd_lan.c / app on_online)。 */
+void nvr_lan_expand_sources(const nvr_cmd_ctx_t *c, const char *ip);
+
 /* ============================ 各域 handler 声明 ============================ */
 /* --- display 出图(nvr_cmd_display.c) --- */
 char *cmd_GUI_setDeviceDisplayMode(cJSON *a, const nvr_cmd_ctx_t *c);
