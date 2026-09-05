@@ -317,6 +317,24 @@ int mhal_vout_commit(void)
             g_disp.started_n = n;
             g_disp.commit_gen++;   /* ★ 本次全停全起重启了这批解码器 → 代数自增,上层据此重灌关键帧 */
             NVR_LOGD("mhal", "commit: %d 窗一次成图(start_list)", n);
+            /* ★ 诊断:打印本次在显解码器集合(chn+分辨率),并统计"大图(主码流,宽>1920)"路数。
+             * 常驻应是"多宫格=全子流(小)";若宫格(n>4)里出现主码流解码器 = 单宫格切回宫格后主流
+             * 没释放/残留 → DIN 池被大图顶爆(真机卡死的疑点)。据此判断有无泄漏。 */
+            {
+                char buf[512]; int off = 0, big = 0;
+                for (int i = 0; i < MHAL_MAX_CH; i++) {
+                    struct mhal_vdec *d = g_disp.ch[i];
+                    if (!d || !d->opened || !(d->vout_win >= 0 || d->vout_win == -2)) continue;
+                    int is_big = (d->w > 1920);
+                    if (is_big) big++;
+                    if (off < (int)sizeof(buf) - 24)
+                        off += snprintf(buf + off, sizeof(buf) - off, "ch%d:%dx%d%s ",
+                                        d->chn, d->w, d->h, is_big ? "[主]" : "");
+                }
+                NVR_LOGI("mhal", "commit 在显解码器 n=%d 大图(主)=%d | %s", n, big, buf);
+                if (n > 4 && big > 0)
+                    NVR_LOGW("mhal", "★ 宫格(n=%d)里有 %d 路主码流解码器未释放 → 疑似切主流后没回收,DIN 池吃紧", n, big);
+            }
             /* ★ 只在"可能出现空格"时清整屏黑:布局/分辨率变化(need_clear)或在显集合缩小/持平(移窗/换窗)。
              * 纯增量加窗(n>prev_started 且无布局变化)不清 → 已有窗不被一起刷黑,消除加设备的整屏黑闪。 */
             if (g_disp.need_clear || n <= prev_started) {

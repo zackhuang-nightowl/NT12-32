@@ -310,29 +310,38 @@ int mhal_vdec_send_ex(mhal_vdec_t *d, const uint8_t *annexb, uint32_t len, uint3
     item.user_bs.bs_buf_size= len;
     item.user_bs.timestamp  = (UINT64)ts * 1000;   /* 90kHz→us 的换算按需精化 */
 
-    pthread_mutex_lock(&g_send_lock);
-    HD_RESULT ret = hd_videodec_send_list(&item, 1, (UINT32)wait_ms);
-    pthread_mutex_unlock(&g_send_lock);
-    if (ret >= 0 && item.user_bs.retval >= 0)
-        return 0;
+    /* 送不进:>4MB(超解码窗口)=**硬错误**;否则(帧本身合法却入不了队)判为 **FIFO 满/超时/瞬忙**。
+     *   非阻塞 live 送(wait_ms 小)→ 返回 MHAL_VDEC_EBUSY 供上层限时延丢帧追帧,不刷屏诊断、不重试;
+     *   ★ 阻塞送(关键帧/bootstrap, wait_ms 大)对 <4MB 的**瞬时**失败就地有界重试:整屏 commit 后 N 路
+     *   同时重灌关键帧 → DIN 池瞬忙 / VPD_PUT_COPY_MULTI_DIN 被信号打断(errno EINTR)→ send_list 失败。
+     *   这些都是瞬时的;原来一次失败即丢关键帧、解码器等到下一帧甚至下一 IDR 才重试 → 大批重建后长黑
+     *   ("黑了之后才再显示")。每次失败释放 send_lock 让别路穿插、微退避再试,吸收 EINTR/DIN 瞬忙,
+     *   重灌尽快成功。仍失败才回退(RESYNC),并节流记诊断。 */
+    int tries = 0;
+    for (;;) {
+        pthread_mutex_lock(&g_send_lock);
+        HD_RESULT ret = hd_videodec_send_list(&item, 1, (UINT32)wait_ms);
+        int rv = (int)item.user_bs.retval;
+        pthread_mutex_unlock(&g_send_lock);
+        if (ret >= 0 && rv >= 0)
+            return 0;
 
-    /* 送不进:>4MB(超解码窗口)=**硬错误**;否则(帧本身合法却入不了队)判为 **FIFO 满/超时**。
-     *   非阻塞 live 送(wait_ms 小)→ 返回 MHAL_VDEC_EBUSY 供上层限时延丢帧追帧,不刷屏诊断;
-     *   阻塞送(关键帧/bootstrap, wait_ms 大)失败仍按硬错误处理(触发 RESYNC),并节流记诊断。 */
-    if (len > (4u << 20)) {
-        NVR_LOGE("vdec", "chn%d 送流失败(帧>4MB超窗口) ret=%d retval=%d len=%u",
-                 d->chn, ret, item.user_bs.retval, len);
-        return -1;
+        if (len > (4u << 20)) {
+            NVR_LOGE("vdec", "chn%d 送流失败(帧>4MB超窗口) ret=%d retval=%d len=%u",
+                     d->chn, ret, rv, len);
+            return -1;
+        }
+        if (wait_ms >= 100) {
+            if (++tries < 8) { usleep(1500); continue; }   /* 关键帧:瞬忙/EINTR 有界重试(≈12ms) */
+            static int fail_cnt[MHAL_MAX_CH];
+            int c = (d->chn >= 0 && d->chn < MHAL_MAX_CH) ? d->chn : 0;
+            if (fail_cnt[c]++ < 30 || fail_cnt[c] % 50 == 0)
+                NVR_LOGE("vdec", "chn%d 送流失败 ret=%d retval=%d len=%u(第%d次,重试%d)",
+                         d->chn, ret, rv, len, fail_cnt[c], tries);
+            return -1;
+        }
+        return MHAL_VDEC_EBUSY;
     }
-    if (wait_ms >= 100) {
-        static int fail_cnt[MHAL_MAX_CH];
-        int c = (d->chn >= 0 && d->chn < MHAL_MAX_CH) ? d->chn : 0;
-        if (fail_cnt[c]++ < 30 || fail_cnt[c] % 50 == 0)
-            NVR_LOGE("vdec", "chn%d 送流失败 ret=%d retval=%d len=%u(第%d次)",
-                     d->chn, ret, item.user_bs.retval, len, fail_cnt[c]);
-        return -1;
-    }
-    return MHAL_VDEC_EBUSY;
 }
 
 /* ★ 批量送流(按 SDK playback_1div_to_4div:多路解码器的帧**一次** send_list 送,避免逐路分别 send
