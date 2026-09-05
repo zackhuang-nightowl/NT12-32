@@ -10246,11 +10246,27 @@ BOOL parse_RuleDescription(XMLN * p_node, onvif_ConfigDescription * p_res)
     XMLN * p_Parameters;
     XMLN * p_Messages;
     const char * p_Name;
+    const char * p_fixed;
+    const char * p_maxInstances;
 
     p_Name = xml_attr_get(p_node, "Name");
     if (p_Name)
     {
         strncpy(p_res->Name, p_Name, sizeof(p_res->Name)-1);
+    }
+
+    p_fixed = xml_attr_get(p_node, "fixed");
+    if (p_fixed)
+    {
+        p_res->fixedFlag = 1;
+        p_res->fixed = parse_Bool(p_fixed);
+    }
+
+    p_maxInstances = xml_attr_get(p_node, "maxInstances");
+    if (p_maxInstances)
+    {
+        p_res->maxInstancesFlag = 1;
+        p_res->maxInstances = atoi(p_maxInstances);
     }
 
     p_Parameters = xml_node_soap_get(p_node, "Parameters");
@@ -10498,20 +10514,29 @@ BOOL parse_tan_GetServiceCapabilities(XMLN * p_node, tan_GetServiceCapabilities_
 
 BOOL parse_tan_GetSupportedRules(XMLN * p_node, tan_GetSupportedRules_RES * p_res)
 {
+    XMLN * p_SupportedRules;
     XMLN * p_RuleContentSchemaLocation;
     XMLN * p_RuleDescription;
     const char * p_Limit;
 
-    p_Limit = xml_attr_get(p_node, "Limit");
+    /* 响应体结构:GetSupportedRulesResponse > SupportedRules > {Limit 属性, RuleContentSchemaLocation*, RuleDescription*}。
+     * xml_node_soap_get 是浅层查找(只看直接子节点),必须先下钻到 SupportedRules 这一层。 */
+    p_SupportedRules = xml_node_soap_get(p_node, "SupportedRules");
+    if (p_SupportedRules == NULL)
+    {
+        return TRUE;   /* 无 SupportedRules:回空,不算失败(与原语义一致) */
+    }
+
+    p_Limit = xml_attr_get(p_SupportedRules, "Limit");
     if (p_Limit)
     {
         p_res->SupportedRules.LimitFlag = 1;
         p_res->SupportedRules.Limit = atoi(p_Limit);
     }
-    
+
     p_res->SupportedRules.sizeRuleContentSchemaLocation = 0;
-    
-    p_RuleContentSchemaLocation = xml_node_soap_get(p_node, "RuleContentSchemaLocation");
+
+    p_RuleContentSchemaLocation = xml_node_soap_get(p_SupportedRules, "RuleContentSchemaLocation");
     while (p_RuleContentSchemaLocation && 
         p_RuleContentSchemaLocation->data && 
         soap_strcmp(p_RuleContentSchemaLocation->name, "RuleContentSchemaLocation") == 0)
@@ -10529,7 +10554,7 @@ BOOL parse_tan_GetSupportedRules(XMLN * p_node, tan_GetSupportedRules_RES * p_re
         p_RuleContentSchemaLocation = p_RuleContentSchemaLocation->next;
     }
 
-    p_RuleDescription = xml_node_soap_get(p_node, "RuleDescription");
+    p_RuleDescription = xml_node_soap_get(p_SupportedRules, "RuleDescription");
     while (p_RuleDescription && soap_strcmp(p_RuleDescription->name, "RuleDescription") == 0)
     {
         ConfigDescriptionList * p_cfg_desc = onvif_add_ConfigDescription(&p_res->SupportedRules.RuleDescription);

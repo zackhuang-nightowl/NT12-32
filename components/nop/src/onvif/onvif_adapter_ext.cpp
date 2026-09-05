@@ -8,6 +8,7 @@
  *        sources in third_party/onvif/ are used UNMODIFIED.
  */
 #include "nop_sdk/nop_onvif_ext.h"
+#include "nop_sdk/nop_log.h"
 #include <ctype.h>
 
 /* Vendored ONVIF client library headers (third_party/onvif). */
@@ -801,9 +802,15 @@ int nop_onvif_analytics_get_ai_caps(nop_onvif_device_t *device,
 {
     if (!device || !config_token || !out)
         return -1;
-    if (nop_onvif_device_cached_ai(device, config_token, out) == 0)
+    if (nop_onvif_device_cached_ai(device, config_token, out) == 0) {
+        NOP_LOGI("get_ai_caps: cfg='%s' CACHE HIT -> line=%d field=%d obj=%d motion=%d classes(obj='%s' line='%s' field='%s')",
+                 config_token, out->line_present, out->field_present,
+                 out->object_present, out->motion_present,
+                 out->object_classes, out->line_classes, out->field_classes);
         return 0;
+    }
     memset(out, 0, sizeof(*out));
+    NOP_LOGI("get_ai_caps: cfg='%s' cache MISS -> query camera", config_token);
 
     /* GetSupportedRules 为主：先登记支持的规则类型（含 ObjectDetection）。 */
     {
@@ -812,17 +819,27 @@ int nop_onvif_analytics_get_ai_caps(nop_onvif_device_t *device,
         memset(&req, 0, sizeof(req));
         memset(&res, 0, sizeof(res));
         strncpy(req.ConfigurationToken, config_token, sizeof(req.ConfigurationToken) - 1);
-        if (!onvif_tan_GetSupportedRules(&device->dev, &req, &res))
+        int gsr_ok = onvif_tan_GetSupportedRules(&device->dev, &req, &res);
+        NOP_LOGI("get_ai_caps: cfg='%s' GetSupportedRules ok=%d rules_head=%p",
+                 config_token, gsr_ok, (void *)res.SupportedRules.RuleDescription);
+        if (!gsr_ok)
             return -2;
+        int nrule = 0;
         for (ConfigDescriptionList *l = res.SupportedRules.RuleDescription; l; l = l->next) {
             onvif_ConfigDescription *d = &l->ConfigDescription;
             const char *nm = strip_ns(d->Name);
             int mi = d->maxInstancesFlag ? d->maxInstances : 0;
+            NOP_LOGI("get_ai_caps: cfg='%s' rule[%d] rawName='%s' strip='%s' maxInst=%d",
+                     config_token, nrule, d->Name ? d->Name : "(null)", nm ? nm : "(null)", mi);
+            nrule++;
             if (!strcmp(nm, "LineDetector"))        { out->line_present = 1;   out->line_max_instances = mi; }
             else if (!strcmp(nm, "FieldDetector"))  { out->field_present = 1;  out->field_max_instances = mi; }
             else if (!strcmp(nm, "ObjectDetection")){ out->object_present = 1; out->object_max_instances = mi; }
             else if (!strcmp(nm, "CellMotionDetector")) out->motion_present = 1;
         }
+        NOP_LOGI("get_ai_caps: cfg='%s' GetSupportedRules parsed %d rule(s) -> line=%d field=%d obj=%d motion=%d",
+                 config_token, nrule, out->line_present, out->field_present,
+                 out->object_present, out->motion_present);
         onvif_free_ConfigDescriptions(&res.SupportedRules.RuleDescription);
     }
 
@@ -833,12 +850,19 @@ int nop_onvif_analytics_get_ai_caps(nop_onvif_device_t *device,
         memset(&req, 0, sizeof(req));
         memset(&res, 0, sizeof(res));
         strncpy(req.ConfigurationToken, config_token, sizeof(req.ConfigurationToken) - 1);
-        if (onvif_tan_GetRuleOptions(&device->dev, &req, &res)) {
+        int gro_ok = onvif_tan_GetRuleOptions(&device->dev, &req, &res);
+        NOP_LOGI("get_ai_caps: cfg='%s' GetRuleOptions ok=%d opts_head=%p",
+                 config_token, gro_ok, (void *)res.RuleOptions);
+        if (gro_ok) {
             for (ConfigOptionsList *l = res.RuleOptions; l; l = l->next) {
                 onvif_ConfigOptions *o = &l->Options;
-                const char *rt  = strip_ns(o->RuleType);
+                /* 规则类型:优先 RuleType 属性;部分相机(如本例)把规则类型放在 Type 属性、
+                 * RuleType 留空(仅 LoiteringDetector 用 RuleType),此时回退到 Type。 */
+                const char *rt  = (o->RuleType[0]) ? strip_ns(o->RuleType) : strip_ns(o->Type);
                 const char *nm  = o->Name;
                 const char *any = o->any;
+                NOP_LOGI("get_ai_caps: cfg='%s' opt rt='%s' name='%s' any='%.80s'",
+                         config_token, rt ? rt : "(null)", nm ? nm : "(null)", any ? any : "(null)");
                 if (out->line_present && !strcmp(rt, "LineDetector")) {
                     if (!strcmp(nm, "Segments"))         out->line_max_points = parse_range_max(any);
                     else if (!strcmp(nm, "Direction"))   parse_directions(any, out->line_directions, sizeof(out->line_directions));
@@ -853,6 +877,9 @@ int nop_onvif_analytics_get_ai_caps(nop_onvif_device_t *device,
             onvif_free_ConfigOptions(&res.RuleOptions);
         }
     }
+    NOP_LOGI("get_ai_caps: cfg='%s' FINAL line=%d field=%d obj=%d motion=%d obj_classes='%s' -> caching",
+             config_token, out->line_present, out->field_present,
+             out->object_present, out->motion_present, out->object_classes);
     nop_onvif_device_ai_cache_put(device, config_token, out);
     return 0;
 }

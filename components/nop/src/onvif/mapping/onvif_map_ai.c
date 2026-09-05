@@ -43,14 +43,6 @@ static const char *nop_trigger_to_class(const char *nop)
     return NULL;
 }
 
-static const char *class_to_nop_trigger(const char *onvif)
-{
-    size_t i;
-    for (i = 0; i < sizeof(k_class_map) / sizeof(k_class_map[0]); i++)
-        if (!strcmp(k_class_map[i].onvif, onvif)) return k_class_map[i].nop;
-    return NULL;
-}
-
 /* ---- line direction: NOP AB/BA/BOTH <-> ONVIF LineDetector Left/Right/Any --
  * Per the NVR API doc: direction is defined the SAME as ONVIF. Looking from the
  * line's start point toward its end point, the LEFT side is A and the RIGHT side
@@ -109,15 +101,10 @@ static nop_json_t *csv_to_triggers(const char *csv)
     while (p && *p) {
         const char *comma = strchr(p, ',');
         int len = comma ? (int)(comma - p) : (int)strlen(p);
-        const char *nop;
         if (len > 0 && len < (int)sizeof(tok)) {
             memcpy(tok, p, len); tok[len] = '\0';
-            nop = class_to_nop_trigger(tok);
-            if (!nop) {   /* 未知 ONVIF 类 → 首字母小写透传(通用:反映设备真实类别,不丢) */
-                if (tok[0] >= 'A' && tok[0] <= 'Z') tok[0] = (char)(tok[0] - 'A' + 'a');
-                nop = tok;
-            }
-            if (nop && nop[0]) nop_json_arr_push_str(arr, nop);
+            /* 直接用相机解析出的类名(空格分隔),不做映射/改写 —— 原样反映设备类别。 */
+            if (tok[0]) nop_json_arr_push_str(arr, tok);
         }
         if (!comma) break;
         p = comma + 1;
@@ -350,16 +337,19 @@ nop_status_t onvif_map_getChannelSensorConfig(nop_onvif_map_backend_t *be, int c
      * GetSupportedRules/AnalyticsModules 无 CellMotion → 不列 motion;无 ObjectDetection → 不列
      * human/vehicle/animal/face。enable 再按 GetRules 的 ClassFilter 判定。
      * 无 Analytics 配置(相机不支持分析)→ 不报错,回空 sensors(与 getDeviceCapabilities 一致)。 */
+    /* 必须反映**真实设备状态**:无 analytics 配置 / GetSupportedRules 失败(超时或不支持)→
+     * 回 ONVIF_MAP_FAIL(路由转 501),绝不返回默认/空占位。enable 再按 GetRules 真实规则判定。 */
     have_supp = 0; nobj = 0; nmot = 0;
-    if (onvif_session_analytics_cfg(s, cfg, sizeof(cfg)) == 0) {
-        have_supp = (nop_onvif_analytics_get_supported(onvif_session_dev(s), &supp) == 0);
-        nobj = nop_onvif_analytics_get_rules(onvif_session_dev(s), cfg, "ObjectDetection",
-                                             obj_rules, AI_MAX_RULES);
-        nmot = nop_onvif_analytics_get_rules(onvif_session_dev(s), cfg, "CellMotion",
-                                             mot_rules, AI_MAX_RULES);
-        if (nobj < 0) nobj = 0;
-        if (nmot < 0) nmot = 0;
+    if (onvif_session_analytics_cfg(s, cfg, sizeof(cfg)) != 0) {
+        onvif_session_end(be); return ONVIF_MAP_FAIL;
     }
+    have_supp = (nop_onvif_analytics_get_supported(onvif_session_dev(s), &supp) == 0);
+    if (!have_supp) { onvif_session_end(be); return ONVIF_MAP_FAIL; }
+    nobj = nop_onvif_analytics_get_rules(onvif_session_dev(s), cfg, "ObjectDetection",
+                                         obj_rules, AI_MAX_RULES);
+    nmot = nop_onvif_analytics_get_rules(onvif_session_dev(s), cfg, "CellMotion",
+                                         mot_rules, AI_MAX_RULES);
+    if (nobj < 0 || nmot < 0) { onvif_session_end(be); return ONVIF_MAP_FAIL; }
     onvif_session_end(be);
 
     arr = nop_json_arr();
@@ -493,16 +483,15 @@ static void threshold_emit_from_rule(nop_json_t *arr, const nop_onvif_rule_t *ru
     p = rule->class_filter;
     while (p && *p) {
         const char *comma = strchr(p, ',');
-        const char *nopname;
         nop_json_t *e;
         int len = comma ? (int)(comma - p) : (int)strlen(p);
         if (len > 0 && len < (int)sizeof(tok)) {
             memcpy(tok, p, len);
             tok[len] = '\0';
-            nopname = class_to_nop_trigger(tok);
-            if (nopname) {
+            /* 直接用相机解析出的类名,不做映射/改写 —— 原样反映设备类别。 */
+            if (tok[0]) {
                 e = nop_json_obj();
-                nop_json_add_str(e, "sensor", nopname);
+                nop_json_add_str(e, "sensor", tok);
                 nop_json_add_int(e, "threshold", threshold);
                 nop_json_arr_push(arr, e);
             }
@@ -629,10 +618,9 @@ static void add_object_caps(nop_json_t *obj, const char *onvif_classes_csv)
         const char *comma = strchr(p, ',');
         int len = comma ? (int)(comma - p) : (int)strlen(p);
         if (len > 0 && len < (int)sizeof(tok)) {
-            const char *nopname;
             memcpy(tok, p, len); tok[len] = '\0';
-            nopname = class_to_nop_trigger(tok);
-            if (nopname) nop_json_add(obj, nopname, make_obj_caps());
+            /* 直接用相机 ClassFilter 里解析出的类名(空格分隔),不做映射/改写 —— 原样反映设备类别。 */
+            if (tok[0]) nop_json_add(obj, tok, make_obj_caps());
         }
         if (!comma) break;
         p = comma + 1;

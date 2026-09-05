@@ -28,6 +28,7 @@
 #include "http_cln.h"
 #include "rfc_md5.h"
 #include "base64.h"
+#include "nop_sdk/nop_log.h"   /* DIAG: dump raw SOAP for analytics caps */
 
 
 /***************************************************************************************/
@@ -241,6 +242,27 @@ RECONN:
     {
         p_dev->errCode = ONVIF_ERR_NullContent;
         goto FAILED;
+    }
+
+    /* DIAG: dump raw analytics SOAP response so we can see whether the camera
+     * actually returns rules for GetSupportedRules/GetRuleOptions, or the parser
+     * drops them. Chunked at 440 chars (nop_log line buffer is 512). */
+    if (act == etanGetSupportedRules || act == etanGetRuleOptions)
+    {
+        int total = p_http->rx_msg->ctt_len;
+        int off;
+        NOP_LOGI("onvif_rawxml: act=%d http=%d ctt_len=%d BEGIN",
+                 (int)act, p_http->rx_msg->msg_sub_type, total);
+        for (off = 0; off < total && off < 8000; off += 440)
+        {
+            char tmp[441];
+            int n = total - off;
+            if (n > 440) n = 440;
+            memcpy(tmp, rx_xml + off, n);
+            tmp[n] = '\0';
+            NOP_LOGI("onvif_rawxml[%d]: %s", off, tmp);
+        }
+        NOP_LOGI("onvif_rawxml: END");
     }
 
     p_node = xxx_hxml_parse(rx_xml, p_http->rx_msg->ctt_len);
